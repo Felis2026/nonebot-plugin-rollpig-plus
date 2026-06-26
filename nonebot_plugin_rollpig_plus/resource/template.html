@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8" />
+<style>
+body {
+    margin: 0;
+    width: 800px;
+    height: 800px;
+    border-radius: 40px;
+    background: #ffffff;
+    font-family: "Microsoft YaHei", sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.container {
+    width: 90%;
+    text-align: center;
+}
+
+.avatar {
+    width: 240px;
+    height: 240px;
+    object-fit: cover;
+}
+
+.name {
+    margin-top: 20px;
+    font-size: 48px;
+    font-weight: bold;
+}
+
+.desc {
+    margin-top: 20px;
+    font-size: 30px;
+    color: #555;
+}
+
+.analysis {
+    margin-top: 30px;
+    font-size: 28px;
+    color: #333;
+    line-height: 1.5;
+}
+</style>
+</head>
+<body>
+    <div class="container">
+
+        {% if avatar %}
+        <img class="avatar" src="{{ avatar }}" />
+        {% endif %}
+    
+        <div class="name">{{ name }}</div>
+        <div class="desc">{{ desc }}</div>
+        <div class="analysis">{{ analysis }}</div>
+    </div>    
+</body>
+</html>

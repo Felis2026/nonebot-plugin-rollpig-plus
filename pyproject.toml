@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "nonebot-plugin-rollpig-plus"
+version = "0.7.3"  # v0.7.3 release
+description = "今天是什么小猪（今日小猪）Plus：基于原版拓展烤群友、图鉴成长等玩法"
+authors = ["Bear_lele <lele2587342146@gmail.com>","Felis <3397152010@qq.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "nonebot_plugin_rollpig_plus" }]
+homepage = "https://github.com/Felis2026/nonebot-plugin-rollpig-plus"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+nonebot2 = ">=2.4.0"
+nonebot-adapter-onebot = ">=2.4.0"
+nonebot-plugin-htmlrender = ">=0.6.0"
+nonebot-plugin-localstore = ">=0.7.4"
+pydantic = ">=1.10.0,<3.0.0"
+httpx = ">=0.20.0"
+Pillow = ">=12.2.0"
+python-dotenv = ">=1.2.2,<2.0.0"
+nonebot-plugin-apscheduler = ">=0.5.0"
+openai = ">=1.0.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.nonebot.adapters]
+nonebot-adapter-onebot = [
+    { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }
+]
+"@local" = []
