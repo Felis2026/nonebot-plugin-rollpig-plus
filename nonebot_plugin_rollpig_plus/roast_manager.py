@@ -49,6 +49,9 @@ class RoastManager:
     def __init__(self):
         self.file = ROAST_LIB_FILE
         self.library: Dict[str, Dict[str, List[str]]] = self._load()
+        # AI 文案可能由多个群同时触发生成；保存文案库时必须串行化，
+        # 否则未来改成线程写或多路保存时容易出现覆盖/半写风险。
+        self._lock = asyncio.Lock()
         
         self.client = None
         self.ai_timeout = _clamp_number(plugin_config.rollpig_ai_timeout, 20.0, 1.0, 60.0)
@@ -65,6 +68,9 @@ class RoastManager:
                 base_url=plugin_config.rollpig_deepseek_base,
             )
 
+    # ================================ 文案库持久化 ================================ #
+    # roast_library.json 是 AI 生成文案的可增长缓存。这里参考 data_manager.py：
+    # 写入动作放到线程，避免阻塞 NoneBot 事件循环；通过临时文件 replace 保证落盘原子性。
     def _load(self) -> dict:
         if not self.file.exists(): return {}
         try:
@@ -73,15 +79,19 @@ class RoastManager:
             logger.warning(f"roast_library.json 读取失败，已使用空文案库兜底: {e}")
             return {}
 
-    def _save(self):
-        self.file.write_text(json.dumps(self.library, ensure_ascii=False, indent=2), encoding="utf-8")
+    def _sync_save(self):
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.file.with_name(f"{self.file.name}.{id(self)}.tmp")
+        tmp.write_text(json.dumps(self.library, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.file)
 
-    def _save_new_text(self, origin_id: str, target_id: str, text: str):
-        if origin_id not in self.library: self.library[origin_id] = {}
-        if target_id not in self.library[origin_id]: self.library[origin_id][target_id] = []
-        if text not in self.library[origin_id][target_id]:
-            self.library[origin_id][target_id].append(text)
-            self._save()
+    async def _save_new_text(self, origin_id: str, target_id: str, text: str):
+        async with self._lock:
+            if origin_id not in self.library: self.library[origin_id] = {}
+            if target_id not in self.library[origin_id]: self.library[origin_id][target_id] = []
+            if text not in self.library[origin_id][target_id]:
+                self.library[origin_id][target_id].append(text)
+                await asyncio.to_thread(self._sync_save)
 
     def _format_text(self, text: str, origin: str, food: str, killer: str = None, victim: str = None) -> str:
         res = text.replace("{origin}", origin).replace("{food}", food)
@@ -122,7 +132,7 @@ class RoastManager:
             try:
                 template_text = await self._call_ai(origin_pig, target_food, is_pvp=bool(operator_name))
                 if template_text:
-                    self._save_new_text(o_id, lookup_t_id, template_text)
+                    await self._save_new_text(o_id, lookup_t_id, template_text)
             except Exception as e:
                 logger.error(f"AI 生成失败: {e}")
 

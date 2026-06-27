@@ -120,12 +120,16 @@ PIGHUB_API_URLS = (
     "https://pighub.top/api/all-images",
 )
 PIGHUB_TTL_SECONDS = 6 * 3600  # PigHub 图库缓存有效期（6小时）
+PIGHUB_REFRESH_RETRY_SECONDS = 60  # PigHub 刷新失败后短暂冷却，避免外部接口故障时被并发打爆
 MAX_EXPERT_LEVEL = 5
 DUPLICATE_PITY_WEIGHT_STEP = 0.5
 DUPLICATE_PITY_WEIGHT_CAP = 4.0
 
 pighub_images: list = []
 pighub_last_loaded: float = 0.0
+pighub_last_refresh_attempt: float = 0.0
+pighub_refresh_lock = asyncio.Lock()
+pighub_refresh_task: Optional[asyncio.Task] = None
 
 # ================= 资源加载 =================
 
@@ -537,17 +541,15 @@ def parse_pighub_images_payload(data: dict, api_url: str) -> list[dict]:
     return valid
 
 
-async def ensure_pighub_images_loaded() -> bool:
-    """
-    懒加载 PigHub 图库，带 TTL（默认6小时）自动刷新。
-    刷新失败时回退旧缓存，避免因网络抖动打挂功能。
-    """
-    global pighub_images, pighub_last_loaded
-    now = time.time()
+def is_pighub_cache_fresh(now: float) -> bool:
+    return bool(pighub_images and (now - pighub_last_loaded) < PIGHUB_TTL_SECONDS)
 
-    # 缓存有效：直接返回
-    if pighub_images and (now - pighub_last_loaded) < PIGHUB_TTL_SECONDS:
-        return True
+
+async def refresh_pighub_images() -> bool:
+    """真实刷新 PigHub 图库；调用方负责复用 task，避免并发缓存击穿。"""
+    global pighub_images, pighub_last_loaded, pighub_last_refresh_attempt
+    now = time.time()
+    pighub_last_refresh_attempt = now
 
     last_error: Exception | None = None
     try:
@@ -557,7 +559,7 @@ async def ensure_pighub_images_loaded() -> bool:
                     resp = await client.get(api_url)
                     resp.raise_for_status()
                     pighub_images = parse_pighub_images_payload(resp.json(), api_url)
-                    pighub_last_loaded = now
+                    pighub_last_loaded = time.time()
                     return True
                 except Exception as error:
                     # PigHub 当前新旧接口有切换历史；单个接口失败时继续尝试下一个。
@@ -573,6 +575,39 @@ async def ensure_pighub_images_loaded() -> bool:
             return True
         logger.warning(f"PigHub 连接失败: {last_error}")
     return False
+
+
+async def ensure_pighub_images_loaded() -> bool:
+    """
+    懒加载 PigHub 图库，带 TTL（默认6小时）自动刷新。
+    刷新失败时回退旧缓存；旧缓存存在时用后台刷新，避免 PigHub 抖动拖慢用户命令。
+    """
+    global pighub_refresh_task
+    now = time.time()
+
+    # 缓存有效：直接返回，不进入锁。
+    if is_pighub_cache_fresh(now):
+        return True
+
+    async with pighub_refresh_lock:
+        now = time.time()
+        if is_pighub_cache_fresh(now):
+            return True
+
+        active_task = pighub_refresh_task if pighub_refresh_task and not pighub_refresh_task.done() else None
+        in_retry_cooldown = (now - pighub_last_refresh_attempt) < PIGHUB_REFRESH_RETRY_SECONDS
+        if active_task is None and in_retry_cooldown:
+            return bool(pighub_images)
+
+        if active_task is None:
+            active_task = asyncio.create_task(refresh_pighub_images())
+            pighub_refresh_task = active_task
+
+        # 有旧缓存时先返回，后台刷新完成后自然替换全局缓存；空缓存只能等待首次加载。
+        if pighub_images:
+            return True
+
+    return await active_task
 
 
 def build_pighub_image_url(pig_item: dict) -> Optional[str]:
