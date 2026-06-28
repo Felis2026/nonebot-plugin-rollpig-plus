@@ -1,5 +1,19 @@
 # 更新日志
 
+## v0.7.4
+
+### 稳定性修复
+
+- PigHub 图库刷新增加 single-flight、失败冷却与旧缓存回退，避免并发缓存击穿。
+- `roast_library.json` 写入改为异步锁、线程落盘与临时文件原子替换，降低事件循环阻塞和 JSON 损坏风险。
+- 启动期资源同步后台任务纳入 shutdown 生命周期，避免关闭期仍在改动资源缓存目录。
+
+### 并发与数据边界
+
+- 图鉴缓存增加同 key single-flight，避免多个相同请求重复占用 Chromium 渲染资源。
+- 本地数据读取接口返回副本，避免命令层误改内部 list / dict 后绕过锁与原子保存。
+- 旧烤群友 `check_roast_usage()` / `update_roast_usage()` 标记为 deprecated，后续新流程统一使用原子扣减接口。
+
 ## v0.7.3
 
 ### 独立发布准备

@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.x-black" alt="NoneBot2">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
-    <img src="https://img.shields.io/badge/Version-0.7.3-ff69b4" alt="Version 0.7.3">
+    <img src="https://img.shields.io/badge/Version-0.7.4-ff69b4" alt="Version 0.7.4">
   </p>
 </div>
 
@@ -52,7 +52,7 @@ pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git
 或固定到指定版本：
 
 ```bash
-pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git@v0.7.3"
+pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git@v0.7.4"
 ```
 
 加载插件时使用新的模块名：
@@ -262,6 +262,12 @@ nonebot_plugin_rollpig_plus/
 - PigHub（搜猪功能支持）：[pighub.top](https://pighub.top/)
 
 ## 📋 最近更新
+
+### v0.7.4
+
+- 加强 PigHub 图库刷新缓存，避免并发触发时重复请求外部接口。
+- 加固 AI 烤猪文案库落盘，降低事件循环阻塞与 JSON 损坏风险。
+- 收束启动资源同步后台任务，并优化图鉴并发生成与本地数据读取边界。
 
 ### v0.7.3
 

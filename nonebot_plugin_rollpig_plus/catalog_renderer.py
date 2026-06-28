@@ -54,6 +54,8 @@ class _PagePoolRenderResult:
 # ================================ 页面池与缓存状态 ================================ #
 
 _catalog_cache: dict[str, _CachedCatalogImage] = {}
+_catalog_cache_lock = asyncio.Lock()
+_catalog_render_tasks: dict[str, asyncio.Task[bytes]] = {}
 _page_pools: dict[tuple[int, float], "_CatalogPagePool"] = {}
 
 
@@ -220,6 +222,23 @@ def _prune_catalog_cache(*, ttl: int, now: float) -> None:
         if _catalog_cache_bytes() <= CATALOG_CACHE_MAX_BYTES:
             break
         _catalog_cache.pop(key, None)
+
+
+def _get_catalog_cache_locked(cache_key: str, *, ttl: int, now: float) -> bytes | None:
+    """读取图鉴缓存；调用方必须持有 _catalog_cache_lock，避免并发淘汰时字典变化。"""
+    _prune_catalog_cache(ttl=ttl, now=now)
+    cached = _catalog_cache.get(cache_key)
+    if cached and ttl > 0 and now - cached.created_at <= ttl:
+        return cached.payload
+    return None
+
+
+def _store_catalog_cache_locked(cache_key: str, payload: bytes, *, ttl: int, now: float) -> None:
+    """写入图鉴缓存；调用方必须持有 _catalog_cache_lock，并在写入后立即按上限淘汰。"""
+    if ttl <= 0:
+        return
+    _catalog_cache[cache_key] = _CachedCatalogImage(created_at=now, payload=payload)
+    _prune_catalog_cache(ttl=ttl, now=now)
 
 
 async def _wait_for_catalog_assets(page: Any, *, timeout_ms: int) -> None:
@@ -477,32 +496,21 @@ def _resize_to_catalog_size(raw_image: bytes, *, output_format: str = "PNG") -> 
         return output.getvalue()
 
 
-async def render_catalog_image(
+async def _render_catalog_image_uncached(
     *,
     user_name: str,
-    snapshot: CatalogSnapshot,
-    page: int = 1,
+    page: int,
+    payload: dict[str, Any],
+    cache_key: str,
+    ttl: int,
+    output_format: str,
+    started_at: float,
+    payload_ready_at: float,
 ) -> bytes:
-    """渲染图片版小猪图鉴；只读取快照，不修改抽猪状态或 copies。"""
+    """执行一次真实图鉴渲染；外层负责同 key 合流，这里只管渲染与写缓存。"""
     from nonebot_plugin_htmlrender import template_to_html
 
     config = get_plugin_config(Config)
-    started_at = time.perf_counter()
-    payload = _build_template_payload(user_name=user_name, snapshot=snapshot, page=page)
-    payload_ready_at = time.perf_counter()
-    output_format = _normalize_output_format(config.rollpig_catalog_output_format)
-    cache_key = f"{output_format}:{_build_cache_key(payload, snapshot, page)}"
-    ttl = max(0, int(config.rollpig_catalog_cache_seconds or 0))
-    now = time.time()
-    _prune_catalog_cache(ttl=ttl, now=now)
-    cached = _catalog_cache.get(cache_key)
-    if cached and ttl > 0 and now - cached.created_at <= ttl:
-        log_perf(
-            f"rollpig catalog cache hit: user={user_name} page={page} "
-            f"payload={payload_ready_at - started_at:.2f}s bytes={len(cached.payload)}"
-        )
-        return cached.payload
-
     html_started_at = time.perf_counter()
     html = await template_to_html(str(RES_DIR), CATALOG_TEMPLATE, **payload)
     html_ready_at = time.perf_counter()
@@ -523,7 +531,66 @@ async def render_catalog_image(
         f"postprocess={finished_at - postprocess_started_at:.2f}s "
         f"total={finished_at - started_at:.2f}s bytes={len(result)}"
     )
-    if ttl > 0:
-        _catalog_cache[cache_key] = _CachedCatalogImage(created_at=time.time(), payload=result)
-        _prune_catalog_cache(ttl=ttl, now=time.time())
+    async with _catalog_cache_lock:
+        _store_catalog_cache_locked(cache_key, result, ttl=ttl, now=time.time())
     return result
+
+
+async def render_catalog_image(
+    *,
+    user_name: str,
+    snapshot: CatalogSnapshot,
+    page: int = 1,
+) -> bytes:
+    """渲染图片版小猪图鉴；只读取快照，不修改抽猪状态或 copies。"""
+    started_at = time.perf_counter()
+    payload = _build_template_payload(user_name=user_name, snapshot=snapshot, page=page)
+    payload_ready_at = time.perf_counter()
+    config = get_plugin_config(Config)
+    output_format = _normalize_output_format(config.rollpig_catalog_output_format)
+    cache_key = f"{output_format}:{_build_cache_key(payload, snapshot, page)}"
+    ttl = max(0, int(config.rollpig_catalog_cache_seconds or 0))
+
+    # ================================ 图鉴同键合流 ================================ #
+    # 多群同时请求同一页时，只让第一个请求真正渲染；其余请求等待同一个 task。
+    # 这不是数据一致性要求，而是为了避免缓存击穿时把 Chromium 重复打满。
+    render_owner = False
+    async with _catalog_cache_lock:
+        cached_payload = _get_catalog_cache_locked(cache_key, ttl=ttl, now=time.time())
+        if cached_payload is not None:
+            log_perf(
+                f"rollpig catalog cache hit: user={user_name} page={page} "
+                f"payload={payload_ready_at - started_at:.2f}s bytes={len(cached_payload)}"
+            )
+            return cached_payload
+
+        render_task = _catalog_render_tasks.get(cache_key)
+        if render_task is None or render_task.done():
+            render_task = asyncio.create_task(
+                _render_catalog_image_uncached(
+                    user_name=user_name,
+                    page=page,
+                    payload=payload,
+                    cache_key=cache_key,
+                    ttl=ttl,
+                    output_format=output_format,
+                    started_at=started_at,
+                    payload_ready_at=payload_ready_at,
+                )
+            )
+            _catalog_render_tasks[cache_key] = render_task
+            render_owner = True
+
+    if not render_owner:
+        log_perf(
+            f"rollpig catalog render coalesced: user={user_name} page={page} "
+            f"payload={payload_ready_at - started_at:.2f}s"
+        )
+
+    try:
+        return await render_task
+    finally:
+        if render_owner:
+            async with _catalog_cache_lock:
+                if _catalog_render_tasks.get(cache_key) is render_task:
+                    _catalog_render_tasks.pop(cache_key, None)

@@ -2,6 +2,7 @@ import asyncio
 import random
 import datetime
 import time
+from contextlib import suppress
 from functools import wraps
 import httpx
 from pathlib import Path
@@ -102,10 +103,19 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
 )
 
+background_resource_sync_tasks: set[asyncio.Task[None]] = set()
+
 
 @get_driver().on_shutdown
 async def _shutdown_rollpig_runtime() -> None:
     """释放图鉴页面池与存储后端连接，避免长期运行或重载后残留浏览器/HTTP 资源。"""
+    # 启动期资源同步是后台任务；退出时必须先收束，避免同步仍在改缓存目录时关闭运行时。
+    for task in list(background_resource_sync_tasks):
+        task.cancel()
+    for task in list(background_resource_sync_tasks):
+        with suppress(asyncio.CancelledError):
+            await task
+    background_resource_sync_tasks.clear()
     await shutdown_catalog_renderer()
     await store.close()
 
@@ -1620,13 +1630,20 @@ async def run_background_resource_sync(source: str) -> None:
         logger.warning(f"[小猪资源同步] {source} 失败，继续使用当前资源: {error}")
 
 
+def schedule_background_resource_sync(source: str) -> None:
+    """注册后台资源同步任务；统一追踪 task，shutdown 时可取消并等待。"""
+    task: asyncio.Task[None] = asyncio.create_task(run_background_resource_sync(source))
+    background_resource_sync_tasks.add(task)
+    task.add_done_callback(background_resource_sync_tasks.discard)
+
+
 @get_driver().on_startup
 async def startup_resource_sync():
     """启动后异步检查一次资源包；不阻塞 NoneBot 启动和连接。"""
     config = get_plugin_config(Config)
     if not config.rollpig_resource_sync_enabled:
         return
-    asyncio.create_task(run_background_resource_sync("startup"))
+    schedule_background_resource_sync("startup")
 
 
 @scheduler.scheduled_job("interval", hours=get_resource_sync_interval_hours(), id="rollpig_resource_sync", max_instances=1)

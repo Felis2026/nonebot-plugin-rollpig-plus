@@ -480,7 +480,8 @@ class PigDataManager:
         return self.data["history"].get(date_str, {}).get(user_id)
 
     def get_user_collection(self, user_id: str) -> List[str]:
-        return self.data.get("collection", {}).get(user_id, [])
+        # 返回副本，避免命令层无意修改内部 list 后绕过锁与原子保存。
+        return list(self.data.get("collection", {}).get(user_id, []))
 
     async def clean_old_history(self, days_to_keep: int = 14):
         """清理超过 days_to_keep 天的历史记录（不影响图鉴数据）。"""
@@ -510,7 +511,8 @@ class PigDataManager:
 
     def check_roast_usage(self, user_id: str) -> tuple[bool, str]:
         """
-        检查普通烤群友是否还有可用充能。
+        Deprecated: 仅保留给旧调用兜底；新流程必须使用 consume_roast_usage()。
+        检查与扣减分离会重新引入 TOCTOU 竞态，因此不要在新代码中调用本函数。
         返回: (是否可用, 若不可用时的提示信息)
         """
         usage = self.data.setdefault("usage", {})
@@ -588,7 +590,7 @@ class PigDataManager:
             )
 
     async def update_roast_usage(self, user_id: str):
-        """记录本次使用时间戳。"""
+        """Deprecated: 仅保留给旧调用兜底；新流程必须使用 consume_roast_usage() 原子扣减。"""
         async with self._lock:
             usage = self.data.setdefault("usage", {})
             now = time.time()
@@ -654,8 +656,8 @@ class PigDataManager:
             date_str = rollpig_date_str()
         events = self.data.get("daily_events", {}).get(date_str, [])
         if not group_id:
-            return events
-        return [e for e in events if e.get("group_id") == group_id]
+            return [dict(e) if isinstance(e, dict) else e for e in events]
+        return [dict(e) if isinstance(e, dict) else e for e in events if e.get("group_id") == group_id]
 
     def get_recent_rolls(self, user_id: str, days: int = 14) -> dict[str, str]:
         """返回最近若干天的抽猪记录；图鉴只读使用，不会修改 copies。"""
@@ -706,7 +708,7 @@ class PigDataManager:
         """获取指定群在某天登记过的今日形态。"""
         if not date_str:
             date_str = rollpig_date_str()
-        return self.data.get("group_rolls", {}).get(date_str, {}).get(group_id, {})
+        return dict(self.data.get("group_rolls", {}).get(date_str, {}).get(group_id, {}))
 
     def get_active_group_ids(self, date_str: Optional[str] = None) -> set[str]:
         """获取指定日期内有抽猪或烧烤活动的群号集合。"""
