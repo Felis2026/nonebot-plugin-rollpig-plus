@@ -11,8 +11,8 @@ from .config import Config
 
 
 # ================================ Chromium 渲染总预算 ================================ #
-# 图鉴有自己的页面池，但普通卡片仍会调用 htmlrender 创建页面。这里用同一把
-# semaphore 收住“所有 HTML/Chromium 渲染”的总并发，避免多群同时触发时把浏览器打满。
+# 图鉴有自己的页面池；普通小猪卡片已迁移到 Pillow，不再占用 Chromium。
+# 这里保留旧配置键作为兼容性的外围预算，避免升级后用户旧配置直接失效。
 
 _html_render_semaphore: asyncio.Semaphore | None = None
 _html_render_limit: int | None = None

@@ -6,6 +6,9 @@ authors = ["Bear_lele <lele2587342146@gmail.com>","Felis <3397152010@qq.com>"]
 license = "MIT"
 readme = "README.md"
 packages = [{ include = "nonebot_plugin_rollpig_plus" }]
+include = [
+    { path = "nonebot_plugin_rollpig_plus/resource/**", format = ["sdist", "wheel"] },
+]
 homepage = "https://github.com/Felis2026/nonebot-plugin-rollpig-plus"
 
 [tool.poetry.dependencies]
@@ -17,6 +20,7 @@ nonebot-plugin-localstore = ">=0.7.4"
 pydantic = ">=1.10.0,<3.0.0"
 httpx = ">=0.20.0"
 Pillow = ">=12.2.0"
+emoji = ">=2.0.0,<3.0.0"
 python-dotenv = ">=1.2.2,<2.0.0"
 nonebot-plugin-apscheduler = ">=0.5.0"
 openai = ">=1.0.0"

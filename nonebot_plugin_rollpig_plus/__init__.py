@@ -22,14 +22,13 @@ require("nonebot_plugin_htmlrender")
 require("nonebot_plugin_localstore")
 require("nonebot_plugin_apscheduler")
 
-from nonebot_plugin_htmlrender import template_to_pic
 from nonebot_plugin_apscheduler import scheduler
 
 # 本地模块（在 require() 之后 import）
 from .config import Config
+from .card_renderer import render_pig_card_image
 from .catalog_renderer import render_catalog_image, shutdown_catalog_renderer
 from .perf_logging import log_perf
-from .render_budget import html_render_budget
 from .roast_manager import roast_manager
 from .resource_manager import pig_resource_manager
 from .runtime import (
@@ -652,45 +651,35 @@ async def send_rendered_pig(matcher, event, pig_data: dict, extra_text: str = ""
     started_at = time.perf_counter()
     pig_id = pig_data.get("id", "")
     avatar_file = find_image_file(pig_id)
-    avatar_uri = avatar_file.as_uri() if avatar_file else ""
     name = pig_data.get("name", "未知小猪")
-    desc = pig_data.get("description", "")
-    analysis = pig_data.get("analysis", "你今天是只神秘小猪。")
     payload_ready_at = time.perf_counter()
 
-    pic = None
     try:
         render_started_at = time.perf_counter()
-        async with html_render_budget("pig-card"):
-            pic = await template_to_pic(
-                template_path=RES_DIR,
-                template_name="template.html",
-                templates={
-                    "avatar": avatar_uri,
-                    "name": name,
-                    "desc": desc,
-                    "analysis": analysis,
-                },
-            )
+        render_result = await render_pig_card_image(pig_data, avatar_file)
         render_finished_at = time.perf_counter()
     except Exception as e:
-        logger.error(f"图片渲染失败: pig_id={pig_id}, error={e}")
+        logger.error(f"图片渲染失败: pig_id={pig_id}, renderer=pillow, error={e}")
         await matcher.finish("图片生成失败。")
         return
 
     msg = MessageSegment.reply(event.message_id)
     if extra_text:
         msg += extra_text + "\n"
-    msg += MessageSegment.image(pic)
+    msg += MessageSegment.image(render_result.data)
     ready_to_send_at = time.perf_counter()
     log_perf(
-        f"rollpig card rendered: pig_id={pig_id} name={name} "
+        f"rollpig card rendered: renderer={render_result.renderer} "
+        f"format={render_result.image_format} pig_id={pig_id} name={name} "
         f"image_found={avatar_file is not None} "
         f"payload={payload_ready_at - started_at:.2f}s "
-        f"screenshot={render_finished_at - render_started_at:.2f}s "
+        f"render={render_finished_at - render_started_at:.2f}s "
         f"message={ready_to_send_at - render_finished_at:.2f}s "
         f"total_before_send={ready_to_send_at - started_at:.2f}s "
-        f"bytes={len(pic)} extra={bool(extra_text)}"
+        f"bytes={len(render_result.data)} "
+        f"analysis_font={render_result.analysis_font_size} "
+        f"analysis_lines={render_result.analysis_lines} "
+        f"emoji={render_result.emoji_enabled} extra={bool(extra_text)}"
     )
     await matcher.finish(msg)
 

@@ -61,7 +61,7 @@ pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git
 nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 ```
 
-如果首次使用图片渲染功能时 Chromium 环境缺失，可按 `nonebot-plugin-htmlrender` / Playwright 的提示安装浏览器运行时：
+如果首次使用图片版图鉴时 Chromium 环境缺失，可按 `nonebot-plugin-htmlrender` / Playwright 的提示安装浏览器运行时：
 
 ```bash
 playwright install chromium
@@ -158,8 +158,7 @@ playwright install chromium
     "rollpig_catalog_cache_seconds": 300,      // 同一状态指纹的图鉴结果缓存秒数，不会额外刷新 copies
     "rollpig_catalog_output_format": "png",   // 输出格式；默认 PNG
     "rollpig_catalog_render_timeout": 8.0,     // 单张图鉴渲染超时时间（秒）
-    "rollpig_catalog_scale_factor": 2.0,       // 2x 渲染，提升文字和徽章清晰度
-    "rollpig_html_render_concurrency": 2       // 所有 HTML/Chromium 生图的总并发预算
+    "rollpig_catalog_scale_factor": 2.0        // 2x 渲染，提升文字和徽章清晰度
   }
 }
 ```
@@ -218,6 +217,7 @@ nonebot_plugin_rollpig_plus/resource/
 - `pig.json` 维护基础小猪信息。
 - `resource/image/<id>.png` 为对应图片，文件名需要和 `id` 一致。
 - `pig_rules.json` 维护熟食、特殊形态等规则，避免污染上游兼容的 `pig.json` 基础格式。
+- 普通卡片内置 `NotoColorEmoji.ttf`，用于在 Pillow 渲染时显示彩色 Emoji。
 - 当前稳定支持 `png` 图片；如果未来支持 GIF，需要同步调整渲染和输出链路。
 - 公有云端资源会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/active/`。
 - 私有 overlay 会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/private_active/`。
@@ -293,3 +293,5 @@ nonebot_plugin_rollpig_plus/
 插件代码使用 [MIT License](LICENSE)。
 
 本项目最初基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig) 修改，感谢原作者提供的创意与基础实现。内置初始文案和部分猪图继承自原作；后续扩展资源由维护者创作、整理或来自公开用户投稿渠道。资源包的详细来源、使用边界与贡献说明请以 [rollpig-resources](https://github.com/Felis2026/rollpig-resources) 为准。
+
+内置 Emoji 字体来自 [Google Noto Emoji](https://github.com/googlefonts/noto-emoji)，授权文本见 `nonebot_plugin_rollpig_plus/resource/fonts/NotoEmoji-LICENSE.txt`。

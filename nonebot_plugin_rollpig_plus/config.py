@@ -99,7 +99,7 @@ class Config(BaseModel):
     rollpig_catalog_output_format: str = "png"
     rollpig_catalog_render_timeout: float = 8.0
     rollpig_catalog_scale_factor: float = 2.0
-    rollpig_html_render_concurrency: int = 2  # 普通卡片/图鉴共享的 Chromium 总并发预算
+    rollpig_html_render_concurrency: int = 2  # 兼容旧配置；当前仅作为图鉴 HTML 截图的外围预算
 
     # --- 代理设置 (可选，如果服务器在国内连不上API) ---
     rollpig_proxy: Optional[str] = None

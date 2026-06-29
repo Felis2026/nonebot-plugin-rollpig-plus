@@ -24,7 +24,6 @@
     "rollpig_catalog_cache_seconds": 300,
     "rollpig_catalog_output_format": "png",
     "rollpig_catalog_render_timeout": 8.0,
-    "rollpig_catalog_scale_factor": 2.0,
-    "rollpig_html_render_concurrency": 2
+    "rollpig_catalog_scale_factor": 2.0
   }
 }
