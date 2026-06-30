@@ -152,6 +152,9 @@ playwright install chromium
     // ================================ 定时日报 ================================ //
     "rollpig_daily_summary_enabled": true,     // 是否启用每日总结定时任务；关闭后不推日报，也不刷新日报派生的次日保护
 
+    // ================================ 普通小猪卡片 ================================ //
+    "rollpig_card_font_path": null,            // Pillow 卡片字体路径；不填时标题和正文都使用内置 Source Han Sans SC Medium
+
     // ================================ 图片版小猪图鉴 ================================ //
     "rollpig_catalog_enabled": true,           // 是否启用“小猪图鉴”图片命令；不替代“我的猪圈”
     "rollpig_catalog_render_concurrency": 2,   // 常驻 Playwright 页面池上限；小内存机器建议 1~2
@@ -188,6 +191,7 @@ ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json
 - `ROLLPIG_CLOUD_STRICT_MODE=false` 只允许读接口使用安全兜底；关键写接口不会偷偷回退本地，避免多 Bot 数据脑裂。
 - 私有资源 overlay 优先级高于公有云端资源和插件内置资源；公开版内置默认关闭，需要时填写 `rollpig_private_resource_manifest_url`，不需要时设为 `""`。
 - `rollpig_daily_summary_enabled=false` 会跳过每日总结定时任务；该任务同时负责日报推送和日报派生的次日保护名单刷新。
+- 普通卡片由 Pillow 渲染，默认使用内置 Source Han Sans SC Medium；如需微软雅黑、韩文覆盖更好的字体或其它字形风格，可自行提供字体并配置 `rollpig_card_font_path`。
 - 超级用户可发送 `同步小猪资源` / `刷新小猪图鉴` 手动触发资源同步。
 - 图片版图鉴每页固定展示 38 只小猪，不提供配置项，避免和当前底图安全区错位。
 
@@ -217,7 +221,7 @@ nonebot_plugin_rollpig_plus/resource/
 - `pig.json` 维护基础小猪信息。
 - `resource/image/<id>.png` 为对应图片，文件名需要和 `id` 一致。
 - `pig_rules.json` 维护熟食、特殊形态等规则，避免污染上游兼容的 `pig.json` 基础格式。
-- 普通卡片内置 `NotoColorEmoji.ttf`，用于在 Pillow 渲染时显示彩色 Emoji。
+- 普通卡片使用内置 Source Han Sans SC Medium 渲染 CJK 文本，并使用 `pilmoji` 与内置 `Google Noto Emoji` ZIP 离线渲染彩色 Emoji，不依赖运行时联网。
 - 当前稳定支持 `png` 图片；如果未来支持 GIF，需要同步调整渲染和输出链路。
 - 公有云端资源会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/active/`。
 - 私有 overlay 会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/private_active/`。
@@ -230,6 +234,7 @@ nonebot_plugin_rollpig_plus/
 ├─ catalog_renderer.py      # 图片版小猪图鉴渲染
 ├─ config.py                # 配置模型与 JSON 配置合并
 ├─ data_manager.py          # 本地 JSON 存储实现
+├─ emoji_source.py          # 本地 Noto Emoji ZIP 贴图源
 ├─ perf_logging.py          # 性能日志辅助
 ├─ render_budget.py         # HTML/Chromium 渲染并发预算
 ├─ resource_manager.py      # 云端小猪资源同步与本地缓存加载
@@ -250,6 +255,10 @@ nonebot_plugin_rollpig_plus/
    ├─ catalog_base.png
    ├─ catalog_template.html
    ├─ catalog_anchor.html
+   ├─ emoji/
+   │  └─ google-emoji.zip
+   ├─ fonts/
+   │  └─ SourceHanSansSC-Medium.otf
    └─ image/
       └─ pig.png
 ```
@@ -294,4 +303,4 @@ nonebot_plugin_rollpig_plus/
 
 本项目最初基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig) 修改，感谢原作者提供的创意与基础实现。内置初始文案和部分猪图继承自原作；后续扩展资源由维护者创作、整理或来自公开用户投稿渠道。资源包的详细来源、使用边界与贡献说明请以 [rollpig-resources](https://github.com/Felis2026/rollpig-resources) 为准。
 
-内置 Emoji 字体来自 [Google Noto Emoji](https://github.com/googlefonts/noto-emoji)，授权文本见 `nonebot_plugin_rollpig_plus/resource/fonts/NotoEmoji-LICENSE.txt`。
+普通卡片内置 [Source Han Sans SC Medium](https://github.com/adobe-fonts/source-han-sans) 作为默认 CJK 字体，并使用 [pilmoji](https://github.com/jay3332/pilmoji) 渲染彩色 Emoji；内置 Emoji 图形资源来自 [googlefonts/noto-emoji](https://github.com/googlefonts/noto-emoji)，第三方资源声明见 `THIRD_PARTY_NOTICES.md`。

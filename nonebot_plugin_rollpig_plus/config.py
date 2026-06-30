@@ -92,6 +92,11 @@ class Config(BaseModel):
     # 关闭后会跳过每日总结定时任务；该任务负责日报推送，以及日报派生的次日保护名单刷新。
     rollpig_daily_summary_enabled: bool = True
 
+    # --- 普通小猪卡片渲染 ---
+    # Pillow 不具备浏览器级字体回退；Docker/Linux 缺字或想换风格时可显式指定字体。
+    # 相对路径按 Bot 运行目录解析，例如 fonts/msyh.ttc。
+    rollpig_card_font_path: Optional[str] = None
+
     # --- 图片版小猪图鉴 ---
     rollpig_catalog_enabled: bool = True
     rollpig_catalog_render_concurrency: int = 2
@@ -99,7 +104,6 @@ class Config(BaseModel):
     rollpig_catalog_output_format: str = "png"
     rollpig_catalog_render_timeout: float = 8.0
     rollpig_catalog_scale_factor: float = 2.0
-    rollpig_html_render_concurrency: int = 2  # 兼容旧配置；当前仅作为图鉴 HTML 截图的外围预算
 
     # --- 代理设置 (可选，如果服务器在国内连不上API) ---
     rollpig_proxy: Optional[str] = None

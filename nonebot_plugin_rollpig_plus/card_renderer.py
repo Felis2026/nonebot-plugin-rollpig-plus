@@ -6,17 +6,22 @@ from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping
 
 from nonebot.log import logger
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from pilmoji import Pilmoji
+from pilmoji.helpers import EMOJI_REGEX, getsize as pilmoji_getsize
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+
+from .emoji_source import get_noto_emoji_source
 
 
 CANVAS_SIZE = (800, 800)
-CARD_RADIUS = 40
 CONTENT_WIDTH = 720
 CONTENT_SAFE_HEIGHT = 760
 AVATAR_SIZE = 240
+AVATAR_CORNER_RADIUS = 30
+AVATAR_CACHE_MAXSIZE = 192
 
 NAME_FONT_SIZE = 48
 DESC_FONT_SIZE = 30
@@ -37,10 +42,14 @@ DESC_COLOR = (85, 85, 85, 255)
 ANALYSIS_COLOR = (51, 51, 51, 255)
 PLACEHOLDER_BG = (255, 226, 239, 255)
 PLACEHOLDER_FG = (154, 92, 135, 255)
-EMOJI_FONT_PATH = Path(__file__).parent / "resource" / "fonts" / "NotoColorEmoji.ttf"
-EMOJI_BASE_FONT_SIZE = 109
-EMOJI_RENDER_PADDING = 28
 EMOJI_SCALE_FACTOR = 1.08
+EMOJI_POSITION_OFFSET = (0, -2)
+EXTRA_EMOJI_SYMBOLS = {
+    # pig.json 中少量文本音乐符号不是标准 Emoji，中文字体又可能缺字；
+    # 渲染时映射为 Noto Emoji 音符，不修改原始文案数据。
+    "\u266a": "\U0001f3b5",
+}
+PACKAGE_FONT_DIR = Path(__file__).parent / "resource" / "fonts"
 
 
 @dataclass(frozen=True)
@@ -66,18 +75,65 @@ class _TextLayout:
     total_height: int
 
 
-@dataclass(frozen=True)
-class _TextRun:
-    text: str
-    is_emoji: bool
-
-
 # ================================ 字体与 Emoji 后端 ================================ #
 
 
-def _font_candidates(*, bold: bool) -> list[Path]:
-    """按平台列出候选中文字体，尽量复刻 HTML 版的 Microsoft YaHei 回退习惯。"""
+def _resolve_font_path(value: str | None) -> Path | None:
+    """解析用户配置的字体路径；相对路径按 Bot 运行目录而不是插件目录处理。"""
 
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    raw_path = Path(text).expanduser()
+    return raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
+
+
+def _configured_font_candidates(*, bold: bool) -> list[Path]:
+    """读取用户显式指定的字体；NoneBot 未初始化时静默跳过，方便离线脚本复用渲染器。"""
+
+    try:
+        from nonebot import get_plugin_config
+
+        from .config import Config
+
+        config = get_plugin_config(Config)
+    except Exception as error:
+        logger.debug(f"RollPig Pillow 字体配置读取失败，使用自动候选: {error}")
+        return []
+
+    candidates: list[Path] = []
+    # 只保留一个字体配置项：Pillow 无完整字体族管理，标题和正文共享同一字体更可预测。
+    configured_path = _resolve_font_path(config.rollpig_card_font_path)
+    if configured_path is not None:
+        candidates.append(configured_path)
+    return list(dict.fromkeys(candidates))
+
+
+def _font_candidates(*, bold: bool) -> list[Path]:
+    """按优先级列出候选字体；用户配置最高，系统字体兜底。"""
+
+    packaged_fonts = [
+        PACKAGE_FONT_DIR / "SourceHanSansSC-Medium.otf",
+        PACKAGE_FONT_DIR / ("msyhbd.ttc" if bold else "msyh.ttc"),
+        PACKAGE_FONT_DIR / "msyh.ttc",
+        PACKAGE_FONT_DIR / "msyhbd.ttc",
+        # V2 私有 Docker 已挂载 `./fonts:/root/.fonts`；Pillow 不走 fontconfig，
+        # 这里必须显式列路径，否则容器里仍会退回默认位图字体。
+        Path.cwd() / "fonts" / ("msyhbd.ttc" if bold else "msyh.ttc"),
+        Path.cwd() / "fonts" / "msyh.ttc",
+        Path.cwd() / "fonts" / "msyhbd.ttc",
+        Path.cwd() / "fonts" / "MicrosoftYaHei" / "Microsoft Yahei.ttf",
+        Path("/app/fonts") / ("msyhbd.ttc" if bold else "msyh.ttc"),
+        Path("/app/fonts/msyh.ttc"),
+        Path("/app/fonts/msyhbd.ttc"),
+        Path("/app/fonts/MicrosoftYaHei/Microsoft Yahei.ttf"),
+        Path("/root/.fonts") / ("msyhbd.ttc" if bold else "msyh.ttc"),
+        Path("/root/.fonts/msyh.ttc"),
+        Path("/root/.fonts/msyhbd.ttc"),
+        Path("/root/.fonts/MicrosoftYaHei/Microsoft Yahei.ttf"),
+    ]
     windows_fonts = [
         Path("C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc"),
         Path("C:/Windows/Fonts/simhei.ttf"),
@@ -86,11 +142,16 @@ def _font_candidates(*, bold: bool) -> list[Path]:
     linux_fonts = [
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJKkr-Bold.otf" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf"),
+        Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Bold.otf" if bold else "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf"),
+        Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Bold.otf" if bold else "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Regular.otf"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
         Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
     ]
-    return [*windows_fonts, *linux_fonts]
+    return [*_configured_font_candidates(bold=bold), *packaged_fonts, *windows_fonts, *linux_fonts]
 
 
 @lru_cache(maxsize=32)
@@ -109,62 +170,24 @@ def _load_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-@lru_cache(maxsize=1)
-def _load_emoji_font() -> ImageFont.FreeTypeFont | None:
-    """加载彩色 Emoji 字体；插件内置 Noto，系统字体只作为兜底。
-
-    NotoColorEmoji 是位图彩色字体，FreeType/Pillow 只接受 109px 这一档。
-    因此后续统一先按 109px 渲染，再缩放到当前文字字号，避免运行时联网拉素材。
-    """
-
-    font_candidates = [
-        EMOJI_FONT_PATH,
-        Path("C:/Windows/Fonts/seguiemj.ttf"),
-        Path("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
-        Path("/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf"),
-    ]
-    for font_path in font_candidates:
-        if not font_path.exists():
-            continue
-        try:
-            return ImageFont.truetype(str(font_path), size=EMOJI_BASE_FONT_SIZE)
-        except Exception as error:
-            logger.debug(f"RollPig Emoji 字体加载失败: path={font_path}, error={error}")
-
-    logger.warning("RollPig Pillow 未找到可用彩色 Emoji 字体，Emoji 将按普通字体降级绘制。")
-    return None
-
-
-@lru_cache(maxsize=1)
-def _get_emoji_list_func() -> Any | None:
-    """懒加载 emoji 包；它负责识别 ZWJ、肤色、国旗等复合 Emoji 边界。"""
-
-    try:
-        from emoji import emoji_list
-    except Exception as error:
-        logger.warning(f"RollPig Emoji 分段依赖不可用，已降级普通文字绘制: {error}")
-        return None
-    return emoji_list
-
-
 # ================================ 文本测量与换行 ================================ #
 
 
 def _measure_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
-    """按实际像素测量文本宽度；Emoji 使用内置彩色字体的缩放宽度计入。"""
+    """按实际像素测量文本宽度；Emoji 使用 pilmoji 的贴图宽度计入。"""
 
     if not text:
         return 0
 
-    width = 0
-    for run in _split_text_runs(text):
-        if run.is_emoji:
-            emoji_image = _render_emoji_image(run.text, _emoji_target_size(font))
-            if emoji_image is not None:
-                width += emoji_image.width
-                continue
-        width += _measure_plain_text(draw, run.text, font)
-    return width
+    if _has_emoji_candidate(text) and get_noto_emoji_source() is not None:
+        try:
+            render_text = _normalize_extra_emoji_symbols(text)
+            width, _ = pilmoji_getsize(render_text, font=font, spacing=0, emoji_scale_factor=EMOJI_SCALE_FACTOR)
+            return int(width)
+        except Exception as error:
+            logger.debug(f"RollPig pilmoji 文本测量失败，回退普通测量: text={text!r}, error={error}")
+
+    return _measure_plain_text(draw, text, font)
 
 
 def _measure_plain_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
@@ -191,6 +214,8 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_./:+#@%-]+|[^\S\n]+|\n|.", re.S)
 def _has_emoji_candidate(text: str) -> bool:
     """快速判断文本是否可能含 Emoji，避免普通中文卡片无谓加载 emoji 包。"""
 
+    if any(symbol in text for symbol in EXTRA_EMOJI_SYMBOLS):
+        return True
     if any(mark in text for mark in ("\ufe0f", "\u200d", "\u20e3")):
         return True
     return any(
@@ -202,22 +227,24 @@ def _has_emoji_candidate(text: str) -> bool:
     )
 
 
+def _normalize_extra_emoji_symbols(text: str) -> str:
+    """把少量 emoji 风格文本符号转换为 Noto Emoji 可识别字符。"""
+
+    if not text or not any(symbol in text for symbol in EXTRA_EMOJI_SYMBOLS):
+        return text
+    return "".join(EXTRA_EMOJI_SYMBOLS.get(char, char) for char in text)
+
+
 @lru_cache(maxsize=4096)
 def _emoji_spans(text: str) -> tuple[tuple[int, int], ...]:
-    """返回文本中的 Emoji 片段范围；结果缓存避免同一昵称反复解析。"""
+    """返回文本中的 Emoji 片段范围；与 pilmoji 使用同一套解析规则。"""
 
     if not _has_emoji_candidate(text):
         return ()
 
-    emoji_list = _get_emoji_list_func()
-    if emoji_list is None:
-        return ()
-
+    normalized_text = _normalize_extra_emoji_symbols(text)
     try:
-        spans = [
-            (int(item["match_start"]), int(item["match_end"]))
-            for item in emoji_list(text)
-        ]
+        spans = [match.span() for match in EMOJI_REGEX.finditer(normalized_text)]
     except Exception as error:
         logger.debug(f"RollPig Emoji 分段失败，回退普通文字: text={text!r}, error={error}")
         return ()
@@ -230,65 +257,6 @@ def _emoji_spans(text: str) -> tuple[tuple[int, int], ...]:
             valid_spans.append((start, end))
             last_end = end
     return tuple(valid_spans)
-
-
-def _split_text_runs(text: str) -> list[_TextRun]:
-    """把文本拆成普通文字与完整 Emoji 簇，保证 ZWJ/国旗/肤色不被切碎。"""
-
-    spans = _emoji_spans(text)
-    if not spans:
-        return [_TextRun(text, False)] if text else []
-
-    runs: list[_TextRun] = []
-    cursor = 0
-    for start, end in spans:
-        if start > cursor:
-            runs.append(_TextRun(text[cursor:start], False))
-        runs.append(_TextRun(text[start:end], True))
-        cursor = end
-    if cursor < len(text):
-        runs.append(_TextRun(text[cursor:], False))
-    return runs
-
-
-def _emoji_target_size(font: ImageFont.ImageFont) -> int:
-    """按当前文字字号推导 Emoji 贴图大小，避免图标挤爆行高。"""
-
-    font_size = int(getattr(font, "size", ANALYSIS_FONT_MIN_SIZE))
-    return max(18, round(font_size * EMOJI_SCALE_FACTOR))
-
-
-@lru_cache(maxsize=4096)
-def _render_emoji_image(emoji_text: str, target_size: int) -> Image.Image | None:
-    """使用内置 NotoColorEmoji 渲染单个 Emoji 簇，并缓存缩放后的 RGBA 小图。"""
-
-    emoji_font = _load_emoji_font()
-    if emoji_font is None:
-        return None
-
-    canvas_width = EMOJI_BASE_FONT_SIZE * 4
-    canvas_height = EMOJI_BASE_FONT_SIZE + EMOJI_RENDER_PADDING * 2
-    image = Image.new("RGBA", (canvas_width, canvas_height), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(image)
-    try:
-        draw.text(
-            (EMOJI_RENDER_PADDING, EMOJI_RENDER_PADDING),
-            emoji_text,
-            font=emoji_font,
-            embedded_color=True,
-        )
-    except Exception as error:
-        logger.debug(f"RollPig Emoji 绘制失败，回退普通文字: emoji={emoji_text!r}, error={error}")
-        return None
-
-    bbox = image.getbbox()
-    if bbox is None:
-        return None
-
-    cropped = image.crop(bbox)
-    scale = target_size / max(1, cropped.height)
-    target_width = max(1, round(cropped.width * scale))
-    return cropped.resize((target_width, target_size), Image.Resampling.LANCZOS)
 
 
 def _tokenize_text(text: str) -> list[str]:
@@ -407,22 +375,32 @@ def _wrap_text_by_width(
 
 
 def _make_canvas() -> Image.Image:
-    canvas = Image.new("RGBA", CANVAS_SIZE, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle(
-        (0, 0, CANVAS_SIZE[0] - 1, CANVAS_SIZE[1] - 1),
-        radius=CARD_RADIUS,
-        fill=BACKGROUND_COLOR,
-    )
-    return canvas
+    """创建满版白底卡片画布；外框不再做透明裁切、描边或圆角，避免产生内收感。"""
+
+    return Image.new("RGBA", CANVAS_SIZE, BACKGROUND_COLOR)
 
 
 def _load_avatar(image_file: Path | None) -> Image.Image | None:
-    """载入并裁切小猪图；P1 阶段 GIF 只取首帧作为静态图。"""
+    """载入并裁切小猪图；缓存键包含 mtime/size，资源更新后会自动失效。"""
 
     if image_file is None:
         return None
 
+    try:
+        stat = image_file.stat()
+    except OSError as error:
+        logger.warning(f"RollPig 小猪图片状态读取失败，使用占位图: file={image_file}, error={error}")
+        return None
+
+    cached = _load_avatar_cached(str(image_file), stat.st_mtime_ns, stat.st_size)
+    return cached.copy() if cached is not None else None
+
+
+@lru_cache(maxsize=AVATAR_CACHE_MAXSIZE)
+def _load_avatar_cached(path: str, mtime_ns: int, file_size: int) -> Image.Image | None:
+    """读取并缩放头像资源；mtime/size 参数只用于构成 LRU 缓存失效键。"""
+
+    image_file = Path(path)
     try:
         with Image.open(image_file) as opened:
             frame = opened.copy()
@@ -444,10 +422,35 @@ def _load_avatar(image_file: Path | None) -> Image.Image | None:
     )
 
 
+@lru_cache(maxsize=8)
+def _avatar_corner_mask() -> Image.Image:
+    """生成抗锯齿圆角蒙版；透明小猪图不受影响，实底图片会获得柔和圆角。"""
+
+    scale = 3
+    mask = Image.new("L", (AVATAR_SIZE * scale, AVATAR_SIZE * scale), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle(
+        (0, 0, AVATAR_SIZE * scale, AVATAR_SIZE * scale),
+        radius=AVATAR_CORNER_RADIUS * scale,
+        fill=255,
+    )
+    return mask.resize((AVATAR_SIZE, AVATAR_SIZE), Image.Resampling.LANCZOS)
+
+
+def _prepare_avatar_for_draw(avatar: Image.Image) -> Image.Image:
+    """给头像套圆角边界；使用 ImageChops 保留原始透明通道。"""
+
+    prepared = avatar.copy()
+    alpha = prepared.getchannel("A")
+    prepared.putalpha(ImageChops.multiply(alpha, _avatar_corner_mask()))
+    return prepared
+
+
 def _draw_avatar(canvas: Image.Image, avatar: Image.Image | None, y: int) -> None:
     x = (CANVAS_SIZE[0] - AVATAR_SIZE) // 2
     if avatar is not None:
-        canvas.alpha_composite(avatar, (x, y))
+        prepared_avatar = _prepare_avatar_for_draw(avatar)
+        canvas.alpha_composite(prepared_avatar, (x, y))
         return
 
     draw = ImageDraw.Draw(canvas)
@@ -541,7 +544,7 @@ def _draw_text_line(
     *,
     max_width: int,
 ) -> None:
-    """水平居中绘制单行文本；中文与 Emoji 分段绘制，避免依赖浏览器字体回退。"""
+    """水平居中绘制单行文本；含 Emoji 时用 pilmoji 从本地 ZIP 贴图。"""
 
     if not text:
         return
@@ -549,23 +552,42 @@ def _draw_text_line(
     draw = ImageDraw.Draw(canvas)
     width = min(_measure_text(draw, text, font), max_width)
     x = (CANVAS_SIZE[0] - width) // 2
-    cursor_x = x
 
-    for run in _split_text_runs(text):
-        if run.is_emoji:
-            emoji_image = _render_emoji_image(run.text, _emoji_target_size(font))
-            if emoji_image is not None:
-                emoji_y = int(y + (line_height - emoji_image.height) / 2)
-                canvas.alpha_composite(emoji_image, (round(cursor_x), emoji_y))
-                cursor_x += emoji_image.width
-                continue
+    if _has_emoji_candidate(text):
+        source = get_noto_emoji_source()
+        if source is not None:
+            try:
+                render_text = _normalize_extra_emoji_symbols(text)
+                _, measured_height = pilmoji_getsize(
+                    render_text,
+                    font=font,
+                    spacing=0,
+                    emoji_scale_factor=EMOJI_SCALE_FACTOR,
+                )
+                text_y = int(y + (line_height - measured_height) / 2)
+                with Pilmoji(
+                    canvas,
+                    source=source,
+                    render_discord_emoji=False,
+                    emoji_scale_factor=EMOJI_SCALE_FACTOR,
+                    emoji_position_offset=EMOJI_POSITION_OFFSET,
+                ) as pilmoji:
+                    pilmoji.text(
+                        (x, text_y),
+                        render_text,
+                        fill=fill,
+                        font=font,
+                        emoji_scale_factor=EMOJI_SCALE_FACTOR,
+                        emoji_position_offset=EMOJI_POSITION_OFFSET,
+                    )
+                return
+            except Exception as error:
+                logger.debug(f"RollPig pilmoji 文本绘制失败，回退普通绘制: text={text!r}, error={error}")
 
-        # 普通文本按各自 bbox 垂直居中；Emoji 缺字时也会走这里作为最后兜底。
-        bbox = draw.textbbox((0, 0), run.text, font=font)
-        text_h = max(1, bbox[3] - bbox[1])
-        text_y = int(y + (line_height - text_h) / 2 - bbox[1])
-        draw.text((cursor_x, text_y), run.text, fill=fill, font=font)
-        cursor_x += _measure_plain_text(draw, run.text, font)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_h = max(1, bbox[3] - bbox[1])
+    text_y = int(y + (line_height - text_h) / 2 - bbox[1])
+    draw.text((x, text_y), text, fill=fill, font=font)
 
 
 def _render_pig_card_image_sync(
@@ -613,7 +635,7 @@ def _render_pig_card_image_sync(
             y += layout.analysis_line_height
 
     output = BytesIO()
-    canvas.save(output, format="PNG", optimize=True)
+    canvas.convert("RGB").save(output, format="PNG", optimize=True)
     contains_emoji = any(
         _has_emoji_candidate(text)
         for text in (layout.name_line, layout.desc_line, *layout.analysis_lines)
@@ -624,7 +646,7 @@ def _render_pig_card_image_sync(
         renderer="pillow",
         analysis_font_size=layout.analysis_font_size,
         analysis_lines=len(layout.analysis_lines),
-        emoji_enabled=contains_emoji and _load_emoji_font() is not None and _get_emoji_list_func() is not None,
+        emoji_enabled=contains_emoji and get_noto_emoji_source() is not None,
     )
 
 
