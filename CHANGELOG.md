@@ -6,7 +6,7 @@
 
 - `今日小猪`、`昨日小猪`、`今日烤猪`、`烤群友` 等普通卡片改为 Pillow 渲染，降低普通图片输出对 Chromium / Playwright 的依赖。
 - 内置 Source Han Sans SC Medium 作为默认 CJK 字体，并保留 `rollpig_card_font_path` 供用户自行指定字体。
-- 内置 Google Noto Emoji ZIP，普通卡片可离线渲染彩色 Emoji，减少 Docker / Linux 环境缺字体导致的方块字或黑白 Emoji。
+- 内置 Google Noto Emoji 32px ZIP，普通卡片可离线渲染彩色 Emoji，减少 Docker / Linux 环境缺字体导致的方块字或黑白 Emoji。
 - 普通卡片保持 800×800 输出，头像资源统一规整到 240×240 区域；图片版小猪图鉴仍沿用 HTML/CSS 渲染。
 
 ### GIF 动态资源

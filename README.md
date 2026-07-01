@@ -8,9 +8,9 @@
 
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
-    <img src="https://img.shields.io/badge/NoneBot-2.x-black" alt="NoneBot2">
+    <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
-    <img src="https://img.shields.io/badge/Version-0.7.4-ff69b4" alt="Version 0.7.4">
+    <img src="https://img.shields.io/badge/Version-0.8.0-ff69b4" alt="Version 0.8.0">
   </p>
 </div>
 
@@ -221,7 +221,7 @@ nonebot_plugin_rollpig_plus/resource/
 - `pig.json` 维护基础小猪信息。
 - `resource/image/<id>.png` 或 `resource/image/<id>.gif` 为对应图片，文件名需要和 `id` 一致；同 ID 同时存在时优先使用 GIF。
 - `pig_rules.json` 维护熟食、特殊形态等规则，避免污染上游兼容的 `pig.json` 基础格式。
-- 普通卡片使用内置 Source Han Sans SC Medium 渲染 CJK 文本，并使用 `pilmoji` 与内置 `Google Noto Emoji` ZIP 离线渲染彩色 Emoji，不依赖运行时联网。
+- 普通卡片使用内置 Source Han Sans SC Medium 渲染 CJK 文本，并使用 `pilmoji` 与内置 Google Noto Emoji 32px ZIP 离线渲染彩色 Emoji，不依赖运行时联网。
 - PNG 与 GIF 均会在普通卡片中统一渲染为 240×240 头像区域；建议资源原图也按 240×240 入库，避免缩放裁切产生偏移。
 - GIF 仅用于“今日小猪 / 烤猪 / 烤群友”等普通卡片动态展示；图片版图鉴固定取首帧缩略图，保持静态陈列。
 - GIF 资源建议透明背景、循环播放、无文字水印，帧数控制在 10–40 帧；异常或单帧 GIF 会自动退回静态 PNG 输出。
@@ -279,11 +279,12 @@ nonebot_plugin_rollpig_plus/
 - **极速响应与内存暴降**：普通卡片不再依赖 `nonebot-plugin-htmlrender` 启动繁重的无头浏览器 (Headless Chromium)，改用 Python 原生的 Pillow 引擎进行图像绘制。这使得出图速度显著提升，同时极大缓解了小内存 VPS 的 OOM 压力。（注：生成几百只猪的“小猪图鉴长图”依然保留 Playwright 渲染以保证复杂排版）。
 - **动态小猪 (GIF) 原生支持**：得益于 Pillow 的底层重构，本次更新正式支持了 GIF 动图猪的渲染！
 
-#### 📦 解决改用Pillow后可能的乱码方案
-如果你使用 Docker (如 Alpine/Slim 镜像) 部署 Bot，可能遭遇抽出的卡片全是“方块字 (Tofu)”或 Emoji 乱码问题，本版本引入策略：
+#### 📦 解决改用 Pillow 后可能的乱码方案
+如果你使用 Docker（如 Alpine / Slim 镜像）部署 Bot，可能遭遇抽出的卡片全是“方块字（Tofu）”或 Emoji 乱码问题，本版本引入策略：
 - **内置字体**：打包了开源的 `思源黑体 (Source Han Sans SC)`，提供最高优先级的中文后备支持。
-- **内置 Emoji**：提取并压缩了 Google Noto Color Emoji 的 32px 资源包。
-- **结果**：插件发行体积略微增加，但**在任何极为纯净的 Linux/Docker 宿主机上，无需安装任何系统字体包，100% 一键部署、彻底告别方块字和乱码！**
+- **内置 Emoji**：提取并压缩了 Google Noto Emoji 的 32px PNG 资源包，通过 `pilmoji` 离线贴图渲染彩色 Emoji。
+- **部署收益**：插件发行体积会增加约 15MB，但 Docker / Linux 环境不再依赖系统 Emoji 字体或在线 Emoji 源，能显著减少方块字、黑白 Emoji 和联网失败问题。
+- **可替换字体**：如果群友昵称包含更多语种，或你希望使用微软雅黑等自定义字形，可通过 `rollpig_card_font_path` 指定自己的字体文件。
 
 #### 🔧 其他特性
 - 资源图片支持 `.png` / `.gif`，普通卡片头像统一规整到 240×240 区域，图片版图鉴固定取 GIF 首帧。
