@@ -11,7 +11,7 @@ from typing import Mapping
 from nonebot.log import logger
 from pilmoji import Pilmoji
 from pilmoji.helpers import EMOJI_REGEX, getsize as pilmoji_getsize
-from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps, ImageSequence
 
 from .emoji_source import get_noto_emoji_source
 
@@ -22,6 +22,11 @@ CONTENT_SAFE_HEIGHT = 760
 AVATAR_SIZE = 240
 AVATAR_CORNER_RADIUS = 30
 AVATAR_CACHE_MAXSIZE = 192
+ANIMATED_AVATAR_CACHE_MAXSIZE = 24
+GIF_MAX_FRAMES = 80
+GIF_MIN_FRAME_DURATION_MS = 20
+GIF_MAX_FRAME_DURATION_MS = 2000
+GIF_FALLBACK_FRAME_DURATION_MS = 100
 
 NAME_FONT_SIZE = 48
 DESC_FONT_SIZE = 30
@@ -73,6 +78,16 @@ class _TextLayout:
     analysis_font_size: int
     analysis_line_height: int
     total_height: int
+
+
+@dataclass(frozen=True)
+class _PreparedCard:
+    """不含头像的卡片底层；GIF 渲染时逐帧复用，避免重复排版和绘制文字。"""
+
+    canvas: Image.Image
+    layout: _TextLayout
+    avatar_y: int
+    emoji_enabled: bool
 
 
 # ================================ 字体与 Emoji 后端 ================================ #
@@ -396,17 +411,8 @@ def _load_avatar(image_file: Path | None) -> Image.Image | None:
     return cached.copy() if cached is not None else None
 
 
-@lru_cache(maxsize=AVATAR_CACHE_MAXSIZE)
-def _load_avatar_cached(path: str, mtime_ns: int, file_size: int) -> Image.Image | None:
-    """读取并缩放头像资源；mtime/size 参数只用于构成 LRU 缓存失效键。"""
-
-    image_file = Path(path)
-    try:
-        with Image.open(image_file) as opened:
-            frame = opened.copy()
-    except Exception as error:
-        logger.warning(f"RollPig 小猪图片读取失败，使用占位图: file={image_file}, error={error}")
-        return None
+def _fit_avatar_frame(frame: Image.Image) -> Image.Image:
+    """把任意来源图片统一规整为 240×240 RGBA 头像帧。"""
 
     frame = ImageOps.exif_transpose(frame)
     if frame.mode not in ("RGBA", "LA"):
@@ -420,6 +426,75 @@ def _load_avatar_cached(path: str, mtime_ns: int, file_size: int) -> Image.Image
         method=Image.Resampling.LANCZOS,
         centering=(0.5, 0.5),
     )
+
+
+@lru_cache(maxsize=AVATAR_CACHE_MAXSIZE)
+def _load_avatar_cached(path: str, mtime_ns: int, file_size: int) -> Image.Image | None:
+    """读取并缩放头像资源；mtime/size 参数只用于构成 LRU 缓存失效键。"""
+
+    image_file = Path(path)
+    try:
+        with Image.open(image_file) as opened:
+            frame = opened.copy()
+    except Exception as error:
+        logger.warning(f"RollPig 小猪图片读取失败，使用占位图: file={image_file}, error={error}")
+        return None
+
+    return _fit_avatar_frame(frame)
+
+
+def _normalize_gif_duration(raw_duration: object) -> int:
+    """规整 GIF 帧间隔；防御 0ms/异常值让客户端播放过快或卡住。"""
+
+    try:
+        duration = int(raw_duration)
+    except (TypeError, ValueError):
+        duration = GIF_FALLBACK_FRAME_DURATION_MS
+    if duration <= 0:
+        duration = GIF_FALLBACK_FRAME_DURATION_MS
+    return min(max(duration, GIF_MIN_FRAME_DURATION_MS), GIF_MAX_FRAME_DURATION_MS)
+
+
+def _load_animated_avatar_frames(image_file: Path | None) -> tuple[tuple[Image.Image, int], ...]:
+    """载入动态头像帧；非 GIF 或单帧 GIF 返回空元组并交给静态 PNG 路径处理。"""
+
+    if image_file is None or image_file.suffix.lower() != ".gif":
+        return ()
+
+    try:
+        stat = image_file.stat()
+    except OSError as error:
+        logger.warning(f"RollPig GIF 图片状态读取失败，回退静态渲染: file={image_file}, error={error}")
+        return ()
+
+    cached = _load_animated_avatar_frames_cached(str(image_file), stat.st_mtime_ns, stat.st_size)
+    return tuple((frame.copy(), duration) for frame, duration in cached)
+
+
+@lru_cache(maxsize=ANIMATED_AVATAR_CACHE_MAXSIZE)
+def _load_animated_avatar_frames_cached(path: str, mtime_ns: int, file_size: int) -> tuple[tuple[Image.Image, int], ...]:
+    """读取 GIF 全帧并统一裁切；mtime/size 参数只用于构成 LRU 缓存失效键。"""
+
+    image_file = Path(path)
+    try:
+        with Image.open(image_file) as opened:
+            frame_count = int(getattr(opened, "n_frames", 1) or 1)
+            if not getattr(opened, "is_animated", False) or frame_count <= 1:
+                return ()
+            if frame_count > GIF_MAX_FRAMES:
+                logger.warning(f"RollPig GIF 帧数超过上限，已截断: file={image_file}, frames={frame_count}/{GIF_MAX_FRAMES}")
+
+            frames: list[tuple[Image.Image, int]] = []
+            for index, frame in enumerate(ImageSequence.Iterator(opened)):
+                if index >= GIF_MAX_FRAMES:
+                    break
+                duration = _normalize_gif_duration(frame.info.get("duration", opened.info.get("duration")))
+                frames.append((_fit_avatar_frame(frame.copy()), duration))
+    except Exception as error:
+        logger.warning(f"RollPig GIF 图片读取失败，回退静态渲染: file={image_file}, error={error}")
+        return ()
+
+    return tuple(frames)
 
 
 @lru_cache(maxsize=8)
@@ -590,11 +665,8 @@ def _draw_text_line(
     draw.text((x, text_y), text, fill=fill, font=font)
 
 
-def _render_pig_card_image_sync(
-    pig_data: Mapping[str, Any],
-    image_file: Path | None,
-) -> PigCardRenderResult:
-    """同步生成 800×800 PNG；外层 async API 会放入线程执行。"""
+def _prepare_card_without_avatar(pig_data: Mapping[str, Any]) -> _PreparedCard:
+    """生成不含头像的静态卡片层；动态头像逐帧贴在同一位置。"""
 
     name = str(pig_data.get("name") or "未知小猪")
     desc = str(pig_data.get("description") or "")
@@ -605,10 +677,7 @@ def _render_pig_card_image_sync(
     layout = _build_text_layout(draw, name=name, desc=desc, analysis=analysis)
 
     start_y = max(20, (CANVAS_SIZE[1] - layout.total_height) // 2)
-    y = start_y
-
-    _draw_avatar(canvas, _load_avatar(image_file), y)
-    y += AVATAR_SIZE + NAME_MARGIN_TOP
+    y = start_y + AVATAR_SIZE + NAME_MARGIN_TOP
 
     name_font = _load_font(NAME_FONT_SIZE, bold=True)
     _draw_text_line(canvas, layout.name_line, name_font, y, NAME_LINE_HEIGHT, NAME_COLOR, max_width=CONTENT_WIDTH)
@@ -634,20 +703,109 @@ def _render_pig_card_image_sync(
             )
             y += layout.analysis_line_height
 
-    output = BytesIO()
-    canvas.convert("RGB").save(output, format="PNG", optimize=True)
     contains_emoji = any(
         _has_emoji_candidate(text)
         for text in (layout.name_line, layout.desc_line, *layout.analysis_lines)
     )
+    return _PreparedCard(
+        canvas=canvas,
+        layout=layout,
+        avatar_y=start_y,
+        emoji_enabled=contains_emoji and get_noto_emoji_source() is not None,
+    )
+
+
+def _encode_png_card(prepared: _PreparedCard, image_file: Path | None) -> PigCardRenderResult:
+    """把静态卡片编码为 PNG；静态 GIF 也会走这里取首帧。"""
+
+    canvas = prepared.canvas.copy()
+    _draw_avatar(canvas, _load_avatar(image_file), prepared.avatar_y)
+
+    output = BytesIO()
+    canvas.convert("RGB").save(output, format="PNG", optimize=True)
     return PigCardRenderResult(
         data=output.getvalue(),
         image_format="png",
         renderer="pillow",
-        analysis_font_size=layout.analysis_font_size,
-        analysis_lines=len(layout.analysis_lines),
-        emoji_enabled=contains_emoji and get_noto_emoji_source() is not None,
+        analysis_font_size=prepared.layout.analysis_font_size,
+        analysis_lines=len(prepared.layout.analysis_lines),
+        emoji_enabled=prepared.emoji_enabled,
     )
+
+
+def _build_gif_palette(rgb_frames: list[Image.Image], avatar_y: int) -> Image.Image:
+    """从静态文字层和全部头像帧采样调色板，避免彩色动画被第一帧压没。"""
+
+    sample_size = AVATAR_SIZE
+    palette_source = Image.new("RGB", (sample_size, sample_size * (len(rgb_frames) + 1)), BACKGROUND_COLOR[:3])
+
+    # 第一块放整卡缩略图，确保文字黑灰、白底、Emoji 等静态元素能进入全局调色板。
+    full_card_sample = rgb_frames[0].resize((sample_size, sample_size), Image.Resampling.LANCZOS)
+    palette_source.paste(full_card_sample, (0, 0))
+
+    # 后续每块只采样头像区域；动态色彩主要集中在这里，完整采样可保住蹦迪类彩色帧。
+    avatar_box = (
+        (CANVAS_SIZE[0] - AVATAR_SIZE) // 2,
+        avatar_y,
+        (CANVAS_SIZE[0] + AVATAR_SIZE) // 2,
+        avatar_y + AVATAR_SIZE,
+    )
+    for index, frame in enumerate(rgb_frames, 1):
+        palette_source.paste(frame.crop(avatar_box), (0, sample_size * index))
+
+    return palette_source.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+
+
+def _encode_gif_card(prepared: _PreparedCard, avatar_frames: tuple[tuple[Image.Image, int], ...]) -> PigCardRenderResult:
+    """把动态头像逐帧合成到静态卡片层，输出 GIF。"""
+
+    rgb_frames: list[Image.Image] = []
+    durations: list[int] = []
+    for avatar, duration in avatar_frames:
+        frame = prepared.canvas.copy()
+        _draw_avatar(frame, avatar, prepared.avatar_y)
+        rgb_frames.append(frame.convert("RGB"))
+        durations.append(duration)
+
+    # 使用同一张全帧采样调色板，兼顾文字不闪色和动态头像不丢彩。
+    palette = _build_gif_palette(rgb_frames, prepared.avatar_y)
+    output_frames = [
+        frame.quantize(palette=palette, dither=Image.Dither.NONE)
+        for frame in rgb_frames
+    ]
+
+    output = BytesIO()
+    output_frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=output_frames[1:],
+        duration=durations,
+        loop=0,
+        disposal=2,
+        optimize=False,
+    )
+    return PigCardRenderResult(
+        data=output.getvalue(),
+        image_format="gif",
+        renderer="pillow-gif",
+        analysis_font_size=prepared.layout.analysis_font_size,
+        analysis_lines=len(prepared.layout.analysis_lines),
+        emoji_enabled=prepared.emoji_enabled,
+    )
+
+
+def _render_pig_card_image_sync(
+    pig_data: Mapping[str, Any],
+    image_file: Path | None,
+) -> PigCardRenderResult:
+    """同步生成 800×800 卡片；动态 GIF 资源输出 GIF，其余输出 PNG。"""
+
+    prepared = _prepare_card_without_avatar(pig_data)
+    avatar_frames = _load_animated_avatar_frames(image_file)
+    if avatar_frames:
+        return _encode_gif_card(prepared, avatar_frames)
+    return _encode_png_card(prepared, image_file)
 
 
 async def render_pig_card_image(
