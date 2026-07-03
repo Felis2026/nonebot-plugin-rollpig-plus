@@ -2,7 +2,7 @@
 name = "nonebot-plugin-rollpig-plus"
 version = "0.8.0"
 description = "今天是什么小猪（今日小猪）Plus：基于原版拓展烤群友、图鉴成长等玩法"
-authors = ["Bear_lele <lele2587342146@gmail.com>","Felis <3397152010@qq.com>"]
+authors = ["Bear_lele <lele2587342146@gmail.com>", "Felis <3397152010@qq.com>"]
 license = "MIT"
 readme = "README.md"
 packages = [{ include = "nonebot_plugin_rollpig_plus" }]
