@@ -125,6 +125,7 @@ RES_DIR = PLUGIN_DIR / "resource"
 PIGHUB_IMAGE_BASE_URL = "https://pighub.top/data/"
 PIGHUB_ORIGIN = "https://pighub.top/"
 PIGHUB_API_URLS = (
+    "https://pighub.top/api/images?sort=2&limit=200",
     "https://pighub.top/api/images?sort=2",
     "https://pighub.top/api/all-images",
 )
@@ -812,7 +813,16 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         await cmd_roll.finish("PigHub 图片数据异常，请稍后再试。")
         return
 
-    await bot.send_group_forward_msg(group_id=event.group_id, messages=messages)
+    try:
+        await bot.send_group_forward_msg(group_id=event.group_id, messages=messages)
+    except Exception as error:
+        # OneBot 合并转发会让接入端预取远程图片；PigHub 抖动或图片过慢时可能超时。
+        # 不降级发送一堆裸链接，避免刷屏；只显式告诉用户当前外部图源或转发链路超时。
+        logger.warning(f"随机小猪合并转发超时: {error}")
+        await cmd_roll.finish(
+            MessageSegment.reply(event.message_id)
+            + "PigHub 图片加载或合并转发超时了，请稍后再试。"
+        )
 
 
 # 2.5 找猪
@@ -854,7 +864,15 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         if not messages:
             await cmd_find.finish("搜索结果数据异常，请稍后再试。")
             return
-        await bot.send_group_forward_msg(group_id=event.group_id, messages=messages)
+        try:
+            await bot.send_group_forward_msg(group_id=event.group_id, messages=messages)
+        except Exception as error:
+            # 群转发失败时必须显式回消息；否则用户只会看到“找猪没反应”。
+            logger.warning(f"找猪合并转发超时: keyword={keyword}, error={error}")
+            await cmd_find.finish(
+                MessageSegment.reply(event.message_id)
+                + "PigHub 图片加载或合并转发超时了，请稍后再试。"
+            )
         return
 
     # 私聊降级：展示首条匹配
