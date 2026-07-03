@@ -11,8 +11,8 @@ from .config import Config
 
 
 # ================================ Chromium 渲染总预算 ================================ #
-# 图鉴有自己的页面池，但普通卡片仍会调用 htmlrender 创建页面。这里用同一把
-# semaphore 收住“所有 HTML/Chromium 渲染”的总并发，避免多群同时触发时把浏览器打满。
+# 图鉴有自己的页面池；普通小猪卡片已迁移到 Pillow，不再占用 Chromium。
+# 这里直接复用图鉴并发配置作为外围预算，避免维护两套含义接近的参数。
 
 _html_render_semaphore: asyncio.Semaphore | None = None
 _html_render_limit: int | None = None
@@ -22,15 +22,15 @@ _html_render_lock = asyncio.Lock()
 def _resolve_html_render_limit() -> int:
     try:
         config = get_plugin_config(Config)
-        raw_limit = config.rollpig_html_render_concurrency
+        raw_limit = config.rollpig_catalog_render_concurrency
     except Exception as error:
-        logger.warning(f"rollpig_html_render_concurrency 配置读取失败，已回退到 2: {error}")
+        logger.warning(f"rollpig_catalog_render_concurrency 配置读取失败，已回退到 2: {error}")
         raw_limit = 2
 
     try:
         return max(1, min(6, int(raw_limit or 2)))
     except (TypeError, ValueError):
-        logger.warning(f"rollpig_html_render_concurrency 配置非法，已回退到 2: {raw_limit}")
+        logger.warning(f"rollpig_catalog_render_concurrency 配置非法，已回退到 2: {raw_limit}")
         return 2
 
 

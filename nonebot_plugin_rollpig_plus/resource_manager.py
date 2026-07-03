@@ -34,7 +34,9 @@ PRIVATE_RESOURCE_DIR = CACHE_ROOT / "private_active"
 PRIVATE_STATE_FILE = CACHE_ROOT / "private_state.json"
 
 PIG_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-ALLOWED_IMAGE_SUFFIXES = {".png"}
+# GIF 资源应优先于同名 PNG，让资源包把某只猪替换为动态版时无需改 pig.json。
+IMAGE_SUFFIX_PRIORITY = (".gif", ".png")
+ALLOWED_IMAGE_SUFFIXES = set(IMAGE_SUFFIX_PRIORITY)
 RESOURCE_MANIFEST_MAX_SIZE = 1 * 1024 * 1024
 RESOURCE_PIG_JSON_MAX_SIZE = 2 * 1024 * 1024
 RESOURCE_RULES_JSON_MAX_SIZE = 256 * 1024
@@ -198,7 +200,7 @@ class RollPigResourceManager:
 
     def find_image_file(self, pig_id: str) -> Path | None:
         for image_dir in self.image_dirs:
-            for suffix in ALLOWED_IMAGE_SUFFIXES:
+            for suffix in IMAGE_SUFFIX_PRIORITY:
                 image_file = image_dir / f"{pig_id}{suffix}"
                 if image_file.exists():
                     return image_file
@@ -704,7 +706,11 @@ class RollPigResourceManager:
         missing: list[str] = []
         for item in pig_list:
             pig_id = str(item.get("id") or "")
-            if not any((image_dir / f"{pig_id}.png").exists() for image_dir in image_dirs):
+            if not any(
+                (image_dir / f"{pig_id}{suffix}").exists()
+                for image_dir in image_dirs
+                for suffix in IMAGE_SUFFIX_PRIORITY
+            ):
                 missing.append(pig_id)
         if missing:
             raise ValueError(f"资源包缺少图片: {', '.join(missing[:10])}")

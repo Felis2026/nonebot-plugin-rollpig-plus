@@ -333,6 +333,9 @@ def _thumbnail_uri(pig_id: str, image_file: Path) -> str:
 
     THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with Image.open(image_file) as image:
+        # 图鉴保持静态陈列：GIF 只取首帧做缩略图，避免截图时落在不可控动画帧。
+        if getattr(image, "is_animated", False):
+            image.seek(0)
         image = image.convert("RGBA")
         image.thumbnail((128, 128), Image.Resampling.LANCZOS)
         image.save(target, format="PNG", optimize=True)
