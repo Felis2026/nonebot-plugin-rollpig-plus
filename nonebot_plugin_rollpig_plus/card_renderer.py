@@ -223,6 +223,21 @@ def _text_height(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont
     return max(1, bbox[3] - bbox[1])
 
 
+def _font_line_top(font: ImageFont.ImageFont, y: int, line_height: int) -> int:
+    """按字体整体指标定位行顶；正文多行用它固定基线，避免每行按内容 bbox 上下漂移。"""
+
+    try:
+        ascent, descent = font.getmetrics()
+        font_height = ascent + descent
+    except Exception:
+        # Pillow 默认字体等少数对象没有 getmetrics；用中英文混合样本估一个稳定高度。
+        probe = "国Hg"
+        mask = font.getmask(probe)
+        bbox = mask.getbbox() or (0, 0, 1, line_height)
+        font_height = max(1, bbox[3] - bbox[1])
+    return int(y + max(0, line_height - font_height) / 2)
+
+
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_./:+#@%-]+|[^\S\n]+|\n|.", re.S)
 
 
@@ -618,8 +633,9 @@ def _draw_text_line(
     fill: tuple[int, int, int, int],
     *,
     max_width: int,
+    align_by_baseline: bool = False,
 ) -> None:
-    """水平居中绘制单行文本；含 Emoji 时用 pilmoji 从本地 ZIP 贴图。"""
+    """水平居中绘制单行文本；正文可按统一基线绘制，避免混合字符导致行距视觉漂移。"""
 
     if not text:
         return
@@ -639,7 +655,7 @@ def _draw_text_line(
                     spacing=0,
                     emoji_scale_factor=EMOJI_SCALE_FACTOR,
                 )
-                text_y = int(y + (line_height - measured_height) / 2)
+                text_y = _font_line_top(font, y, line_height) if align_by_baseline else int(y + (line_height - measured_height) / 2)
                 with Pilmoji(
                     canvas,
                     source=source,
@@ -661,7 +677,10 @@ def _draw_text_line(
 
     bbox = draw.textbbox((0, 0), text, font=font)
     text_h = max(1, bbox[3] - bbox[1])
-    text_y = int(y + (line_height - text_h) / 2 - bbox[1])
+    if align_by_baseline:
+        text_y = _font_line_top(font, y, line_height)
+    else:
+        text_y = int(y + (line_height - text_h) / 2 - bbox[1])
     draw.text((x, text_y), text, fill=fill, font=font)
 
 
@@ -700,6 +719,7 @@ def _prepare_card_without_avatar(pig_data: Mapping[str, Any]) -> _PreparedCard:
                 layout.analysis_line_height,
                 ANALYSIS_COLOR,
                 max_width=CONTENT_WIDTH,
+                align_by_baseline=True,
             )
             y += layout.analysis_line_height
 
