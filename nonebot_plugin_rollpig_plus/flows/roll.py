@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 
-from ..resource_manager import pig_resource_manager
+from ..services.resource import pig_resource_manager
 from ..store import store
 from ..store.models import DailyRollResult, DrawState
 from ..texts import (
@@ -23,9 +23,7 @@ def get_expert_level(copies: int) -> int:
 
 
 # ================================ 今日小猪成长流程 ================================ #
-# 这里集中处理“今日小猪”与图鉴成长相关的纯业务规则。
-# 命令注册、事件解析和消息发送仍留在 __init__.py，避免 NoneBot matcher 注册迁移带来的
-# import 顺序风险；本模块只依赖资源管理器与 store，可独立做后续单元测试。
+# 集中处理“今日小猪”与图鉴成长相关的纯业务规则。
 
 
 async def pick_daily_roll_candidate(user_id: str) -> dict:

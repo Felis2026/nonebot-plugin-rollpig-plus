@@ -17,11 +17,12 @@ from nonebot import get_plugin_config
 from nonebot.log import logger
 import nonebot_plugin_localstore as localstore
 
-from .config import Config
+from ..config import Config
+from ..paths import PACKAGE_DIR, RESOURCE_DIR
 
 
-PLUGIN_DIR = Path(__file__).parent
-BUILTIN_RESOURCE_DIR = PLUGIN_DIR / "resource"
+PLUGIN_DIR = PACKAGE_DIR
+BUILTIN_RESOURCE_DIR = RESOURCE_DIR
 BUILTIN_PIG_JSON = BUILTIN_RESOURCE_DIR / "pig.json"
 BUILTIN_RULES_JSON = BUILTIN_RESOURCE_DIR / "pig_rules.json"
 BUILTIN_IMAGE_DIR = BUILTIN_RESOURCE_DIR / "image"

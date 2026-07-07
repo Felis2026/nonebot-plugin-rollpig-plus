@@ -13,7 +13,8 @@ from pilmoji import Pilmoji
 from pilmoji.helpers import EMOJI_REGEX, getsize as pilmoji_getsize
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps, ImageSequence
 
-from .emoji_source import get_noto_emoji_source
+from ..paths import RESOURCE_DIR
+from .emoji import get_noto_emoji_source
 
 
 CANVAS_SIZE = (800, 800)
@@ -50,11 +51,10 @@ PLACEHOLDER_FG = (154, 92, 135, 255)
 EMOJI_SCALE_FACTOR = 1.08
 EMOJI_POSITION_OFFSET = (0, -2)
 EXTRA_EMOJI_SYMBOLS = {
-    # pig.json 中少量文本音乐符号不是标准 Emoji，中文字体又可能缺字；
-    # 渲染时映射为 Noto Emoji 音符，不修改原始文案数据。
+    # pig.json 中少量文本音乐符号不是标准 Emoji，中文字体又可能缺字；渲染时映射为 Noto Emoji 音符，不修改原始文案数据。
     "\u266a": "\U0001f3b5",
 }
-PACKAGE_FONT_DIR = Path(__file__).parent / "resource" / "fonts"
+PACKAGE_FONT_DIR = RESOURCE_DIR / "fonts"
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,7 @@ def _configured_font_candidates(*, bold: bool) -> list[Path]:
     try:
         from nonebot import get_plugin_config
 
-        from .config import Config
+        from ..config import Config
 
         config = get_plugin_config(Config)
     except Exception as error:

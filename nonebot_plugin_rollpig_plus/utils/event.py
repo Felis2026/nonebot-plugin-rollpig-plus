@@ -4,13 +4,12 @@ from nonebot import get_driver
 from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent
 from nonebot.log import logger
 
-from .runtime import rollpig_date_str
-from .store import store
+from ..runtime import rollpig_date_str
+from ..store import store
 
 
 # ================================ 事件身份与群成员工具 ================================ #
 # 本模块只做事件对象解析和群成员候选筛选，不注册 matcher，也不直接发送消息。
-# 这样命令层可以继续留在 __init__.py，同时把容易复用的事件解析逻辑先移出大文件。
 
 
 def get_event_group_id(event: Event | None) -> str:

@@ -7,7 +7,7 @@ from typing import AsyncIterator
 from nonebot import get_plugin_config
 from nonebot.log import logger
 
-from .config import Config
+from ..config import Config
 
 
 # ================================ Chromium 渲染总预算 ================================ #

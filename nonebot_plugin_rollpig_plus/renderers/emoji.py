@@ -4,13 +4,13 @@ import threading
 import zipfile
 from functools import lru_cache
 from io import BytesIO
-from pathlib import Path
 
 from nonebot.log import logger
 from pilmoji.source import BaseSource
 
+from ..paths import RESOURCE_DIR
 
-NOTO_EMOJI_ZIP_PATH = Path(__file__).parent / "resource" / "emoji" / "google-emoji.zip"
+NOTO_EMOJI_ZIP_PATH = RESOURCE_DIR / "emoji" / "google-emoji.zip"
 _VARIATION_SELECTORS = {0xFE0E, 0xFE0F}
 
 

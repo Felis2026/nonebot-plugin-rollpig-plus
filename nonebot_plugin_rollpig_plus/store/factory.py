@@ -14,7 +14,7 @@ def build_store() -> RollpigStore:
 
         return CloudStore()
 
-    from ..data_manager import get_data_manager
+    from ..services.data_manager import get_data_manager
     from .local_json import LocalJsonStore
 
     return LocalJsonStore(get_data_manager)

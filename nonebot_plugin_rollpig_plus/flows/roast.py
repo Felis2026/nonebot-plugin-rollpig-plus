@@ -4,9 +4,9 @@ import random
 from dataclasses import dataclass
 from typing import Optional
 
-from ..event_utils import is_superuser_user
-from ..resource_manager import pig_resource_manager
-from ..roast_manager import roast_manager
+from ..services.resource import pig_resource_manager
+from ..services.roast import roast_manager
+from ..utils.event import is_superuser_user
 from ..texts import (
     BACKFIRE_EATEN_TEXTS,
     BACKFIRE_FOOD_TEXTS,
@@ -43,7 +43,7 @@ class RoastFoodMissingError(RuntimeError):
 
 
 # ================================ 烤猪形态规则 ================================ #
-# 这里收口“哪些猪能被烤/不能被烤”的基础判定。
+# “哪些猪能被烤/不能被烤”的基础判定。
 # 资源包可以通过 pig_rules.json 扩展特殊形态，因此不要只依赖 texts.py 里的旧常量。
 
 

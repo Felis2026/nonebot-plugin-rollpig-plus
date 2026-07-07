@@ -9,7 +9,7 @@ import nonebot_plugin_localstore as store
 from nonebot import get_plugin_config, logger
 from openai import AsyncOpenAI
 
-from .config import Config
+from ..config import Config
 
 # 数据文件
 ROAST_LIB_FILE = store.get_plugin_data_file("roast_library.json")
@@ -219,7 +219,7 @@ class RoastManager:
                 f"要求：风格地狱笑话，尖酸刻薄，严禁客套。"
             )
 
-        # === 场景 B: 烤群友 PvP (必须带占位符) ===
+        # === 场景 B: 烤群友 PvP ===
         elif is_pvp:
             prompt = (
                 f"【吐槽对象】：凶手把受害者（本体【{origin_pig['name']}】，特征：{origin_feature}）残忍地做成了【{target_food['name']}】。\n"
@@ -232,7 +232,7 @@ class RoastManager:
                 f"要求：既要体现受害者惨状，又要调侃凶手，必须包含 {{k}} 和 {{v}}。"
             )
 
-        # === 场景 C: 标准烤猪 PvE (完全还原你要求的高质量版) ===
+        # === 场景 C: 标准烤猪 PvE ===
         else:
             prompt = (
                 f"现在进行一场【猪生终结吐槽大会】。\n"

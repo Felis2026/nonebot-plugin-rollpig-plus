@@ -37,7 +37,6 @@ def rollpig_date_str(offset_days: int = 0) -> str:
 
 
 # ================================ 外部群开关适配 ================================ #
-# rollpig 作为通用插件，不直接依赖 nekobot_v2 的 admin_console。
 # 这里仅暴露“可选群启用检查器”接口，宿主项目若有控制台/控制面，
 # 可以把自己的群开关逻辑挂进来；没有则保持默认放行。
 _group_enable_checker: Optional[Callable[[str], bool]] = None

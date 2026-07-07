@@ -16,15 +16,16 @@ from nonebot import get_plugin_config
 from PIL import Image
 import nonebot_plugin_localstore as localstore
 
-from .config import Config
-from .perf_logging import log_perf
-from .render_budget import html_render_budget
-from .resource_manager import pig_resource_manager
-from .runtime import ROLLPIG_TIMEZONE, rollpig_today
-from .store.models import CatalogSnapshot, DrawState, PigProgress
+from ..config import Config
+from ..paths import RESOURCE_DIR
+from ..services.resource import pig_resource_manager
+from ..utils.perf import log_perf
+from ..runtime import ROLLPIG_TIMEZONE, rollpig_today
+from ..store.models import CatalogSnapshot, DrawState, PigProgress
+from .budget import html_render_budget
 
 
-RES_DIR = Path(__file__).parent / "resource"
+RES_DIR = RESOURCE_DIR
 THUMB_CACHE_DIR = localstore.get_plugin_cache_dir() / "catalog_thumbs"
 CATALOG_BASE_IMAGE = RES_DIR / "catalog_base.png"
 CATALOG_TEMPLATE = "catalog_template.html"
@@ -62,7 +63,7 @@ class _CatalogPagePool:
     """复用 htmlrender 已启动的 Chromium，为图鉴保留少量常驻页面。
 
     `template_to_pic` 每次都会创建/关闭页面并等待通用的 networkidle；图鉴资源固定且
-    基本都是本地文件，因此复用页面可以减少冷渲染时的页面生命周期开销。池大小仍由
+    基本都是本地文件，复用页面可以减少冷渲染时的页面生命周期开销。池大小仍由
     并发配置限制，避免多人同时触发时把 Chromium 裸并发打满。
     """
 

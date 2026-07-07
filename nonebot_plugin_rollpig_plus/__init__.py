@@ -13,7 +13,7 @@ from nonebot.log import logger
 from nonebot.plugin import PluginMetadata
 
 # 确保依赖插件先被 NoneBot 注册（必须在本地模块 import 之前）
-# data_manager.py 在模块加载时会调用 store.get_plugin_data_file()；
+# services/data_manager.py 在模块加载时会调用 store.get_plugin_data_file()；
 # 定时任务也需要 apscheduler 提前完成插件注册，避免商店/静态审核误判。
 require("nonebot_plugin_htmlrender")
 require("nonebot_plugin_localstore")
@@ -22,19 +22,19 @@ require("nonebot_plugin_apscheduler")
 from nonebot_plugin_apscheduler import scheduler
 
 # 本地模块（在 require() 之后 import）
-from .command_guards import guard_group_enabled, guard_store_errors
+from .utils.command_guards import guard_group_enabled, guard_store_errors
 from .config import Config
-from .card_renderer import render_pig_card_image
-from .catalog_renderer import render_catalog_image, shutdown_catalog_renderer
-from .event_utils import (
+from .renderers.card import render_pig_card_image
+from .renderers.catalog import render_catalog_image, shutdown_catalog_renderer
+from .utils.event import (
     get_event_group_id,
     get_event_user_name,
     get_group_roll_candidates,
     is_superuser_user,
 )
-from .perf_logging import log_perf
-from .pighub_service import PIGHUB_REFRESH_INTERVAL_HOURS, build_pighub_image_url, pighub_service
-from .resource_manager import pig_resource_manager
+from .utils.perf import log_perf
+from .services.pighub import PIGHUB_REFRESH_INTERVAL_HOURS, build_pighub_image_url, pighub_service
+from .services.resource import pig_resource_manager
 from .flows.roll import (
     build_pigsty_growth_summary,
     build_roll_growth_text,
@@ -62,7 +62,7 @@ from .runtime import (
 )
 from .store import store
 from .store.models import RoastEvent
-from .summary_service import build_daily_summary
+from .services.summary import build_daily_summary
 from .texts import (
     TOMORROW_TEXTS,
     TODAY_ROAST_HUMAN_BLOCK_TEXTS, TODAY_ROAST_EATEN_BLOCK_TEXTS, TODAY_ROAST_SOLD_BLOCK_TEXTS, TODAY_ROAST_FOOD_BLOCK_TEXTS,
