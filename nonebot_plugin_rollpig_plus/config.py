@@ -64,7 +64,7 @@ class Config(BaseModel):
     rollpig_ai_enabled: bool = False  # 是否开启 AI 生成
     rollpig_deepseek_key: Optional[str] = None  # DeepSeek API Key
     rollpig_deepseek_base: str = "https://api.deepseek.com" # Base URL
-    rollpig_model: str = "deepseek-chat" # 模型名称
+    rollpig_model: str = "deepseek-v4-flash" # 模型名称
     rollpig_ai_timeout: float = 20.0  # 单次 AI 生成超时时间（秒）
     rollpig_ai_concurrency: int = 4  # AI 文案生成并发上限
     rollpig_ai_max_tokens: int = 4096  # AI 单次响应 token 上限

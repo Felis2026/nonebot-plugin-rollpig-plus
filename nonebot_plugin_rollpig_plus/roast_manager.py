@@ -3,6 +3,7 @@ import random
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, List
+from urllib.parse import urlparse
 
 import nonebot_plugin_localstore as store
 from nonebot import get_plugin_config, logger
@@ -28,6 +29,52 @@ def _clamp_number(value: object, default: float, minimum: float, maximum: float)
 
 def _clamp_int(value: object, default: int, minimum: int, maximum: int) -> int:
     return int(_clamp_number(value, default, minimum, maximum))
+
+
+# ================================ DeepSeek V4 兼容 ================================ #
+# DeepSeek 旧模型名会在 2026-07-24 弃用；这里在运行时兼容旧配置，
+# 同时只对官方 API 注入 thinking 扩展字段，避免第三方 OpenAI 网关不兼容。
+def _is_deepseek_official_base(base_url: str) -> bool:
+    """仅对 DeepSeek 官方地址注入 V4 私有参数，避免破坏第三方 OpenAI 兼容网关。"""
+
+    try:
+        parsed = urlparse((base_url or "").strip())
+    except Exception:
+        return False
+    return parsed.scheme in {"http", "https"} and parsed.netloc.lower() == "api.deepseek.com"
+
+
+def _resolve_deepseek_model(model: str, base_url: str, *, warn: bool = True) -> tuple[str, dict | None]:
+    """兼容 DeepSeek 旧模型名，并为 V4 Flash 短文案默认关闭思考模式。"""
+
+    configured_model = (model or "").strip() or "deepseek-v4-flash"
+    normalized_model = configured_model.lower()
+    is_official = _is_deepseek_official_base(base_url)
+
+    if normalized_model == "deepseek-chat":
+        if not is_official:
+            return configured_model, None
+        if warn:
+            logger.warning(
+                "检测到旧 DeepSeek 模型名 deepseek-chat，已自动兼容为 deepseek-v4-flash 非思考模式；"
+                "建议更新 rollpig_model 配置。"
+            )
+        return "deepseek-v4-flash", {"thinking": {"type": "disabled"}}
+
+    if normalized_model == "deepseek-reasoner":
+        if not is_official:
+            return configured_model, None
+        if warn:
+            logger.warning(
+                "检测到旧 DeepSeek 模型名 deepseek-reasoner，已自动兼容为 deepseek-v4-flash 思考模式；"
+                "AI 烤猪短文案建议改用 deepseek-v4-flash 非思考模式。"
+            )
+        return "deepseek-v4-flash", {"thinking": {"type": "enabled"}}
+
+    if normalized_model == "deepseek-v4-flash":
+        return configured_model, {"thinking": {"type": "disabled"}} if is_official else None
+
+    return configured_model, None
 
 # ================= 默认兜底文案模板 =================
 DEFAULT_TEMPLATES = [
@@ -62,6 +109,11 @@ class RoastManager:
         )
         # AI 只有在“开关开启 + key 存在”时才会启用。
         self.ai_ready = bool(plugin_config.rollpig_ai_enabled and plugin_config.rollpig_deepseek_key)
+        self.ai_model, self.ai_extra_body = _resolve_deepseek_model(
+            plugin_config.rollpig_model,
+            plugin_config.rollpig_deepseek_base,
+            warn=self.ai_ready,
+        )
         if self.ai_ready:
             self.client = AsyncOpenAI(
                 api_key=plugin_config.rollpig_deepseek_key,
@@ -205,16 +257,22 @@ class RoastManager:
             # OpenAI 兼容接口可能在网络抖动时长时间挂起；这里用本地超时和并发闸门
             # 保护 NoneBot 事件循环，失败后由调用方回落本地模板。
             async with self._ai_semaphore:
+                request_kwargs = {
+                    "model": self.ai_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                    "max_tokens": self.ai_max_tokens,
+                }
+                if self.ai_extra_body is not None:
+                    # DeepSeek V4 的 thinking 是官方 OpenAI 兼容接口扩展字段；
+                    # 第三方网关不一定支持，所以只在解析阶段确认安全时才注入。
+                    request_kwargs["extra_body"] = self.ai_extra_body
+
                 response = await asyncio.wait_for(
-                    self.client.chat.completions.create(
-                        model=plugin_config.rollpig_model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt},
-                        ],
-                        stream=False,
-                        max_tokens=self.ai_max_tokens,
-                    ),
+                    self.client.chat.completions.create(**request_kwargs),
                     timeout=self.ai_timeout,
                 )
             usage = getattr(response, "usage", None)

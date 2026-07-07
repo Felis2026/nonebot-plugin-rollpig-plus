@@ -127,7 +127,7 @@ playwright install chromium
   "rollpig": {
     // ================================ AI 烤猪 ================================ //
     "rollpig_ai_enabled": false,               // 是否启用 AI 烤猪；只填 Key 不会自动开启
-    "rollpig_model": "deepseek-chat",          // AI 模型名称，默认 DeepSeek Chat
+    "rollpig_model": "deepseek-v4-flash",      // AI 模型名称，默认 DeepSeek V4 Flash 非思考模式
     "rollpig_ai_timeout": 20.0,                // 单次 AI 文案生成超时时间（秒），超时自动回退本地模板
     "rollpig_ai_concurrency": 4,               // AI 文案生成并发上限，避免多人同时烤猪时堆积请求
     "rollpig_ai_max_tokens": 4096,             // AI 单次响应 token 上限，防止异常长输出
@@ -289,6 +289,7 @@ nonebot_plugin_rollpig_plus/
 #### 🔧 其他特性
 - 资源图片支持 `.png` / `.gif`，普通卡片头像统一规整到 240×240 区域，图片版图鉴固定取 GIF 首帧。
 - 内置公共资源同步至 `2026-06-28.1`，默认小猪数量更新至 165 只，并同步最新资源规则。
+- **重要：DeepSeek V4 适配**：AI 烤猪默认模型切换为 `deepseek-v4-flash` 非思考模式；旧配置中的 `deepseek-chat` / `deepseek-reasoner` 会自动兼容，但建议尽快更新或删除旧模型项使用默认值。
 
 完整更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 
