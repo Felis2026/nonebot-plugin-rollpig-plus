@@ -11,9 +11,6 @@ from openai import AsyncOpenAI
 
 from .config import Config
 
-# 获取配置
-plugin_config = get_plugin_config(Config)
-
 # 数据文件
 ROAST_LIB_FILE = store.get_plugin_data_file("roast_library.json")
 
@@ -93,7 +90,9 @@ PVP_TEMPLATES = [
 ]
 
 class RoastManager:
-    def __init__(self):
+    def __init__(self, config: Config | None = None):
+        # 允许测试或后续工厂函数显式注入配置；运行时不传则沿用 NoneBot 当前插件配置。
+        plugin_config = config or get_plugin_config(Config)
         self.file = ROAST_LIB_FILE
         self.library: Dict[str, Dict[str, List[str]]] = self._load()
         # AI 文案可能由多个群同时触发生成；保存文案库时必须串行化，
