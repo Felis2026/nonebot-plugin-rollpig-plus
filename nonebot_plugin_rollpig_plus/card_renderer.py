@@ -134,8 +134,7 @@ def _font_candidates(*, bold: bool) -> list[Path]:
         PACKAGE_FONT_DIR / ("msyhbd.ttc" if bold else "msyh.ttc"),
         PACKAGE_FONT_DIR / "msyh.ttc",
         PACKAGE_FONT_DIR / "msyhbd.ttc",
-        # V2 私有 Docker 已挂载 `./fonts:/root/.fonts`；Pillow 不走 fontconfig，
-        # 这里必须显式列路径，否则容器里仍会退回默认位图字体。
+        # 必须显式列路径，否则容器里仍会退回默认位图字体。
         Path.cwd() / "fonts" / ("msyhbd.ttc" if bold else "msyh.ttc"),
         Path.cwd() / "fonts" / "msyh.ttc",
         Path.cwd() / "fonts" / "msyhbd.ttc",

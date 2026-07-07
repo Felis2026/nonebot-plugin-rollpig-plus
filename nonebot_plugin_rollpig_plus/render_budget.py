@@ -12,7 +12,7 @@ from .config import Config
 
 # ================================ Chromium 渲染总预算 ================================ #
 # 图鉴有自己的页面池；普通小猪卡片已迁移到 Pillow，不再占用 Chromium。
-# 这里直接复用图鉴并发配置作为外围预算，避免维护两套含义接近的参数。
+# 直接复用图鉴并发配置作为外围预算，避免维护两套含义接近的参数。
 
 _html_render_semaphore: asyncio.Semaphore | None = None
 _html_render_limit: int | None = None

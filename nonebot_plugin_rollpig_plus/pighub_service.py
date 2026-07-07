@@ -44,7 +44,6 @@ class PigHubService:
 
     # ================================ 缓存读写 ================================ #
     # PigHub 是外部站点，缓存的是 API 返回的图片索引，避免每次命令都打接口。
-    # 不缓存图片二进制，既控制本地磁盘占用，也避免把本插件变成 PigHub 镜像爬虫。
     def _load_cache_sync(self) -> None:
         if not self.cache_file.exists():
             return

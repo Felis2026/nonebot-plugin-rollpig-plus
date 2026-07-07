@@ -30,7 +30,6 @@ CATALOG_BASE_IMAGE = RES_DIR / "catalog_base.png"
 CATALOG_TEMPLATE = "catalog_template.html"
 CATALOG_ANCHOR_HTML = RES_DIR / "catalog_anchor.html"
 CATALOG_SIZE = (1536, 1024)
-# 当前底图安全区按 38 张卡片精修，开放配置会让最后一行与装饰区重新漂移。
 CATALOG_PAGE_SIZE = 38
 CATALOG_CACHE_MAX_ENTRIES = 64
 CATALOG_CACHE_MAX_BYTES = 64 * 1024 * 1024
@@ -156,9 +155,6 @@ class _CatalogPagePool:
         )
         page.set_default_timeout(timeout_ms)
         page.on("console", lambda msg: log_perf(f"rollpig catalog browser console: {msg.text}"))
-        # 先进入插件资源目录下的 HTML file:// 页面，再 set_content；否则 about:blank
-        # 安全上下文会拒绝加载本地图鉴底图和缩略图资源。不能锚到 PNG，否则 Chromium
-        # 会把主文档视作图片页面，后续 set_content 可能卡在 domcontentloaded。
         await page.goto(CATALOG_ANCHOR_HTML.as_uri(), wait_until="domcontentloaded", timeout=timeout_ms)
         async with self._lock:
             self._pages.add(page)
@@ -297,8 +293,6 @@ def _parse_datetime(value: str | None) -> dt.datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is not None:
-        # first_obtained_at 本地模式按 UTC 写入；NEW 徽章属于用户可见业务日期，
-        # 因此要先换算到 RollPig 日期边界再取 date。
         parsed = parsed.astimezone(ROLLPIG_TIMEZONE).replace(tzinfo=None)
     return parsed
 
@@ -556,7 +550,6 @@ async def render_catalog_image(
 
     # ================================ 图鉴同键合流 ================================ #
     # 多群同时请求同一页时，只让第一个请求真正渲染；其余请求等待同一个 task。
-    # 这不是数据一致性要求，而是为了避免缓存击穿时把 Chromium 重复打满。
     render_owner = False
     async with _catalog_cache_lock:
         cached_payload = _get_catalog_cache_locked(cache_key, ttl=ttl, now=time.time())

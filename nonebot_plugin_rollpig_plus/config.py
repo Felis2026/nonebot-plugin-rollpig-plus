@@ -84,7 +84,7 @@ class Config(BaseModel):
     rollpig_resource_sync_interval_hours: int = 24
     rollpig_resource_sync_timeout: float = 10.0
     rollpig_resource_max_file_size: int = 10 * 1024 * 1024
-    # 私有资源包是公有全量包之上的 overlay；公开版默认关闭，避免商店用户无感拉取维护者私有资源。
+    # 私有资源包是公有全量包之上的 overlay；公开版默认关闭。
     rollpig_private_resource_manifest_url: Optional[str] = ""
     rollpig_private_resource_token: Optional[str] = None
 

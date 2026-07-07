@@ -10,8 +10,8 @@ from nonebot.log import logger as nonebot_logger
 def get_perf_logger() -> Any:
     """获取 RollPig 性能日志使用的 logger。
 
-    nekobot_v2 的普通 NoneBot INFO 日志会被过滤，而项目自带 logger 可以正常出现在
-    Docker 日志里；这里用可选导入保持外部插件仓库仍能独立运行。
+    普通 NoneBot INFO 日志会被过滤，而项目自带 logger 可以正常出现在
+    Docker 日志里；用可选导入保持外部插件仓库仍能独立运行。
     """
     try:
         from src.plugins.utils.utils import get_logger as get_v2_logger

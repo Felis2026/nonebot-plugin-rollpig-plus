@@ -306,8 +306,7 @@ class PigDataManager:
 
     # ================================ P1A抽猪成长状态 ================================ #
     # 本地模式没有数据库事务，因此所有写入都必须在调用方持有 self._lock 时完成。
-    # 这里与 cloud 的 P1A 语义保持一致：只有当天 DailyRoll 首次创建成功时，
-    # 才允许 copies / duplicate_streak 变化，重复发送命令只读取既有结果。
+    # 与 cloud 的 P1A 语义保持一致：只有当天 DailyRoll 首次创建成功时，才允许 copies / duplicate_streak 变化，重复发送命令只读取既有结果。
 
     def get_draw_state(self, user_id: str) -> DrawState:
         """返回用户图鉴成长状态；旧 collection 数据会按 copies=1 兜底聚合。"""
