@@ -9,7 +9,7 @@ import nonebot_plugin_localstore as store
 from nonebot import get_plugin_config, logger
 from openai import AsyncOpenAI
 
-from ..config import Config
+from .config import Config
 
 # 数据文件
 ROAST_LIB_FILE = store.get_plugin_data_file("roast_library.json")

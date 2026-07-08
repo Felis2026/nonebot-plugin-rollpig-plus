@@ -4,10 +4,10 @@ import random
 from dataclasses import dataclass
 from typing import Optional
 
-from ..services.resource import pig_resource_manager
-from ..services.roast import roast_manager
-from ..utils.event import is_superuser_user
-from ..texts import (
+from .resource_manager import pig_resource_manager
+from .roast_manager import roast_manager
+from .helpers import is_superuser_user
+from .texts import (
     BACKFIRE_EATEN_TEXTS,
     BACKFIRE_FOOD_TEXTS,
     BACKFIRE_GENERIC_TEXTS,
@@ -24,6 +24,14 @@ from ..texts import (
     SOLD_PIG_ID,
     SUPER_FORCE_ROAST_KEYWORD,
     SUPER_FORCE_ROAST_PREFIX_TEXTS,
+    TARGET_EATEN_BLOCK_TEXTS,
+    TARGET_FOOD_BLOCK_TEXTS,
+    TARGET_HUMAN_BLOCK_TEXTS,
+    TARGET_SOLD_BLOCK_TEXTS,
+    TODAY_ROAST_EATEN_BLOCK_TEXTS,
+    TODAY_ROAST_FOOD_BLOCK_TEXTS,
+    TODAY_ROAST_HUMAN_BLOCK_TEXTS,
+    TODAY_ROAST_SOLD_BLOCK_TEXTS,
 )
 
 
@@ -202,6 +210,85 @@ def format_cooldown_message(remaining_seconds: int) -> str:
     hours, minutes = divmod(minutes, 60)
     time_str = f"{hours}小时{minutes}分" if hours > 0 else f"{minutes}分{seconds}秒"
     return f"烧烤充能恢复中！还需要 {time_str} 恢复 1 次。"
+
+
+# ================================ 烤猪拦截文案 ================================ #
+# “不能被烤”的特殊形态在今日烤猪、指定烤群友、随机烤群友里都会出现。
+# 集中在 flow 层能避免 handler 里堆重复 if，也保证后续新增特殊形态时口径一致。
+
+
+def pick_self_roast_block_text(pig_data: Optional[dict]) -> Optional[str]:
+    """返回“今日烤猪”的特殊形态拦截文案；可正常烧烤时返回 None。"""
+
+    if is_human_pig(pig_data):
+        return random.choice(TODAY_ROAST_HUMAN_BLOCK_TEXTS)
+    if is_eaten_pig(pig_data):
+        return random.choice(TODAY_ROAST_EATEN_BLOCK_TEXTS)
+    if is_sold_pig(pig_data):
+        return random.choice(TODAY_ROAST_SOLD_BLOCK_TEXTS)
+    if is_food_pig(pig_data):
+        shape = pig_data.get("name", "熟食") if pig_data else "熟食"
+        return random.choice(TODAY_ROAST_FOOD_BLOCK_TEXTS).format(shape=shape)
+    return None
+
+
+def pick_member_target_block_text(target_name: str, target_pig: Optional[dict]) -> Optional[str]:
+    """返回“烤群友”的目标特殊形态拦截文案；可正常烧烤时返回 None。"""
+
+    if is_human_pig(target_pig):
+        return random.choice(TARGET_HUMAN_BLOCK_TEXTS).format(target=target_name)
+    if is_eaten_pig(target_pig):
+        return random.choice(TARGET_EATEN_BLOCK_TEXTS).format(target=target_name)
+    if is_sold_pig(target_pig):
+        return random.choice(TARGET_SOLD_BLOCK_TEXTS).format(target=target_name)
+    if is_food_pig(target_pig):
+        shape = target_pig.get("name", "熟食") if target_pig else "熟食"
+        return random.choice(TARGET_FOOD_BLOCK_TEXTS).format(target=target_name, shape=shape)
+    return None
+
+
+def pick_random_target_block_text(target_name: str, target_pig: Optional[dict]) -> Optional[str]:
+    """返回“随机烤群友”的目标特殊形态拦截文案；保留随机命令原有的系统提示口吻。"""
+
+    if is_human_pig(target_pig):
+        return f"系统随机选中了【{target_name}】，但对方是人类形态，烤架拒绝处理。换一次试试？"
+    if is_eaten_pig(target_pig):
+        return random.choice(TARGET_EATEN_BLOCK_TEXTS).format(target=target_name)
+    if is_sold_pig(target_pig):
+        return random.choice(TARGET_SOLD_BLOCK_TEXTS).format(target=target_name)
+    if is_food_pig(target_pig):
+        shape = target_pig.get("name", "熟食") if target_pig else "熟食"
+        return f"系统随机选中了【{target_name}】，但对方已经是【{shape}】了，别鞭尸了。"
+    return None
+
+
+def format_roast_outcome_log(
+    scene: str,
+    *,
+    attacker_name: str,
+    attacker_id: str,
+    target_name: str,
+    target_id: str,
+    outcome: RoastOutcome,
+    force_mode: Optional[str] = None,
+) -> str:
+    """按场景格式化烤群友结果日志，避免多个 handler 分支复制同一套状态文案。"""
+
+    if outcome.event_type == "success":
+        log_mode = "后门成功" if force_mode in {"normal", "super"} else "成功"
+        mode_suffix = f" 模式={force_mode}" if force_mode in {"normal", "super"} else ""
+        return (
+            f"[{scene}] {log_mode} | 凶手={attacker_name}({attacker_id}) "
+            f"目标={target_name}({target_id}){mode_suffix} 结果={outcome.food_name}"
+        )
+    if outcome.event_type == "escape":
+        return f"[{scene}] 逃脱 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})"
+    if outcome.render_data:
+        return (
+            f"[{scene}] 反噬 | 凶手={attacker_name}({attacker_id}) "
+            f"目标={target_name}({target_id}) 凶手变成={outcome.food_name}"
+        )
+    return f"[{scene}] 反噬(文字) | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})"
 
 
 # ================================ 烤群友结果构造 ================================ #

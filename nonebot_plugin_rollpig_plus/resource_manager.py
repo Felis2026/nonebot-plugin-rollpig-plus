@@ -17,8 +17,10 @@ from nonebot import get_plugin_config
 from nonebot.log import logger
 import nonebot_plugin_localstore as localstore
 
-from ..config import Config
-from ..paths import PACKAGE_DIR, RESOURCE_DIR
+from .config import Config
+
+PACKAGE_DIR = Path(__file__).parent
+RESOURCE_DIR = PACKAGE_DIR / "resource"
 
 
 PLUGIN_DIR = PACKAGE_DIR
@@ -740,3 +742,50 @@ class RollPigResourceManager:
 
 
 pig_resource_manager = RollPigResourceManager()
+
+
+# ================================ 小猪资源快照 ================================ #
+# 命令层高频读取 `PIG_LIST`，这里保留同一个 list 对象并用切片刷新。
+# 这样 `from ... import PIG_LIST` 的旧调用方式不会因为资源重载而拿到过期引用。
+PIG_LIST: list[dict] = []
+
+
+def reload_rollpig_resources() -> None:
+    """刷新内存中的小猪资源快照；资源管理器会在云端资源损坏时回退内置资源。"""
+
+    pig_resource_manager.reload()
+    PIG_LIST[:] = pig_resource_manager.pig_list
+
+
+def find_image_file(pig_id: str) -> Path | None:
+    """返回指定小猪的本地图片路径；不存在时返回 None 交给渲染层兜底。"""
+
+    return pig_resource_manager.find_image_file(pig_id)
+
+
+def get_pig_by_id(pig_id: str | None) -> dict | None:
+    """从当前资源快照按 id 查找小猪数据。"""
+
+    if not pig_id:
+        return None
+    for pig in PIG_LIST:
+        if pig["id"] == pig_id:
+            return pig
+    return None
+
+
+async def sync_rollpig_resources(force: bool = False) -> str:
+    """同步公有云端资源与可选私有 overlay；成功后立即刷新内存快照。"""
+
+    public_result, private_result = await pig_resource_manager.sync_all(force=force, wait_if_busy=force)
+    if public_result.updated or private_result.updated:
+        PIG_LIST[:] = pig_resource_manager.pig_list
+
+    messages = []
+    for result in (public_result, private_result):
+        if result.message:
+            messages.append(result.message)
+    return "；".join(messages) or "小猪资源无需同步"
+
+
+reload_rollpig_resources()

@@ -6,7 +6,7 @@ from .base import RollpigStore
 from .models import CatalogSnapshot, CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
 
 if TYPE_CHECKING:
-    from ..services.data_manager import PigDataManager
+    from ..data_manager import PigDataManager
 
 
 class LocalJsonStore(RollpigStore):
