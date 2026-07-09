@@ -89,8 +89,9 @@ class Config(BaseModel):
     rollpig_private_resource_token: Optional[str] = None
 
     # --- 定时日报 ---
-    # 关闭后会跳过每日总结定时任务；该任务负责日报推送，以及日报派生的次日保护名单刷新。
-    rollpig_daily_summary_enabled: bool = True
+    # 默认关闭，避免新部署实例在管理员未确认前主动向群里推送日报。
+    # 开启后会执行日报推送，并刷新日报派生的次日保护（集火）名单。
+    rollpig_daily_summary_enabled: bool = False
 
     # --- 普通小猪卡片渲染 ---
     # Pillow 不具备浏览器级字体回退；Docker/Linux 缺字或想换风格时可显式指定字体。

@@ -34,6 +34,7 @@ __plugin_meta__ = PluginMetadata(
     我的猪圈 - 查看解锁进度
     小猪图鉴 - 生成图片版小猪图鉴
     本周小猪 - 生成本周猪猪总结长图
+    小猪日报 开启/关闭/状态 - 控制本群每日总结推送
     """,
     type="application",
     homepage="https://github.com/Felis2026/nonebot-plugin-rollpig-plus",
@@ -46,3 +47,4 @@ __plugin_meta__ = PluginMetadata(
 from .handlers import roll as _roll_handlers  # noqa: F401
 from .handlers import roast as _roast_handlers  # noqa: F401
 from .handlers import collection as _collection_handlers  # noqa: F401
+from .handlers import control as _control_handlers  # noqa: F401

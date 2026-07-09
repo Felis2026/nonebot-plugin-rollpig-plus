@@ -157,11 +157,6 @@ def build_daily_summary_text(summary: dict) -> str:
 async def daily_summary_job():
     """每晚 23:45~23:55 推送当日猪圈日报（随机延迟 0~10 分钟防风控）。"""
 
-    config = get_plugin_config(Config)
-    if not config.rollpig_daily_summary_enabled:
-        logger.info("[每日总结] rollpig_daily_summary_enabled=false，跳过定时日报任务")
-        return
-
     delay = random.randint(0, 600)  # 0~10 分钟随机延迟
     logger.info(f"[每日总结] 定时触发，随机延迟 {delay} 秒后推送")
     await asyncio.sleep(delay)
@@ -182,9 +177,22 @@ async def daily_summary_job():
             logger.info("[每日总结] 今日没有启用 rollpig 的活跃群，跳过推送")
             return
 
+        # ================================ 日报推送开关过滤 ================================ #
+        # 日报支持“默认关闭 + 分群开启”。必须先过滤出真正开启日报的群，
+        # 再计算日报与次日保护名单，避免关闭日报的群被定时任务产生副作用。
+        summary_push_groups = [
+            group_id for group_id in enabled_active_groups
+            if is_daily_summary_enabled(group_id)
+        ]
+        if not summary_push_groups:
+            await store.prune_events(days_to_keep=7)
+            await store.prune_history(days_to_keep=14)
+            logger.info("[每日总结] 已完成旧数据清理，但没有群开启日报推送")
+            return
+
         group_summaries = {}
         protect_date = rollpig_date_str(1)
-        for group_id in enabled_active_groups:
+        for group_id in summary_push_groups:
             summary = await build_daily_summary(store, group_id=group_id)
             group_summaries[group_id] = summary
             if summary.get("most_roasted_id") and summary.get("most_roasted_count", 0) >= 2:
@@ -199,17 +207,6 @@ async def daily_summary_job():
             bot = get_bot()
         except ValueError:
             logger.warning("[每日总结] 无可用 Bot，跳过推送")
-            return
-
-        # ================================ 日报推送开关过滤 ================================ #
-        # “日报推送”是独立于 rollpig 主功能的第二层开关：
-        # 群内玩法可以开启，但日报消息可以单独关闭。
-        summary_push_groups = [
-            group_id for group_id in enabled_active_groups
-            if is_daily_summary_enabled(group_id)
-        ]
-        if not summary_push_groups:
-            logger.info("[每日总结] 已完成保护名单刷新，但没有群开启日报推送")
             return
 
         for group_id in summary_push_groups:
