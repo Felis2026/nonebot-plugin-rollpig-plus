@@ -12,12 +12,11 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from nonebot import get_plugin_config
 from nonebot.log import logger
 from PIL import Image
 import nonebot_plugin_localstore as localstore
 
-from .config import Config
+from .config import plugin_config
 from .resource_manager import pig_resource_manager
 from .helpers import log_perf
 from .runtime import ROLLPIG_TIMEZONE, rollpig_today
@@ -38,8 +37,7 @@ _html_render_lock = asyncio.Lock()
 
 def _resolve_html_render_limit() -> int:
     try:
-        config = get_plugin_config(Config)
-        raw_limit = config.rollpig_catalog_render_concurrency
+        raw_limit = plugin_config.rollpig_catalog_render_concurrency
     except Exception as error:
         logger.warning(f"rollpig_catalog_render_concurrency 配置读取失败，已回退到 2: {error}")
         raw_limit = 2
@@ -556,13 +554,12 @@ async def _render_catalog_image_uncached(
     """执行一次真实图鉴渲染；外层负责同 key 合流，这里只管渲染与写缓存。"""
     from nonebot_plugin_htmlrender import template_to_html
 
-    config = get_plugin_config(Config)
     html_started_at = time.perf_counter()
     html = await template_to_html(str(RES_DIR), CATALOG_TEMPLATE, **payload)
     html_ready_at = time.perf_counter()
-    timeout_ms = max(1000, int(float(config.rollpig_catalog_render_timeout or 8.0) * 1000))
-    scale_factor = float(config.rollpig_catalog_scale_factor or 2.0)
-    pool = _get_page_pool(int(config.rollpig_catalog_render_concurrency or 2), scale_factor)
+    timeout_ms = max(1000, int(float(plugin_config.rollpig_catalog_render_timeout or 8.0) * 1000))
+    scale_factor = float(plugin_config.rollpig_catalog_scale_factor or 2.0)
+    pool = _get_page_pool(int(plugin_config.rollpig_catalog_render_concurrency or 2), scale_factor)
     async with html_render_budget("catalog"):
         page_result = await pool.render(html, timeout_ms=timeout_ms)
     postprocess_started_at = time.perf_counter()
@@ -592,10 +589,9 @@ async def render_catalog_image(
     started_at = time.perf_counter()
     payload = _build_template_payload(user_name=user_name, snapshot=snapshot, page=page)
     payload_ready_at = time.perf_counter()
-    config = get_plugin_config(Config)
-    output_format = _normalize_output_format(config.rollpig_catalog_output_format)
+    output_format = _normalize_output_format(plugin_config.rollpig_catalog_output_format)
     cache_key = f"{output_format}:{_build_cache_key(payload, snapshot, page)}"
-    ttl = max(0, int(config.rollpig_catalog_cache_seconds or 0))
+    ttl = max(0, int(plugin_config.rollpig_catalog_cache_seconds or 0))
 
     # ================================ 图鉴同键合流 ================================ #
     # 多群同时请求同一页时，只让第一个请求真正渲染；其余请求等待同一个 task。

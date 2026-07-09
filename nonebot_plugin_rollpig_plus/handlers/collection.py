@@ -1,12 +1,12 @@
 import datetime
 import time
 
-from nonebot import get_plugin_config, on_command
+from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Event, Message, MessageSegment
 from nonebot.log import logger
 from nonebot.params import CommandArg
 
-from ..config import Config
+from ..config import plugin_config
 from ..roll_flow import build_pigsty_growth_summary
 from ..catalog_renderer import render_catalog_image
 from ..card_renderer import render_weekly_pig_image
@@ -54,7 +54,6 @@ cmd_catalog = on_command("小猪图鉴", aliases={"猪猪图鉴", "完整图鉴"
 @guard_group_enabled(cmd_catalog)
 @guard_store_errors(cmd_catalog)
 async def _(event: Event, args: Message = CommandArg()):
-    plugin_config = get_plugin_config(Config)
     if not plugin_config.rollpig_catalog_enabled:
         await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "图片版小猪图鉴当前未启用。")
         return

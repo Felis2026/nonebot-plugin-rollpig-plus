@@ -92,7 +92,7 @@ class _PreparedCard:
 # ================================ 字体与 Emoji 后端 ================================ #
 
 
-# ================================ ?? Emoji ? ================================ #
+# ================================ 彩色 Emoji 渲染 ================================ #
 import threading
 import zipfile
 
@@ -190,21 +190,13 @@ def _resolve_font_path(value: str | None) -> Path | None:
 
 
 def _configured_font_candidates(*, bold: bool) -> list[Path]:
-    """读取用户显式指定的字体；NoneBot 未初始化时静默跳过，方便离线脚本复用渲染器。"""
+    """读取用户显式指定的字体；插件配置已在 config.py 集中加载一次。"""
 
-    try:
-        from nonebot import get_plugin_config
-
-        from .config import Config
-
-        config = get_plugin_config(Config)
-    except Exception as error:
-        logger.debug(f"RollPig Pillow 字体配置读取失败，使用自动候选: {error}")
-        return []
+    from .config import plugin_config
 
     candidates: list[Path] = []
     # 保留字体配置项：Pillow 无完整字体族管理，标题和正文共享同一字体更可预测。
-    configured_path = _resolve_font_path(config.rollpig_card_font_path)
+    configured_path = _resolve_font_path(plugin_config.rollpig_card_font_path)
     if configured_path is not None:
         candidates.append(configured_path)
     return list(dict.fromkeys(candidates))

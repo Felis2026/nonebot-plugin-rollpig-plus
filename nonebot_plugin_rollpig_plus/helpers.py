@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from functools import lru_cache, wraps
-from typing import Any
+from functools import wraps
 
 from nonebot import get_driver
 from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, MessageSegment
@@ -172,26 +171,11 @@ def guard_store_errors(matcher, message: str = "猪圈云账本暂时离线，�
 # ================================ 性能日志 ================================ #
 
 
-@lru_cache(maxsize=1)
-def get_perf_logger() -> Any:
-    """获取 RollPig 性能日志使用的 logger。"""
-
-    try:
-        from src.plugins.utils.utils import get_logger as get_v2_logger
-    except Exception:
-        return nonebot_logger
-
-    try:
-        return get_v2_logger("RollPig")
-    except Exception:
-        return nonebot_logger
-
-
 def log_perf(message: str) -> None:
     """输出性能埋点；logger 本身异常时退回 warning，避免诊断日志影响业务。"""
 
     try:
-        get_perf_logger().info(message)
+        nonebot_logger.info(message)
     except Exception:
         nonebot_logger.warning(message)
 

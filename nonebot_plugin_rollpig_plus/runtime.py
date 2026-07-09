@@ -6,11 +6,10 @@ import json
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from nonebot import get_plugin_config
 from nonebot.log import logger
 import nonebot_plugin_localstore as localstore
 
-from .config import Config
+from .config import plugin_config
 
 
 # ================================ 日期边界 ================================ #
@@ -135,7 +134,7 @@ def is_daily_summary_default_enabled() -> bool:
     """读取日报默认状态；配置非法或读取失败时按默认关闭处理。"""
 
     try:
-        return bool(get_plugin_config(Config).rollpig_daily_summary_enabled)
+        return bool(plugin_config.rollpig_daily_summary_enabled)
     except Exception as error:
         logger.warning(f"读取 rollpig_daily_summary_enabled 失败，已按默认关闭处理: {error}")
         return False
@@ -201,7 +200,6 @@ _load_daily_summary_switches()
 
 def resolve_roast_cooldown_seconds() -> int:
     """解析普通烤群友 CD（秒），支持通过配置覆盖。"""
-    plugin_config = get_plugin_config(Config)
     raw_hours = getattr(plugin_config, "rollpig_roast_cooldown_hours", 8.0)
     try:
         hours = float(raw_hours)
@@ -218,7 +216,6 @@ def resolve_roast_cooldown_seconds() -> int:
 
 def resolve_roast_charge_max() -> int:
     """解析普通烤群友充能上限；第一版限制在 1~6，避免群内刷屏。"""
-    plugin_config = get_plugin_config(Config)
     raw_max = getattr(plugin_config, "rollpig_roast_charge_max", 2)
     try:
         max_charges = int(raw_max)

@@ -4,11 +4,11 @@ import asyncio
 import random
 from contextlib import suppress
 
-from nonebot import get_bot, get_driver, get_plugin_config
+from nonebot import get_bot, get_driver
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
-from .config import Config
+from .config import plugin_config
 from .catalog_renderer import shutdown_catalog_renderer
 from .runtime import (
     is_daily_summary_enabled,
@@ -47,8 +47,7 @@ def get_resource_sync_interval_hours() -> int:
     """读取资源同步间隔；配置异常时回退 24 小时，避免定时任务注册失败。"""
 
     try:
-        config = get_plugin_config(Config)
-        return max(1, int(config.rollpig_resource_sync_interval_hours or 24))
+        return max(1, int(plugin_config.rollpig_resource_sync_interval_hours or 24))
     except Exception as error:
         logger.warning(f"rollpig_resource_sync_interval_hours 配置非法，已回退到 24 小时: {error}")
         return 24
@@ -90,8 +89,7 @@ async def pighub_refresh_job():
 async def startup_resource_sync():
     """启动后异步检查一次资源包；不阻塞 NoneBot 启动和连接。"""
 
-    config = get_plugin_config(Config)
-    if not config.rollpig_resource_sync_enabled:
+    if not plugin_config.rollpig_resource_sync_enabled:
         return
     schedule_background_resource_sync("startup")
 
@@ -100,8 +98,7 @@ async def startup_resource_sync():
 async def resource_sync_job():
     """低频检查云端资源包，减少多实例手动同步新猪素材的运维成本。"""
 
-    config = get_plugin_config(Config)
-    if not config.rollpig_resource_sync_enabled:
+    if not plugin_config.rollpig_resource_sync_enabled:
         return
     await run_background_resource_sync("interval")
 

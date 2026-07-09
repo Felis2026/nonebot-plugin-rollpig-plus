@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+from nonebot import get_plugin_config
 from nonebot.log import logger
 from pydantic import BaseModel
 
@@ -108,3 +109,8 @@ class Config(BaseModel):
 
     # --- 代理设置 (可选，如果服务器在国内连不上API) ---
     rollpig_proxy: Optional[str] = None
+
+
+# NoneBot 插件配置在启动后是静态快照；集中在这里合并 JSON 配置一次，
+# 避免多个模块各自 get_plugin_config(Config) 时重复读取配置文件。
+plugin_config = get_plugin_config(Config)

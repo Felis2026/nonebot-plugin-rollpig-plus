@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nonebot-plugin-rollpig-plus"
-version = "0.8.0"
+version = "0.8.1"
 description = "今天是什么小猪（今日小猪）Plus：基于原版拓展烤群友、图鉴成长等玩法"
 authors = ["Bear_lele <lele2587342146@gmail.com>", "Felis <3397152010@qq.com>"]
 license = "MIT"
@@ -24,7 +24,6 @@ pydantic = ">=1.10.0,<3.0.0"
 httpx = ">=0.20.0"
 Pillow = ">=12.2.0"
 pilmoji = ">=2.0.5,<3.0.0"
-python-dotenv = ">=1.2.2,<2.0.0"
 nonebot-plugin-apscheduler = ">=0.5.0"
 openai = ">=1.0.0"
 

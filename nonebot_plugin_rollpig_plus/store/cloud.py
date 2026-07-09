@@ -3,10 +3,9 @@ from __future__ import annotations
 from typing import Optional
 
 import httpx
-from nonebot import get_plugin_config
 from nonebot.log import logger
 
-from ..config import Config
+from ..config import plugin_config
 from ..runtime import rollpig_date_str
 from .base import RollpigStore
 from .models import CatalogSnapshot, CooldownConsumeResult, DailyRollResult, DrawState, PigProgress, RoastEvent
@@ -18,17 +17,16 @@ class CloudStoreError(RuntimeError):
 
 class CloudStore(RollpigStore):
     def __init__(self):
-        config = get_plugin_config(Config)
-        if not config.rollpig_cloud_api_url:
+        if not plugin_config.rollpig_cloud_api_url:
             raise ValueError("启用 cloud 存储时必须配置 rollpig_cloud_api_url")
-        if not config.rollpig_cloud_token:
+        if not plugin_config.rollpig_cloud_token:
             raise ValueError("启用 cloud 存储时必须配置 rollpig_cloud_token")
 
-        self.base_url = config.rollpig_cloud_api_url.rstrip("/")
-        self.timeout = max(0.5, float(config.rollpig_cloud_timeout or 3.0))
-        self.strict_mode = bool(config.rollpig_cloud_strict_mode)
+        self.base_url = plugin_config.rollpig_cloud_api_url.rstrip("/")
+        self.timeout = max(0.5, float(plugin_config.rollpig_cloud_timeout or 3.0))
+        self.strict_mode = bool(plugin_config.rollpig_cloud_strict_mode)
         self.headers = {
-            "Authorization": f"Bearer {config.rollpig_cloud_token}",
+            "Authorization": f"Bearer {plugin_config.rollpig_cloud_token}",
             "Content-Type": "application/json",
         }
         self._client = httpx.AsyncClient(

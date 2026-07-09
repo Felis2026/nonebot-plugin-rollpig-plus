@@ -13,11 +13,10 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from nonebot import get_plugin_config
 from nonebot.log import logger
 import nonebot_plugin_localstore as localstore
 
-from .config import Config
+from .config import Config, plugin_config
 
 PACKAGE_DIR = Path(__file__).parent
 RESOURCE_DIR = PACKAGE_DIR / "resource"
@@ -124,9 +123,8 @@ class RollPigResourceManager:
 
     def _load_private_overlay(self) -> None:
         """把私有资源包叠加到当前资源快照上；私有包坏掉时不影响公有包/内置包可用性。"""
-        config = get_plugin_config(Config)
         try:
-            private_manifest_url = self._resolve_private_manifest_url(config)
+            private_manifest_url = self._resolve_private_manifest_url(plugin_config)
         except Exception as error:
             logger.warning(f"rollpig 私有资源运行时配置读取失败，已忽略私有 overlay: {error}")
             return
@@ -267,16 +265,15 @@ class RollPigResourceManager:
             return result
 
     async def _sync_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
-        config = get_plugin_config(Config)
-        if not config.rollpig_resource_sync_enabled and not force:
+        if not plugin_config.rollpig_resource_sync_enabled and not force:
             return ResourceSyncResult(updated=False, skipped=True, message="资源同步未启用")
 
-        manifest_url = str(config.rollpig_resource_manifest_url or "").strip()
+        manifest_url = str(plugin_config.rollpig_resource_manifest_url or "").strip()
         if not manifest_url:
             return ResourceSyncResult(updated=False, skipped=True, message="未配置资源 manifest URL")
 
-        timeout = max(1.0, float(config.rollpig_resource_sync_timeout or 10.0))
-        max_file_size = max(1024, int(config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
+        timeout = max(1.0, float(plugin_config.rollpig_resource_sync_timeout or 10.0))
+        max_file_size = max(1024, int(plugin_config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             manifest = await self._download_json(client, manifest_url, max_size=RESOURCE_MANIFEST_MAX_SIZE)
 
@@ -318,18 +315,17 @@ class RollPigResourceManager:
         )
 
     async def _sync_private_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
-        config = get_plugin_config(Config)
-        manifest_url = self._resolve_private_manifest_url(config)
+        manifest_url = self._resolve_private_manifest_url(plugin_config)
         if not manifest_url:
             return ResourceSyncResult(updated=False, skipped=True, message="")
 
-        timeout = max(1.0, float(config.rollpig_resource_sync_timeout or 10.0))
+        timeout = max(1.0, float(plugin_config.rollpig_resource_sync_timeout or 10.0))
         headers: dict[str, str] = {}
-        private_token = self._resolve_private_resource_token(config)
+        private_token = self._resolve_private_resource_token(plugin_config)
         if private_token:
             headers["Authorization"] = f"Bearer {private_token}"
 
-        max_file_size = max(1024, int(config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
+        max_file_size = max(1024, int(plugin_config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
             manifest = await self._download_json(client, manifest_url, max_size=RESOURCE_MANIFEST_MAX_SIZE)
 

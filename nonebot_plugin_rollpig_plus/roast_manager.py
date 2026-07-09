@@ -6,10 +6,10 @@ from typing import Optional, Dict, List
 from urllib.parse import urlparse
 
 import nonebot_plugin_localstore as store
-from nonebot import get_plugin_config, logger
+from nonebot import logger
 from openai import AsyncOpenAI
 
-from .config import Config
+from .config import Config, plugin_config
 
 # 数据文件
 ROAST_LIB_FILE = store.get_plugin_data_file("roast_library.json")
@@ -92,7 +92,7 @@ PVP_TEMPLATES = [
 class RoastManager:
     def __init__(self, config: Config | None = None):
         # 允许测试或后续工厂函数显式注入配置；运行时不传则沿用 NoneBot 当前插件配置。
-        plugin_config = config or get_plugin_config(Config)
+        active_config = config or plugin_config
         self.file = ROAST_LIB_FILE
         self.library: Dict[str, Dict[str, List[str]]] = self._load()
         # AI 文案可能由多个群同时触发生成；保存文案库时必须串行化，
@@ -100,23 +100,23 @@ class RoastManager:
         self._lock = asyncio.Lock()
         
         self.client = None
-        self.ai_timeout = _clamp_number(plugin_config.rollpig_ai_timeout, 20.0, 1.0, 60.0)
-        self.ai_max_tokens = _clamp_int(plugin_config.rollpig_ai_max_tokens, 4096, 64, 4096)
-        self.ai_output_max_chars = _clamp_int(plugin_config.rollpig_ai_output_max_chars, 240, 40, 600)
+        self.ai_timeout = _clamp_number(active_config.rollpig_ai_timeout, 20.0, 1.0, 60.0)
+        self.ai_max_tokens = _clamp_int(active_config.rollpig_ai_max_tokens, 4096, 64, 4096)
+        self.ai_output_max_chars = _clamp_int(active_config.rollpig_ai_output_max_chars, 240, 40, 600)
         self._ai_semaphore = asyncio.Semaphore(
-            _clamp_int(plugin_config.rollpig_ai_concurrency, 4, 1, 6)
+            _clamp_int(active_config.rollpig_ai_concurrency, 4, 1, 6)
         )
         # AI 只有在“开关开启 + key 存在”时才会启用。
-        self.ai_ready = bool(plugin_config.rollpig_ai_enabled and plugin_config.rollpig_deepseek_key)
+        self.ai_ready = bool(active_config.rollpig_ai_enabled and active_config.rollpig_deepseek_key)
         self.ai_model, self.ai_extra_body = _resolve_deepseek_model(
-            plugin_config.rollpig_model,
-            plugin_config.rollpig_deepseek_base,
+            active_config.rollpig_model,
+            active_config.rollpig_deepseek_base,
             warn=self.ai_ready,
         )
         if self.ai_ready:
             self.client = AsyncOpenAI(
-                api_key=plugin_config.rollpig_deepseek_key,
-                base_url=plugin_config.rollpig_deepseek_base,
+                api_key=active_config.rollpig_deepseek_key,
+                base_url=active_config.rollpig_deepseek_base,
             )
 
     # ================================ 文案库持久化 ================================ #
