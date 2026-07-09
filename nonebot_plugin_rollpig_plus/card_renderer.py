@@ -13,7 +13,7 @@ from pilmoji import Pilmoji
 from pilmoji.helpers import EMOJI_REGEX, getsize as pilmoji_getsize
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps, ImageSequence
 
-from .emoji_source import get_noto_emoji_source
+RESOURCE_DIR = Path(__file__).parent / "resource"
 
 
 CANVAS_SIZE = (800, 800)
@@ -50,11 +50,10 @@ PLACEHOLDER_FG = (154, 92, 135, 255)
 EMOJI_SCALE_FACTOR = 1.08
 EMOJI_POSITION_OFFSET = (0, -2)
 EXTRA_EMOJI_SYMBOLS = {
-    # pig.json 中少量文本音乐符号不是标准 Emoji，中文字体又可能缺字；
-    # 渲染时映射为 Noto Emoji 音符，不修改原始文案数据。
+    # pig.json 中少量文本音乐符号不是标准 Emoji，中文字体又可能缺字；渲染时映射为 Noto Emoji 音符，不修改原始文案数据。
     "\u266a": "\U0001f3b5",
 }
-PACKAGE_FONT_DIR = Path(__file__).parent / "resource" / "fonts"
+PACKAGE_FONT_DIR = RESOURCE_DIR / "fonts"
 
 
 @dataclass(frozen=True)
@@ -93,6 +92,91 @@ class _PreparedCard:
 # ================================ 字体与 Emoji 后端 ================================ #
 
 
+# ================================ 彩色 Emoji 渲染 ================================ #
+import threading
+import zipfile
+
+from pilmoji.source import BaseSource
+
+
+NOTO_EMOJI_ZIP_PATH = RESOURCE_DIR / "emoji" / "google-emoji.zip"
+_VARIATION_SELECTORS = {0xFE0E, 0xFE0F}
+
+
+def _emoji_to_noto_codepoint(emoji_text: str, *, strip_variation: bool) -> str:
+    """把 Unicode Emoji 转成 Noto Emoji PNG 使用的 `emoji_uxxxx` 资源名片段。"""
+
+    codepoints: list[str] = []
+    for char in emoji_text:
+        codepoint = ord(char)
+        if strip_variation and codepoint in _VARIATION_SELECTORS:
+            continue
+        # Noto PNG 对 BMP 字符使用 4 位补零，例如 #️⃣ 对应 emoji_u0023_20e3.png。
+        codepoints.append(f"{codepoint:04x}")
+    return "_".join(codepoints)
+
+
+def _noto_asset_candidates(emoji_text: str) -> tuple[str, ...]:
+    """按 Noto Emoji 命名规则给出候选资源名，兼容 FE0F/FE0E 变体选择符。
+
+    Noto 的 png/128 目录通常会省略 emoji presentation 的 FE0F，
+    但不能在输入阶段粗暴删除；这里保留“精确匹配 -> 去变体选择符”的顺序，
+    能兼容普通 emoji、keycap 和 ZWJ 组合。
+    """
+
+    exact = _emoji_to_noto_codepoint(emoji_text, strip_variation=False)
+    stripped = _emoji_to_noto_codepoint(emoji_text, strip_variation=True)
+    exact_asset = f"emoji_u{exact}.png"
+    stripped_asset = f"emoji_u{stripped}.png"
+    if exact_asset == stripped_asset:
+        return (exact_asset,)
+    return (exact_asset, stripped_asset)
+
+
+class ZipNotoEmojiSource(BaseSource):
+    """从内置 ZIP 按需读取 Noto Emoji PNG，避免运行时联网和仓库碎文件。"""
+
+    def __init__(self, zip_path: Path = NOTO_EMOJI_ZIP_PATH) -> None:
+        self.zip_path = zip_path
+        self._zip_file = zipfile.ZipFile(zip_path, "r")
+        self._lock = threading.RLock()
+
+    @lru_cache(maxsize=1024)
+    def _read_asset(self, asset_name: str) -> bytes | None:
+        """读取并缓存常见 Emoji PNG 字节；每次返回时再包装成新的 BytesIO。"""
+
+        try:
+            with self._lock:
+                return self._zip_file.read(asset_name)
+        except KeyError:
+            return None
+
+    def get_emoji(self, emoji: str, /) -> BytesIO | None:
+        for asset_name in _noto_asset_candidates(emoji):
+            data = self._read_asset(asset_name)
+            if data is not None:
+                return BytesIO(data)
+        logger.debug(f"RollPig Noto Emoji 资源缺失，回退普通字体绘制: emoji={emoji!r}")
+        return None
+
+    def get_discord_emoji(self, id: int, /) -> BytesIO | None:
+        return None
+
+
+@lru_cache(maxsize=1)
+def get_noto_emoji_source() -> ZipNotoEmojiSource | None:
+    """加载本地 Noto Emoji 源；资源缺失时只降级，不影响普通卡片生成。"""
+
+    if not NOTO_EMOJI_ZIP_PATH.exists():
+        logger.warning(f"RollPig Noto Emoji ZIP 不存在，Emoji 将按普通字体降级绘制: {NOTO_EMOJI_ZIP_PATH}")
+        return None
+    try:
+        return ZipNotoEmojiSource(NOTO_EMOJI_ZIP_PATH)
+    except Exception as error:
+        logger.warning(f"RollPig Noto Emoji ZIP 加载失败，Emoji 将按普通字体降级绘制: {error}")
+        return None
+
+
 def _resolve_font_path(value: str | None) -> Path | None:
     """解析用户配置的字体路径；相对路径按 Bot 运行目录而不是插件目录处理。"""
 
@@ -106,21 +190,13 @@ def _resolve_font_path(value: str | None) -> Path | None:
 
 
 def _configured_font_candidates(*, bold: bool) -> list[Path]:
-    """读取用户显式指定的字体；NoneBot 未初始化时静默跳过，方便离线脚本复用渲染器。"""
+    """读取用户显式指定的字体；插件配置已在 config.py 集中加载一次。"""
 
-    try:
-        from nonebot import get_plugin_config
-
-        from .config import Config
-
-        config = get_plugin_config(Config)
-    except Exception as error:
-        logger.debug(f"RollPig Pillow 字体配置读取失败，使用自动候选: {error}")
-        return []
+    from .config import plugin_config
 
     candidates: list[Path] = []
-    # 只保留一个字体配置项：Pillow 无完整字体族管理，标题和正文共享同一字体更可预测。
-    configured_path = _resolve_font_path(config.rollpig_card_font_path)
+    # 保留字体配置项：Pillow 无完整字体族管理，标题和正文共享同一字体更可预测。
+    configured_path = _resolve_font_path(plugin_config.rollpig_card_font_path)
     if configured_path is not None:
         candidates.append(configured_path)
     return list(dict.fromkeys(candidates))
@@ -134,8 +210,7 @@ def _font_candidates(*, bold: bool) -> list[Path]:
         PACKAGE_FONT_DIR / ("msyhbd.ttc" if bold else "msyh.ttc"),
         PACKAGE_FONT_DIR / "msyh.ttc",
         PACKAGE_FONT_DIR / "msyhbd.ttc",
-        # V2 私有 Docker 已挂载 `./fonts:/root/.fonts`；Pillow 不走 fontconfig，
-        # 这里必须显式列路径，否则容器里仍会退回默认位图字体。
+        # 必须显式列路径，否则容器里仍会退回默认位图字体。
         Path.cwd() / "fonts" / ("msyhbd.ttc" if bold else "msyh.ttc"),
         Path.cwd() / "fonts" / "msyh.ttc",
         Path.cwd() / "fonts" / "msyhbd.ttc",
@@ -835,3 +910,35 @@ async def render_pig_card_image(
     """异步入口：普通 PNG 也放到线程中，避免文件读取和 Emoji 拉取阻塞事件循环。"""
 
     return await asyncio.to_thread(_render_pig_card_image_sync, pig_data, image_file)
+
+
+# ================================ 本周小猪长图 ================================ #
+ITEM_SIZE = (150, 150)
+PADDING = 20
+BOTTOM_TEXT_SPACE = 80
+
+
+def _render_weekly_pig_image_sync(image_paths: list[Path]) -> bytes:
+    """同步绘制本周小猪长图；外层必须丢到线程，避免阻塞 NoneBot 事件循环。"""
+
+    item_width, item_height = ITEM_SIZE
+    total_width = (item_width + PADDING) * len(image_paths) + PADDING
+    total_height = item_height + BOTTOM_TEXT_SPACE
+
+    canvas = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+    for index, image_path in enumerate(image_paths):
+        with Image.open(image_path) as opened:
+            image = opened.convert("RGBA").resize(ITEM_SIZE)
+            x = PADDING + index * (item_width + PADDING)
+            y = PADDING
+            canvas.paste(image, (x, y), image)
+
+    output = BytesIO()
+    canvas.save(output, format="PNG")
+    return output.getvalue()
+
+
+async def render_weekly_pig_image(image_paths: list[Path]) -> bytes:
+    """异步渲染本周小猪长图。"""
+
+    return await asyncio.to_thread(_render_weekly_pig_image_sync, image_paths)

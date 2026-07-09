@@ -6,31 +6,77 @@ import hashlib
 import json
 import math
 import time
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
-from nonebot import get_plugin_config
+from nonebot.log import logger
 from PIL import Image
 import nonebot_plugin_localstore as localstore
 
-from .config import Config
-from .perf_logging import log_perf
-from .render_budget import html_render_budget
+from .config import plugin_config
 from .resource_manager import pig_resource_manager
+from .helpers import log_perf
 from .runtime import ROLLPIG_TIMEZONE, rollpig_today
 from .store.models import CatalogSnapshot, DrawState, PigProgress
 
 
-RES_DIR = Path(__file__).parent / "resource"
+RESOURCE_DIR = Path(__file__).parent / "resource"
+
+
+# ================================ Chromium 渲染总预算 ================================ #
+# 图鉴有自己的页面池；普通小猪卡片已迁移到 Pillow，不再占用 Chromium。
+# 直接复用图鉴并发配置作为外围预算，避免维护两套含义接近的参数。
+
+_html_render_semaphore: asyncio.Semaphore | None = None
+_html_render_limit: int | None = None
+_html_render_lock = asyncio.Lock()
+
+
+def _resolve_html_render_limit() -> int:
+    try:
+        raw_limit = plugin_config.rollpig_catalog_render_concurrency
+    except Exception as error:
+        logger.warning(f"rollpig_catalog_render_concurrency 配置读取失败，已回退到 2: {error}")
+        raw_limit = 2
+
+    try:
+        return max(1, min(6, int(raw_limit or 2)))
+    except (TypeError, ValueError):
+        logger.warning(f"rollpig_catalog_render_concurrency 配置非法，已回退到 2: {raw_limit}")
+        return 2
+
+
+async def _get_html_render_semaphore() -> asyncio.Semaphore:
+    global _html_render_limit, _html_render_semaphore
+    limit = _resolve_html_render_limit()
+    async with _html_render_lock:
+        if _html_render_semaphore is None or _html_render_limit != limit:
+            _html_render_semaphore = asyncio.Semaphore(limit)
+            _html_render_limit = limit
+    return _html_render_semaphore
+
+
+@asynccontextmanager
+async def html_render_budget(label: str) -> AsyncIterator[None]:
+    """进入全局 HTML 渲染预算；异常和超时都必须释放 semaphore。"""
+
+    semaphore = await _get_html_render_semaphore()
+    await semaphore.acquire()
+    try:
+        yield
+    finally:
+        semaphore.release()
+
+
+RES_DIR = RESOURCE_DIR
 THUMB_CACHE_DIR = localstore.get_plugin_cache_dir() / "catalog_thumbs"
 CATALOG_BASE_IMAGE = RES_DIR / "catalog_base.png"
 CATALOG_TEMPLATE = "catalog_template.html"
 CATALOG_ANCHOR_HTML = RES_DIR / "catalog_anchor.html"
 CATALOG_SIZE = (1536, 1024)
-# 当前底图安全区按 38 张卡片精修，开放配置会让最后一行与装饰区重新漂移。
 CATALOG_PAGE_SIZE = 38
 CATALOG_CACHE_MAX_ENTRIES = 64
 CATALOG_CACHE_MAX_BYTES = 64 * 1024 * 1024
@@ -63,7 +109,7 @@ class _CatalogPagePool:
     """复用 htmlrender 已启动的 Chromium，为图鉴保留少量常驻页面。
 
     `template_to_pic` 每次都会创建/关闭页面并等待通用的 networkidle；图鉴资源固定且
-    基本都是本地文件，因此复用页面可以减少冷渲染时的页面生命周期开销。池大小仍由
+    基本都是本地文件，复用页面可以减少冷渲染时的页面生命周期开销。池大小仍由
     并发配置限制，避免多人同时触发时把 Chromium 裸并发打满。
     """
 
@@ -156,9 +202,6 @@ class _CatalogPagePool:
         )
         page.set_default_timeout(timeout_ms)
         page.on("console", lambda msg: log_perf(f"rollpig catalog browser console: {msg.text}"))
-        # 先进入插件资源目录下的 HTML file:// 页面，再 set_content；否则 about:blank
-        # 安全上下文会拒绝加载本地图鉴底图和缩略图资源。不能锚到 PNG，否则 Chromium
-        # 会把主文档视作图片页面，后续 set_content 可能卡在 domcontentloaded。
         await page.goto(CATALOG_ANCHOR_HTML.as_uri(), wait_until="domcontentloaded", timeout=timeout_ms)
         async with self._lock:
             self._pages.add(page)
@@ -297,8 +340,6 @@ def _parse_datetime(value: str | None) -> dt.datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is not None:
-        # first_obtained_at 本地模式按 UTC 写入；NEW 徽章属于用户可见业务日期，
-        # 因此要先换算到 RollPig 日期边界再取 date。
         parsed = parsed.astimezone(ROLLPIG_TIMEZONE).replace(tzinfo=None)
     return parsed
 
@@ -513,13 +554,12 @@ async def _render_catalog_image_uncached(
     """执行一次真实图鉴渲染；外层负责同 key 合流，这里只管渲染与写缓存。"""
     from nonebot_plugin_htmlrender import template_to_html
 
-    config = get_plugin_config(Config)
     html_started_at = time.perf_counter()
     html = await template_to_html(str(RES_DIR), CATALOG_TEMPLATE, **payload)
     html_ready_at = time.perf_counter()
-    timeout_ms = max(1000, int(float(config.rollpig_catalog_render_timeout or 8.0) * 1000))
-    scale_factor = float(config.rollpig_catalog_scale_factor or 2.0)
-    pool = _get_page_pool(int(config.rollpig_catalog_render_concurrency or 2), scale_factor)
+    timeout_ms = max(1000, int(float(plugin_config.rollpig_catalog_render_timeout or 8.0) * 1000))
+    scale_factor = float(plugin_config.rollpig_catalog_scale_factor or 2.0)
+    pool = _get_page_pool(int(plugin_config.rollpig_catalog_render_concurrency or 2), scale_factor)
     async with html_render_budget("catalog"):
         page_result = await pool.render(html, timeout_ms=timeout_ms)
     postprocess_started_at = time.perf_counter()
@@ -549,14 +589,12 @@ async def render_catalog_image(
     started_at = time.perf_counter()
     payload = _build_template_payload(user_name=user_name, snapshot=snapshot, page=page)
     payload_ready_at = time.perf_counter()
-    config = get_plugin_config(Config)
-    output_format = _normalize_output_format(config.rollpig_catalog_output_format)
+    output_format = _normalize_output_format(plugin_config.rollpig_catalog_output_format)
     cache_key = f"{output_format}:{_build_cache_key(payload, snapshot, page)}"
-    ttl = max(0, int(config.rollpig_catalog_cache_seconds or 0))
+    ttl = max(0, int(plugin_config.rollpig_catalog_cache_seconds or 0))
 
     # ================================ 图鉴同键合流 ================================ #
     # 多群同时请求同一页时，只让第一个请求真正渲染；其余请求等待同一个 task。
-    # 这不是数据一致性要求，而是为了避免缓存击穿时把 Chromium 重复打满。
     render_owner = False
     async with _catalog_cache_lock:
         cached_payload = _get_catalog_cache_locked(cache_key, ttl=ttl, now=time.time())

@@ -13,15 +13,17 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from nonebot import get_plugin_config
 from nonebot.log import logger
 import nonebot_plugin_localstore as localstore
 
-from .config import Config
+from .config import Config, plugin_config
+
+PACKAGE_DIR = Path(__file__).parent
+RESOURCE_DIR = PACKAGE_DIR / "resource"
 
 
-PLUGIN_DIR = Path(__file__).parent
-BUILTIN_RESOURCE_DIR = PLUGIN_DIR / "resource"
+PLUGIN_DIR = PACKAGE_DIR
+BUILTIN_RESOURCE_DIR = RESOURCE_DIR
 BUILTIN_PIG_JSON = BUILTIN_RESOURCE_DIR / "pig.json"
 BUILTIN_RULES_JSON = BUILTIN_RESOURCE_DIR / "pig_rules.json"
 BUILTIN_IMAGE_DIR = BUILTIN_RESOURCE_DIR / "image"
@@ -121,9 +123,8 @@ class RollPigResourceManager:
 
     def _load_private_overlay(self) -> None:
         """把私有资源包叠加到当前资源快照上；私有包坏掉时不影响公有包/内置包可用性。"""
-        config = get_plugin_config(Config)
         try:
-            private_manifest_url = self._resolve_private_manifest_url(config)
+            private_manifest_url = self._resolve_private_manifest_url(plugin_config)
         except Exception as error:
             logger.warning(f"rollpig 私有资源运行时配置读取失败，已忽略私有 overlay: {error}")
             return
@@ -264,16 +265,15 @@ class RollPigResourceManager:
             return result
 
     async def _sync_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
-        config = get_plugin_config(Config)
-        if not config.rollpig_resource_sync_enabled and not force:
+        if not plugin_config.rollpig_resource_sync_enabled and not force:
             return ResourceSyncResult(updated=False, skipped=True, message="资源同步未启用")
 
-        manifest_url = str(config.rollpig_resource_manifest_url or "").strip()
+        manifest_url = str(plugin_config.rollpig_resource_manifest_url or "").strip()
         if not manifest_url:
             return ResourceSyncResult(updated=False, skipped=True, message="未配置资源 manifest URL")
 
-        timeout = max(1.0, float(config.rollpig_resource_sync_timeout or 10.0))
-        max_file_size = max(1024, int(config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
+        timeout = max(1.0, float(plugin_config.rollpig_resource_sync_timeout or 10.0))
+        max_file_size = max(1024, int(plugin_config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             manifest = await self._download_json(client, manifest_url, max_size=RESOURCE_MANIFEST_MAX_SIZE)
 
@@ -315,18 +315,17 @@ class RollPigResourceManager:
         )
 
     async def _sync_private_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
-        config = get_plugin_config(Config)
-        manifest_url = self._resolve_private_manifest_url(config)
+        manifest_url = self._resolve_private_manifest_url(plugin_config)
         if not manifest_url:
             return ResourceSyncResult(updated=False, skipped=True, message="")
 
-        timeout = max(1.0, float(config.rollpig_resource_sync_timeout or 10.0))
+        timeout = max(1.0, float(plugin_config.rollpig_resource_sync_timeout or 10.0))
         headers: dict[str, str] = {}
-        private_token = self._resolve_private_resource_token(config)
+        private_token = self._resolve_private_resource_token(plugin_config)
         if private_token:
             headers["Authorization"] = f"Bearer {private_token}"
 
-        max_file_size = max(1024, int(config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
+        max_file_size = max(1024, int(plugin_config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
             manifest = await self._download_json(client, manifest_url, max_size=RESOURCE_MANIFEST_MAX_SIZE)
 
@@ -739,3 +738,50 @@ class RollPigResourceManager:
 
 
 pig_resource_manager = RollPigResourceManager()
+
+
+# ================================ 小猪资源快照 ================================ #
+# 命令层高频读取 `PIG_LIST`，这里保留同一个 list 对象并用切片刷新。
+# 这样 `from ... import PIG_LIST` 的旧调用方式不会因为资源重载而拿到过期引用。
+PIG_LIST: list[dict] = []
+
+
+def reload_rollpig_resources() -> None:
+    """刷新内存中的小猪资源快照；资源管理器会在云端资源损坏时回退内置资源。"""
+
+    pig_resource_manager.reload()
+    PIG_LIST[:] = pig_resource_manager.pig_list
+
+
+def find_image_file(pig_id: str) -> Path | None:
+    """返回指定小猪的本地图片路径；不存在时返回 None 交给渲染层兜底。"""
+
+    return pig_resource_manager.find_image_file(pig_id)
+
+
+def get_pig_by_id(pig_id: str | None) -> dict | None:
+    """从当前资源快照按 id 查找小猪数据。"""
+
+    if not pig_id:
+        return None
+    for pig in PIG_LIST:
+        if pig["id"] == pig_id:
+            return pig
+    return None
+
+
+async def sync_rollpig_resources(force: bool = False) -> str:
+    """同步公有云端资源与可选私有 overlay；成功后立即刷新内存快照。"""
+
+    public_result, private_result = await pig_resource_manager.sync_all(force=force, wait_if_busy=force)
+    if public_result.updated or private_result.updated:
+        PIG_LIST[:] = pig_resource_manager.pig_list
+
+    messages = []
+    for result in (public_result, private_result):
+        if result.message:
+            messages.append(result.message)
+    return "；".join(messages) or "小猪资源无需同步"
+
+
+reload_rollpig_resources()

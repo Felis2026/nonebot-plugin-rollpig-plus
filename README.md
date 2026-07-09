@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
-    <img src="https://img.shields.io/badge/Version-0.8.0-ff69b4" alt="Version 0.8.0">
+    <img src="https://img.shields.io/badge/Version-0.8.1-ff69b4" alt="Version 0.8.1">
   </p>
 </div>
 
@@ -52,7 +52,7 @@ pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git
 或固定到指定版本：
 
 ```bash
-pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git@v0.8.0"
+pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git@v0.8.1"
 ```
 
 加载插件时使用新的模块名：
@@ -81,6 +81,8 @@ playwright install chromium
 | `我的猪圈` | 查看已解锁数量、收藏率、最高 EX Lv.、本命猪等摘要。 |
 | `小猪图鉴 [页码]` | 生成图片版小猪图鉴。 |
 | `本周小猪` | 生成本周猪猪总结长图。 |
+| `小猪日报 状态` | 查看本群每日总结推送状态。 |
+| `小猪日报 开启` / `小猪日报 关闭` | 群主/管理员控制本群每日总结推送；SUPERUSER可追加群号控制其他群。 |
 
 ### 抽取与成长
 
@@ -96,6 +98,11 @@ playwright install chromium
 - 常规模式下，目标需先抽过今日小猪，且不能是人类、熟食形态、吃掉了或猪售罄。
 - 加急点火口令可在限制范围内触发特殊成功判定；不会绕过目标资格检查。
 
+### 每日总结控制
+
+- 每日总结默认关闭；群主/管理员可在群内发送 `小猪日报 开启` / `小猪日报 关闭` 控制本群。
+- SUPERUSER可跨群控制，例如 `小猪日报 开启 123456789`、`小猪日报 关闭 123456789`。
+
 ## ⚙️ 配置方法
 
 插件内置完整默认值：**完全不写 `.env`、不写 JSON 也能启动并使用基础功能**。
@@ -107,7 +114,7 @@ playwright install chromium
 - 公有小猪资源同步开启；同步失败会回退旧缓存或内置资源。
 - 私有资源 overlay 内置默认关闭；示例配置保留可用链接，方便需要时手动启用。
 - 图片版小猪图鉴开启，默认 PNG 输出。
-- 每日总结定时任务开启，可通过配置关闭。
+- 每日总结定时任务默认关闭，可通过群内命令或配置主动开启。
 
 配置优先级：
 
@@ -150,7 +157,7 @@ playwright install chromium
     "rollpig_private_resource_manifest_url": "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json", // 可选私有 overlay 示例；内置默认关闭，不需要时设为 ""
 
     // ================================ 定时日报 ================================ //
-    "rollpig_daily_summary_enabled": true,     // 是否启用每日总结定时任务；关闭后不推日报，也不刷新日报派生的次日保护
+    "rollpig_daily_summary_enabled": false,    // 未被命令/外部控制器覆盖的群是否默认启用每日总结；默认关闭
 
     // ================================ 普通小猪卡片 ================================ //
     "rollpig_card_font_path": null,            // Pillow 卡片字体路径；不填时标题和正文都使用内置 Source Han Sans SC Medium
@@ -190,9 +197,9 @@ ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json
 - `ROLLPIG_STORAGE_BACKEND=cloud` 时，今日小猪、图鉴成长状态、普通烤群友充能、加急点火次数会在多 Bot 间同步。
 - `ROLLPIG_CLOUD_STRICT_MODE=false` 只允许读接口使用安全兜底；关键写接口不会偷偷回退本地，避免多 Bot 数据脑裂。
 - 私有资源 overlay 优先级高于公有云端资源和插件内置资源；公开版内置默认关闭，需要时填写 `rollpig_private_resource_manifest_url`，不需要时设为 `""`。
-- `rollpig_daily_summary_enabled=false` 会跳过每日总结定时任务；该任务同时负责日报推送和日报派生的次日保护名单刷新。
+- `rollpig_daily_summary_enabled=false` 是默认值，表示未单独设置的群默认不推日报；可用 `小猪日报 开启` 为单群开启，或设为 `true` 让未覆盖的群默认开启。
 - 普通卡片由 Pillow 渲染，默认使用内置 Source Han Sans SC Medium；如需微软雅黑、韩文覆盖更好的字体或其它字形风格，可自行提供字体并配置 `rollpig_card_font_path`。
-- 超级用户可发送 `同步小猪资源` / `刷新小猪图鉴` 手动触发资源同步。
+- SUPERUSER可发送 `同步小猪资源` / `刷新小猪图鉴` 手动触发资源同步。
 - 图片版图鉴每页固定展示 38 只小猪，不提供配置项，避免和当前底图安全区错位。
 
 ## 🐖 自定义小猪
@@ -273,6 +280,17 @@ nonebot_plugin_rollpig_plus/
 - PigHub（搜猪功能支持）：[pighub.top](https://pighub.top/)
 
 ## 📋 最近更新
+
+### v0.8.1 日报默认关闭与分群控制
+
+#### 🐷 小猪日报控制
+- 每日总结默认改为关闭，避免新部署实例在管理员未确认前主动向群聊推送定时消息。
+- 新增 `小猪日报` / `小猪日报 状态` / `小猪日报 开启` / `小猪日报 关闭` 命令，群主或管理员可控制本群，SUPERUSER 可追加群号控制其他群。
+- `rollpig_daily_summary_enabled` 调整为“未被单群命令或外部控制器覆盖时的默认值”；需要全局默认开启时可显式设为 `true`。
+
+#### 🔧 控制器与定时任务
+- 新增日报控制器接口；无外部控制器时写入插件本地数据，接入外部控制器时可保持单一状态源。
+- 日报定时任务现在会先筛选已开启日报的群，再生成日报与次日保护名单，避免关闭日报的群被定时任务产生额外副作用。
 
 ### v0.8.0 核心引擎重构：从 HtmlRender 到 Pillow
 #### ✨ 引擎迁移优势

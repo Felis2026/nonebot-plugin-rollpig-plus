@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+from nonebot import get_plugin_config
 from nonebot.log import logger
 from pydantic import BaseModel
 
@@ -84,13 +85,14 @@ class Config(BaseModel):
     rollpig_resource_sync_interval_hours: int = 24
     rollpig_resource_sync_timeout: float = 10.0
     rollpig_resource_max_file_size: int = 10 * 1024 * 1024
-    # 私有资源包是公有全量包之上的 overlay；公开版默认关闭，避免商店用户无感拉取维护者私有资源。
+    # 私有资源包是公有全量包之上的 overlay；公开版默认关闭。
     rollpig_private_resource_manifest_url: Optional[str] = ""
     rollpig_private_resource_token: Optional[str] = None
 
     # --- 定时日报 ---
-    # 关闭后会跳过每日总结定时任务；该任务负责日报推送，以及日报派生的次日保护名单刷新。
-    rollpig_daily_summary_enabled: bool = True
+    # 默认关闭，避免新部署实例在管理员未确认前主动向群里推送日报。
+    # 开启后会执行日报推送，并刷新日报派生的次日保护（集火）名单。
+    rollpig_daily_summary_enabled: bool = False
 
     # --- 普通小猪卡片渲染 ---
     # Pillow 不具备浏览器级字体回退；Docker/Linux 缺字或想换风格时可显式指定字体。
@@ -107,3 +109,8 @@ class Config(BaseModel):
 
     # --- 代理设置 (可选，如果服务器在国内连不上API) ---
     rollpig_proxy: Optional[str] = None
+
+
+# NoneBot 插件配置在启动后是静态快照；集中在这里合并 JSON 配置一次，
+# 避免多个模块各自 get_plugin_config(Config) 时重复读取配置文件。
+plugin_config = get_plugin_config(Config)
