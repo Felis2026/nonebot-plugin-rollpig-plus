@@ -1,5 +1,20 @@
 # 更新日志
 
+## v0.8.2
+
+### 多私有资源包
+
+- 新增 `rollpig_private_resource_manifests`，支持按顺序叠加多个私有 overlay 资源包。
+- 旧版 `rollpig_private_resource_manifest_url` / `rollpig_private_resource_token` 继续兼容，会作为 legacy overlay 追加加载。
+- 私有包支持填写本地 `manifest.json` 路径或 `file://` URL，方便用户在本机维护自己的小猪资源包。
+- 多私有包使用独立缓存目录，单个私有包同步失败时不会影响公有资源或其它私有包。
+
+### 资源包扩展
+
+- 可同时启用公开资源包、官方 GIF 包、PJsk 私有包和用户自建私有包。
+- 官方 GIF 动态小猪 overlay 不走用户配置，会随云端资源同步固定叠加。
+- 私有 overlay 继续要求新增猪与已有 ID 不冲突；覆盖已有猪需要使用 `pig_overrides.json` 明确声明。
+
 ## v0.8.1
 
 ### 每日总结与分群控制

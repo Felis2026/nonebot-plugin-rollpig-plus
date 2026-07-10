@@ -9,7 +9,7 @@ from ..roll_flow import (
     resolve_daily_pig,
 )
 from ..runtime import rollpig_date_str
-from ..resource_manager import PIG_LIST, get_pig_by_id, pig_resource_manager, sync_rollpig_resources
+from ..resource_manager import PIG_LIST, get_pig_by_id, sync_rollpig_resources
 from ..helpers import send_rendered_pig
 from ..pighub_service import build_pighub_image_url, pighub_service
 from ..store import store
@@ -38,7 +38,11 @@ async def _(event: Event):
 
     await cmd_sync_resources.finish(
         MessageSegment.reply(event.message_id)
-        + f"{message}\n当前资源版本：{pig_resource_manager.resource_version}｜小猪数量：{len(PIG_LIST)}"
+        + (
+            "🐷 小猪资源同步结果\n"
+            f"{message}\n"
+            f"🐽 小猪数量：{len(PIG_LIST)}"
+        )
     )
 
 

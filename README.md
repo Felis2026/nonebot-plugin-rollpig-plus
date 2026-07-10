@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
-    <img src="https://img.shields.io/badge/Version-0.8.1-ff69b4" alt="Version 0.8.1">
+    <img src="https://img.shields.io/badge/Version-0.8.2-ff69b4" alt="Version 0.8.2">
   </p>
 </div>
 
@@ -52,7 +52,7 @@ pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git
 或固定到指定版本：
 
 ```bash
-pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git@v0.8.1"
+pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git@v0.8.2"
 ```
 
 加载插件时使用新的模块名：
@@ -112,7 +112,7 @@ playwright install chromium
 - 本地存储启用，数据写入插件自己的 localstore 数据目录。
 - AI 烤猪关闭；未配置 Key 时自动使用本地文案模板。
 - 公有小猪资源同步开启；同步失败会回退旧缓存或内置资源。
-- 私有资源 overlay 内置默认关闭；示例配置保留可用链接，方便需要时手动启用。
+- 官方 GIF 动态小猪 overlay 会随云端资源同步固定启用；PJsk、用户自建包等其它私有 overlay 需要手动追加。
 - 图片版小猪图鉴开启，默认 PNG 输出。
 - 每日总结定时任务默认关闭，可通过群内命令或配置主动开启。
 
@@ -127,7 +127,7 @@ playwright install chromium
 - JSON 配置文件：放非敏感、稳定参数。默认读取 Bot 运行目录下的 `rollpig_config.json`，也会读取 `config/rollpig.json`。
 - `.env`：放 Token / Key / 私密覆盖项；如需自定义 JSON 路径，只在 `.env` 写 `ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json`。
 
-下面用 `jsonc` 展示注释方便阅读；多数示例值按插件默认值填写，私有资源链接保留为“如何启用”的示意，不代表内置默认开启。实际 `rollpig_config.json` 必须是合法 JSON，可直接参考仓库内的 `rollpig_config.example.json`。
+下面用 `jsonc` 展示注释方便阅读；多数示例值按插件默认值填写。官方 GIF overlay 不需要配置，PJsk 与本地包示例用于展示如何追加更多私有资源。实际 `rollpig_config.json` 必须是合法 JSON，可直接参考仓库内的 `rollpig_config.example.json`。
 
 ```jsonc
 {
@@ -154,7 +154,17 @@ playwright install chromium
     "rollpig_resource_sync_interval_hours": 24, // 自动检查资源更新的间隔小时数
     "rollpig_resource_sync_timeout": 10.0,     // 下载 manifest / pig.json / 图片的超时时间（秒）
     "rollpig_resource_max_file_size": 10485760, // 单文件下载大小上限，默认 10 MiB
-    "rollpig_private_resource_manifest_url": "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json", // 可选私有 overlay 示例；内置默认关闭，不需要时设为 ""
+    "rollpig_private_resource_manifests": [       // 推荐写法：多个私有 overlay 按顺序叠加
+      {
+        "name": "pjsk",                         // 可选：追加 PJsk 私有包，不需要可删除这一项
+        "manifest_url": "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
+      },
+      {
+        "name": "my-pack",                     // 可选：用户自建私有包也可以填本地 manifest 路径
+        "manifest_url": "D:/my-rollpig-pack/manifest.json"
+      }
+    ],
+    "rollpig_private_resource_manifest_url": "", // 旧版单私有包字段，仍兼容；新部署建议使用上方列表
 
     // ================================ 定时日报 ================================ //
     "rollpig_daily_summary_enabled": false,    // 未被命令/外部控制器覆盖的群是否默认启用每日总结；默认关闭
@@ -196,7 +206,8 @@ ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json
 - 云同步可自行部署 [rollpig-cloud](https://github.com/Felis2026/rollpig-cloud)，也可以联系维护者申请接入现有 API。
 - `ROLLPIG_STORAGE_BACKEND=cloud` 时，今日小猪、图鉴成长状态、普通烤群友充能、加急点火次数会在多 Bot 间同步。
 - `ROLLPIG_CLOUD_STRICT_MODE=false` 只允许读接口使用安全兜底；关键写接口不会偷偷回退本地，避免多 Bot 数据脑裂。
-- 私有资源 overlay 优先级高于公有云端资源和插件内置资源；公开版内置默认关闭，需要时填写 `rollpig_private_resource_manifest_url`，不需要时设为 `""`。
+- 用户私有资源 overlay 优先级高于官方 GIF、公有云端资源和插件内置资源；0.8.2 起推荐用 `rollpig_private_resource_manifests` 配置多个用户私有包，旧的 `rollpig_private_resource_manifest_url` 仍兼容。
+- 自建本地私有包的目录结构、manifest 生成与配置方式见 [rollpig-resources 自建本地私有包指南](https://github.com/Felis2026/rollpig-resources/blob/main/docs/local-private-pack-guide.md)。
 - `rollpig_daily_summary_enabled=false` 是默认值，表示未单独设置的群默认不推日报；可用 `小猪日报 开启` 为单群开启，或设为 `true` 让未覆盖的群默认开启。
 - 普通卡片由 Pillow 渲染，默认使用内置 Source Han Sans SC Medium；如需微软雅黑、韩文覆盖更好的字体或其它字形风格，可自行提供字体并配置 `rollpig_card_font_path`。
 - SUPERUSER可发送 `同步小猪资源` / `刷新小猪图鉴` 手动触发资源同步。
@@ -233,43 +244,29 @@ nonebot_plugin_rollpig_plus/resource/
 - GIF 仅用于“今日小猪 / 烤猪 / 烤群友”等普通卡片动态展示；图片版图鉴固定取首帧缩略图，保持静态陈列。
 - GIF 资源建议透明背景、循环播放、无文字水印，帧数控制在 10–40 帧；异常或单帧 GIF 会自动退回静态 PNG 输出。
 - 公有云端资源会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/active/`。
-- 私有 overlay 会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/private_active/`。
+- 多私有 overlay 会分别缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/private_overlays/<name>/active/`；旧单私有包字段仍沿用 `private_active/`，方便无损升级。
 
 ## 📁 项目结构
 
 ```text
 nonebot_plugin_rollpig_plus/
-├─ __init__.py              # 指令注册与主流程
-├─ catalog_renderer.py      # 图片版小猪图鉴渲染
+├─ __init__.py              # 插件元数据与 handler 导入
+├─ card_renderer.py         # 今日小猪 / 烤猪 / 烤群友等普通卡片 Pillow 渲染
+├─ catalog_renderer.py      # 图片版小猪图鉴 HTML/CSS 渲染
 ├─ config.py                # 配置模型与 JSON 配置合并
 ├─ data_manager.py          # 本地 JSON 存储实现
-├─ emoji_source.py          # 本地 Noto Emoji ZIP 贴图源
-├─ perf_logging.py          # 性能日志辅助
-├─ render_budget.py         # HTML/Chromium 渲染并发预算
-├─ resource_manager.py      # 云端小猪资源同步与本地缓存加载
-├─ roast_manager.py         # AI 烤猪与文案生成
+├─ helpers.py               # 命令共享工具与消息发送辅助
+├─ jobs.py                  # 定时任务与日报流程
+├─ pighub_service.py        # PigHub 搜索 / 随机图缓存与兜底
+├─ resource_manager.py      # 云端资源同步、多私有 overlay 与本地缓存加载
+├─ roast_manager.py         # AI 烤猪与文案库管理
+├─ roll_flow.py             # 抽猪业务规则
+├─ roast_flow.py            # 烤群友业务规则
 ├─ runtime.py               # 宿主适配 / 群开关 / 运行时工具
-├─ summary_service.py       # 每日总结聚合
 ├─ texts.py                 # 文案模板与特殊形态文本
-├─ store/
-│  ├─ base.py               # 存储接口定义
-│  ├─ cloud.py              # rollpig-cloud 云端适配
-│  ├─ factory.py            # local / cloud 后端选择
-│  ├─ local_json.py         # 本地存储适配
-│  └─ models.py             # 存储数据模型
-└─ resource/
-   ├─ pig.json
-   ├─ pig_rules.json
-   ├─ template.html
-   ├─ catalog_base.png
-   ├─ catalog_template.html
-   ├─ catalog_anchor.html
-   ├─ emoji/
-   │  └─ google-emoji.zip
-   ├─ fonts/
-   │  └─ SourceHanSansSC-Medium.otf
-   └─ image/
-      └─ pig.png
+├─ handlers/                # NoneBot 指令注册与参数解析
+├─ store/                   # local / cloud 存储适配
+└─ resource/                # 内置小猪、字体、Emoji 与图鉴模板资源
 ```
 
 ## 🔗 相关项目
@@ -280,6 +277,18 @@ nonebot_plugin_rollpig_plus/
 - PigHub（搜猪功能支持）：[pighub.top](https://pighub.top/)
 
 ## 📋 最近更新
+
+### v0.8.2 多私有资源包
+
+#### 📦 资源包叠加
+- 新增 `rollpig_private_resource_manifests`，支持同时启用多个用户私有 overlay，例如公有包 + 官方 GIF 包 + PJsk 私有包 + 用户自建私有包。
+- 多个私有包按配置顺序叠加；新增猪不能与已有 ID 重复，确实要覆盖已有猪时继续使用 `pig_overrides.json` 显式声明。
+- 每个私有包使用独立缓存目录，单个包同步失败不会影响其它资源包或当前可用缓存。
+- 官方 GIF 动态小猪 overlay 不走用户配置，升级到 0.8.2 后会随云端资源同步自动启用。
+
+#### 🔁 本地包
+- 私有资源 manifest 支持本地路径和 `file://` URL，用户可以把自己的小猪包放在本地目录，通过 JSON 配置直接叠加。
+- 自建本地私有包的目录结构、manifest 生成与配置方式见 [rollpig-resources 自建本地私有包指南](https://github.com/Felis2026/rollpig-resources/blob/main/docs/local-private-pack-guide.md)。
 
 ### v0.8.1 日报默认关闭与分群控制
 

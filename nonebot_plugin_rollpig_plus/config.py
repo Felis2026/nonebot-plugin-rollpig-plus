@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from nonebot import get_plugin_config
 from nonebot.log import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 def _is_json_config_strict() -> bool:
@@ -57,6 +57,14 @@ def _merge_json_config(env_data: dict[str, Any]) -> dict[str, Any]:
     normalized_env = {str(key).lower(): value for key, value in env_data.items() if value is not None}
     return {**json_data, **normalized_env}
 
+class PrivateResourceManifestConfig(BaseModel):
+    """单个私有资源 overlay 配置；主要由 JSON 配置承载，避免 .env 过度膨胀。"""
+
+    name: Optional[str] = None  # 缓存目录名；不填时会按 URL 自动生成稳定名称
+    manifest_url: str  # 支持 http(s) manifest，也支持本地 manifest 文件路径
+    token: Optional[str] = None  # 仅自建带鉴权资源服务时需要
+
+
 class Config(BaseModel):
     def __init__(self, **data: Any):
         super().__init__(**_merge_json_config(data))
@@ -85,9 +93,12 @@ class Config(BaseModel):
     rollpig_resource_sync_interval_hours: int = 24
     rollpig_resource_sync_timeout: float = 10.0
     rollpig_resource_max_file_size: int = 10 * 1024 * 1024
-    # 私有资源包是公有全量包之上的 overlay；公开版默认关闭。
+    # 私有资源包是公有全量包之上的用户 overlay；官方 GIF 包由资源管理器固定随云端资源启用。
+    # 0.8.2 起使用 rollpig_private_resource_manifests 配置多个 overlay；
+    # 两个旧字段保留兼容，会被当作一个 legacy overlay 追加到列表末尾。
     rollpig_private_resource_manifest_url: Optional[str] = ""
     rollpig_private_resource_token: Optional[str] = None
+    rollpig_private_resource_manifests: list[PrivateResourceManifestConfig | str | dict[str, Any]] = Field(default_factory=list)
 
     # --- 定时日报 ---
     # 默认关闭，避免新部署实例在管理员未确认前主动向群里推送日报。
