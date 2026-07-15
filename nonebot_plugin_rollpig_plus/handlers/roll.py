@@ -40,7 +40,7 @@ async def _(event: Event):
         MessageSegment.reply(event.message_id)
         + (
             "🐷 小猪资源同步结果\n"
-            f"{message}\n"
+            f"{message}\n\n"
             f"🐽 小猪数量：{len(PIG_LIST)}"
         )
     )

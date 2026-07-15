@@ -112,10 +112,11 @@ class Config(BaseModel):
 
     # --- 图片版小猪图鉴 ---
     rollpig_catalog_enabled: bool = True
+    # 单次 2× 绘制会同时持有多张大尺寸 RGBA 中间图；默认限制 2 个并发，
+    # 防止突发请求把线程池和内存打满。512MB 部署建议显式设为 1。
     rollpig_catalog_render_concurrency: int = 2
     rollpig_catalog_cache_seconds: int = 300
     rollpig_catalog_output_format: str = "png"
-    rollpig_catalog_render_timeout: float = 8.0
     rollpig_catalog_scale_factor: float = 2.0
 
     # --- 代理设置 (可选，如果服务器在国内连不上API) ---

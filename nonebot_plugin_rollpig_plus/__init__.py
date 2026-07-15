@@ -4,7 +4,6 @@ from nonebot.plugin import PluginMetadata
 # 确保依赖插件先被 NoneBot 注册（必须在本地模块 import 之前）
 # data_manager.py 在模块加载时会调用 store.get_plugin_data_file()；
 # 定时任务也需要 apscheduler 提前完成插件注册，避免商店/静态审核误判。
-require("nonebot_plugin_htmlrender")
 require("nonebot_plugin_localstore")
 require("nonebot_plugin_apscheduler")
 
