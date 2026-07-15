@@ -7,7 +7,18 @@ from io import BytesIO
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from nonebot.log import logger
+from pilmoji import Pilmoji
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+
+from .card_renderer import (
+    EMOJI_SCALE_FACTOR,
+    _has_emoji_candidate,
+    _measure_text,
+    _normalize_extra_emoji_symbols,
+    _truncate_to_width,
+    get_noto_emoji_source,
+)
 
 
 # ================================ 图鉴数据模型 ================================ #
@@ -164,20 +175,70 @@ class CatalogRenderer:
     def _box(self, box: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
         return tuple(self._v(value) for value in box)  # type: ignore[return-value]
 
-    def _fit_text(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
-        """按像素宽度截断单行文字，避免长昵称和资源名破坏固定布局。"""
+    # ================================ Emoji 文本绘制 ================================ #
 
-        if draw.textlength(text, font=font) <= max_width:
-            return text
-        ellipsis = "…"
-        low, high = 0, len(text)
-        while low < high:
-            middle = (low + high + 1) // 2
-            if draw.textlength(text[:middle] + ellipsis, font=font) <= max_width:
-                low = middle
-            else:
-                high = middle - 1
-        return text[:low] + ellipsis
+    def _draw_text(
+        self,
+        canvas: Image.Image,
+        position: tuple[int, int],
+        text: str,
+        *,
+        font: ImageFont.ImageFont,
+        fill: tuple[int, int, int, int],
+        anchor: str = "la",
+        stroke_width: int = 0,
+        stroke_fill: tuple[int, int, int, int] | None = None,
+    ) -> None:
+        """绘制单行文字；含 Emoji 时复用普通卡片的内置 Noto 贴图源。"""
+
+        if _has_emoji_candidate(text):
+            source = get_noto_emoji_source()
+            if source is not None:
+                try:
+                    render_text = _normalize_extra_emoji_symbols(text)
+                    # 图鉴会先超采样再缩回 1×，偏移量也必须同步放大，
+                    # 否则 Emoji 在 2×/3× 模式下会相对中文基线偏低。
+                    emoji_offset = (0, self._v(-1))
+                    with Pilmoji(
+                        canvas,
+                        source=source,
+                        render_discord_emoji=False,
+                        emoji_scale_factor=EMOJI_SCALE_FACTOR,
+                        emoji_position_offset=emoji_offset,
+                    ) as pilmoji:
+                        pilmoji.text(
+                            position,
+                            render_text,
+                            fill=fill,
+                            font=font,
+                            anchor=anchor,
+                            spacing=0,
+                            stroke_width=stroke_width,
+                            stroke_fill=stroke_fill,
+                            emoji_scale_factor=EMOJI_SCALE_FACTOR,
+                            emoji_position_offset=emoji_offset,
+                        )
+                    return
+                except Exception as error:
+                    logger.debug(
+                        f"RollPig 图鉴 pilmoji 绘制失败，回退普通字体: "
+                        f"text={text!r}, error={error}"
+                    )
+
+        ImageDraw.Draw(canvas).text(
+            position,
+            text,
+            font=font,
+            fill=fill,
+            anchor=anchor,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
+
+    def _fit_text(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
+        """按真实贴图宽度截断，且不从 ZWJ/变体选择符中间切碎 Emoji。"""
+
+        return _truncate_to_width(draw, text, font, max_width)
 
     def _paste_rounded_gradient(
         self,
@@ -206,7 +267,7 @@ class CatalogRenderer:
         """将不同字号/颜色的文本片段作为一行整体居中。"""
 
         materialized = list(runs)
-        widths = [draw.textlength(text, font=font) for text, font, _ in materialized]
+        widths = [_measure_text(draw, text, font) for text, font, _ in materialized]
         x = self._v(center[0]) - sum(widths) / 2
         y = self._v(center[1])
         for (text, font, color), width in zip(materialized, widths):
@@ -227,7 +288,8 @@ class CatalogRenderer:
             prefix_font,
             self._v(390),
         )
-        draw.text(
+        self._draw_text(
+            canvas,
             self._xy(center_x, 94),
             prefix,
             font=prefix_font,
@@ -415,14 +477,19 @@ class CatalogRenderer:
         name = self._fit_text(draw, card.name, name_font, self._v(132))
         # 内置字体只有 Medium 字重，不再附加描边模拟粗体；白色下层只保留
         # 原模板很轻的文字分离感，避免猪名显得发黑、过重。
-        draw.text(
-            self._xy(left + 74, top + 69),
-            name,
-            font=name_font,
-            fill=(255, 255, 255, 190),
-            anchor="mm",
-        )
-        draw.text(
+        # Emoji 是彩色贴图，重复绘制白色分离层只会造成一像素重影；
+        # 纯文字猪名继续保留原模板的轻微白色下层。
+        if not _has_emoji_candidate(name):
+            self._draw_text(
+                canvas,
+                self._xy(left + 74, top + 69),
+                name,
+                font=name_font,
+                fill=(255, 255, 255, 190),
+                anchor="mm",
+            )
+        self._draw_text(
+            canvas,
             self._xy(left + 74, top + 68),
             name,
             font=name_font,
@@ -738,7 +805,8 @@ class CatalogRenderer:
             anchor="lm",
         )
         favorite_name = self._fit_text(draw, favorite.name, self._font(19), self._v(116))
-        draw.text(
+        self._draw_text(
+            canvas,
             self._xy(414, 935),
             favorite_name,
             font=self._font(19),
