@@ -3,6 +3,8 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+from nonebot.log import logger
+
 from .resource_manager import pig_resource_manager
 from .store import store
 from .store.models import DailyRollResult, DrawState
@@ -97,6 +99,12 @@ async def resolve_daily_pig(user_id: str, group_id: str = "") -> DailyPigResolut
         if group_id:
             await store.mark_group_roll_seen(user_id, current_pig["id"], group_id)
         return DailyPigResolution(pig=current_pig)
+
+    if pig_id:
+        # 已保存的 ID 缺失时绝不能用随机候选替代，否则展示结果会与账本永久不一致。
+        # 具体 ID 只进入管理员日志；命令层继续复用现有数据缺失提示，无需改变返回结构。
+        logger.warning(f"RollPig 今日形态资源缺失: user={user_id} pig_id={pig_id}")
+        return DailyPigResolution(pig=None, missing_resources=True)
 
     if not pig_resource_manager.pig_list:
         return DailyPigResolution(pig=None, missing_resources=True)
