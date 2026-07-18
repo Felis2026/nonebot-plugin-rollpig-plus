@@ -237,7 +237,7 @@ nonebot_plugin_rollpig_plus/resource/
 - 普通卡片使用内置 Source Han Sans SC Medium 渲染 CJK 文本，并使用 `pilmoji` 与内置 Google Noto Emoji 32px ZIP 离线渲染彩色 Emoji，不依赖运行时联网。
 - PNG 与 GIF 均会在普通卡片中统一渲染为 240×240 头像区域；建议资源原图也按 240×240 入库，避免缩放裁切产生偏移。
 - GIF 仅用于“今日小猪 / 烤猪 / 烤群友”等普通卡片动态展示；图片版图鉴固定取首帧缩略图，保持静态陈列。
-- GIF 资源建议透明背景、循环播放、无文字水印，帧数控制在 10–40 帧；异常或单帧 GIF 会自动退回静态 PNG 输出。
+- GIF 资源建议透明背景、循环播放、无文字水印，帧数控制在 10～60 帧；较长动画会在完整周期内均匀收敛到最多 60 帧并保留总时长。解码工作量超过 1600 万像素帧、源帧超过 600、文件异常或实际为单帧时会退回静态 PNG。
 - 公有云端资源会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/active/`。
 - 多私有 overlay 会分别缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/private_overlays/<name>/active/`；旧单私有包字段仍沿用 `private_active/`，方便无损升级。
 

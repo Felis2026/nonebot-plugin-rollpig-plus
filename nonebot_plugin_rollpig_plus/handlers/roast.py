@@ -85,7 +85,13 @@ async def _(event: Event):
                 group_id=group_id,
             )
         )
-    await send_rendered_pig(cmd_roast, event, roasted_pig_data, extra_text=auto_roll_hint)
+    await send_rendered_pig(
+        cmd_roast,
+        event,
+        roasted_pig_data,
+        extra_text=auto_roll_hint,
+        cache_final_card=False,
+    )
 
 
 # 5.5 烤群友

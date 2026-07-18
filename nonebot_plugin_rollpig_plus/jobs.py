@@ -10,6 +10,7 @@ from nonebot import get_bot, get_driver
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
+from .card_renderer import shutdown_card_renderer
 from .config import plugin_config
 from .catalog_renderer import shutdown_catalog_renderer
 from .runtime import (
@@ -31,7 +32,7 @@ background_resource_sync_tasks: set[asyncio.Task[None]] = set()
 # ================================ 运行时生命周期 ================================ #
 @get_driver().on_shutdown
 async def shutdown_rollpig_runtime() -> None:
-    """释放图鉴页面池与存储后端连接，避免长期运行或重载后残留浏览器/HTTP 资源。"""
+    """释放卡片/图鉴缓存与存储连接，避免长期运行或重载后残留资源。"""
 
     # 启动期资源同步是后台任务；退出时必须先收束，避免同步仍在改缓存目录时关闭运行时。
     for task in list(background_resource_sync_tasks):
@@ -41,6 +42,7 @@ async def shutdown_rollpig_runtime() -> None:
             await task
     background_resource_sync_tasks.clear()
     await pighub_service.shutdown()
+    await shutdown_card_renderer()
     await shutdown_catalog_renderer()
     await store.close()
 

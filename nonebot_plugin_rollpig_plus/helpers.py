@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from functools import wraps
+from typing import Any
 
 from nonebot import get_driver
 from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, MessageSegment
@@ -184,8 +185,15 @@ def log_perf(message: str) -> None:
 # 命令层只决定“要发哪只猪”；渲染、性能埋点和烤群友结果落库统一在这里。
 
 
-async def send_rendered_pig(matcher, event: Event, pig_data: dict, extra_text: str = "") -> None:
-    """渲染并发送小猪卡片；支持普通 PNG 与动态 GIF 资源。"""
+async def send_rendered_pig(
+    matcher,
+    event: Event,
+    pig_data: dict,
+    extra_text: str = "",
+    *,
+    cache_final_card: bool = True,
+) -> None:
+    """渲染并发送卡片；固定卡缓存成品，烤猪动态文案只复用 GIF 源帧。"""
 
     started_at = time.perf_counter()
     pig_id = str(pig_data.get("id", ""))
@@ -195,7 +203,11 @@ async def send_rendered_pig(matcher, event: Event, pig_data: dict, extra_text: s
 
     try:
         render_started_at = time.perf_counter()
-        render_result = await render_pig_card_image(pig_data, avatar_file)
+        render_result = await render_pig_card_image(
+            pig_data,
+            avatar_file,
+            cache_final_card=cache_final_card,
+        )
         render_finished_at = time.perf_counter()
     except Exception as error:
         logger.error(f"图片渲染失败: pig_id={pig_id}, renderer=pillow, error={error}")
@@ -219,7 +231,8 @@ async def send_rendered_pig(matcher, event: Event, pig_data: dict, extra_text: s
         f"bytes={len(render_result.data)} "
         f"analysis_font={render_result.analysis_font_size} "
         f"analysis_lines={render_result.analysis_lines} "
-        f"emoji={render_result.emoji_enabled} extra={bool(extra_text)}"
+        f"emoji={render_result.emoji_enabled} extra={bool(extra_text)} "
+        f"card_cache={'final-disk' if cache_final_card else 'dynamic'}"
     )
     await matcher.finish(msg)
 
@@ -249,6 +262,13 @@ async def finish_roast_outcome(
         )
     )
     if outcome.render_data:
-        await send_rendered_pig(matcher, event, outcome.render_data, extra_text=outcome.extra_text)
+        # 烤猪分析文案会随对象和结果变化；缓存最终成品会迅速挤满，故只复用 GIF 源帧。
+        await send_rendered_pig(
+            matcher,
+            event,
+            outcome.render_data,
+            extra_text=outcome.extra_text,
+            cache_final_card=False,
+        )
         return
     await matcher.finish(MessageSegment.reply(event.message_id) + outcome.plain_text)
