@@ -8,8 +8,9 @@ require("nonebot_plugin_localstore")
 require("nonebot_plugin_apscheduler")
 
 # 本地模块（在 require() 之后 import）
-from . import jobs as _rollpig_jobs  # noqa: F401  # 导入即注册定时任务与生命周期回调
-from .config import Config
+# 导入 jobs 即注册定时任务与生命周期回调；这些 import 不能移动到 require() 之前。
+from . import jobs as _rollpig_jobs  # noqa: E402, F401
+from .config import Config  # noqa: E402
 
 __plugin_meta__ = PluginMetadata(
     name="今天是什么小猪（今日小猪）Plus",
@@ -43,7 +44,7 @@ __plugin_meta__ = PluginMetadata(
 
 # ================= 指令处理区域 =================
 # handlers 的导入顺序就是 matcher 注册顺序。
-from .handlers import roll as _roll_handlers  # noqa: F401
-from .handlers import roast as _roast_handlers  # noqa: F401
-from .handlers import collection as _collection_handlers  # noqa: F401
-from .handlers import control as _control_handlers  # noqa: F401
+from .handlers import roll as _roll_handlers  # noqa: E402, F401
+from .handlers import roast as _roast_handlers  # noqa: E402, F401
+from .handlers import collection as _collection_handlers  # noqa: E402, F401
+from .handlers import control as _control_handlers  # noqa: E402, F401
