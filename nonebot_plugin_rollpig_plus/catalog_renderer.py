@@ -125,18 +125,19 @@ def _prune_catalog_cache(*, ttl: int, now: float) -> None:
         _catalog_cache.pop(key, None)
 
     overflow = len(_catalog_cache) - CATALOG_CACHE_MAX_ENTRIES
-    if overflow <= 0:
-        return
-
-    oldest_keys = sorted(_catalog_cache, key=lambda key: _catalog_cache[key].created_at)[:overflow]
-    for key in oldest_keys:
-        _catalog_cache.pop(key, None)
+    if overflow > 0:
+        oldest_keys = sorted(_catalog_cache, key=lambda key: _catalog_cache[key].created_at)[:overflow]
+        for key in oldest_keys:
+            _catalog_cache.pop(key, None)
 
     # PNG 图鉴单张可达数 MB，仅限制条数不足以约束内存；总字节超限时继续按最老优先淘汰。
+    cache_bytes = _catalog_cache_bytes()
     for key in sorted(_catalog_cache, key=lambda key: _catalog_cache[key].created_at):
-        if _catalog_cache_bytes() <= CATALOG_CACHE_MAX_BYTES:
+        if cache_bytes <= CATALOG_CACHE_MAX_BYTES:
             break
-        _catalog_cache.pop(key, None)
+        cached = _catalog_cache.pop(key, None)
+        if cached is not None:
+            cache_bytes -= len(cached.payload)
 
 
 def _get_catalog_cache_locked(cache_key: str, *, ttl: int, now: float) -> bytes | None:
@@ -291,14 +292,15 @@ def _build_catalog_data(
     )
 
 
-def _build_cache_key(data: CatalogData, snapshot: CatalogSnapshot, page: int) -> str:
+def _build_cache_key(data: CatalogData, snapshot: CatalogSnapshot) -> str:
     """缓存指纹只使用状态摘要，不把图片二进制塞进 key，避免内存膨胀。"""
 
     stats = data.stats
     favorite = data.favorite
     key_payload = {
         "resource_version": pig_resource_manager.resource_version,
-        "page": page,
+        # 页码必须使用业务层钳制后的实际页，避免 999/1000 等请求重复缓存同一张末页图片。
+        "page": stats.page,
         "page_size": CATALOG_PAGE_SIZE,
         "user_name": data.user_name,
         "stats": (
@@ -437,12 +439,13 @@ async def render_catalog_image(
     """渲染图片版小猪图鉴；只读取快照，不修改抽猪状态或 copies。"""
     started_at = time.perf_counter()
     data = _build_catalog_data(user_name=user_name, snapshot=snapshot, page=page)
+    resolved_page = data.stats.page
     data_ready_at = time.perf_counter()
     output_format = _normalize_output_format(plugin_config.rollpig_catalog_output_format)
     scale_factor = _resolve_catalog_scale_factor()
     cache_key = (
         f"pillow:{scale_factor}:{output_format}:"
-        f"{_build_cache_key(data, snapshot, page)}"
+        f"{_build_cache_key(data, snapshot)}"
     )
     ttl = max(0, int(plugin_config.rollpig_catalog_cache_seconds or 0))
 
@@ -453,7 +456,7 @@ async def render_catalog_image(
         cached_payload = _get_catalog_cache_locked(cache_key, ttl=ttl, now=time.time())
         if cached_payload is not None:
             log_perf(
-                f"rollpig catalog cache hit: user={user_name} page={page} "
+                f"rollpig catalog cache hit: user={user_name} page={resolved_page} "
                 f"data={data_ready_at - started_at:.2f}s bytes={len(cached_payload)}"
             )
             return cached_payload
@@ -463,7 +466,7 @@ async def render_catalog_image(
             render_task = asyncio.create_task(
                 _render_catalog_image_uncached(
                     user_name=user_name,
-                    page=page,
+                    page=resolved_page,
                     data=data,
                     cache_key=cache_key,
                     ttl=ttl,
@@ -478,7 +481,7 @@ async def render_catalog_image(
 
     if not render_owner:
         log_perf(
-            f"rollpig catalog render coalesced: user={user_name} page={page} "
+            f"rollpig catalog render coalesced: user={user_name} page={resolved_page} "
             f"data={data_ready_at - started_at:.2f}s"
         )
 
