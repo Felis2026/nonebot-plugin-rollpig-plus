@@ -141,7 +141,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
     // ================================ 存储与云端 ================================ //
     "rollpig_storage_backend": "local",        // local=本地 JSON；cloud=rollpig-cloud 多 Bot 同步
     "rollpig_cloud_api_url": null,             // cloud 模式的 rollpig-cloud 地址；默认不配置
-    "rollpig_cloud_timeout": 3.0,              // 请求 rollpig-cloud 的超时时间（秒）
+    "rollpig_cloud_timeout": 5.0,              // 请求 rollpig-cloud 的超时时间（秒）
     "rollpig_cloud_strict_mode": true,         // true=云端异常直接失败；false=读接口可安全兜底
 
     // ================================ 小猪资源包 ================================ //
