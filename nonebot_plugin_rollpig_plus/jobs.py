@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import random
+from collections import Counter
 from contextlib import suppress
 
 from nonebot import get_bot, get_driver
@@ -18,6 +20,7 @@ from .runtime import (
 from .resource_manager import get_pig_by_id, sync_rollpig_resources
 from .pighub_service import PIGHUB_REFRESH_INTERVAL_HOURS, pighub_service
 from .store import store
+from .store.base import RollpigStore
 from .store.cloud import CloudStoreError
 from .texts import DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_FOOTER, DAILY_SUMMARY_HEADER
 
@@ -104,6 +107,104 @@ async def resource_sync_job():
 
 
 # ================================ 每日总结任务 ================================ #
+async def build_daily_summary(
+    summary_store: RollpigStore,
+    date_str: str | None = None,
+    group_id: str | None = None,
+) -> dict:
+    """通过统一存储接口聚合指定日期、指定群的抽猪与烧烤数据。"""
+
+    target_date = date_str or rollpig_date_str()
+    today_rolls = (
+        await summary_store.get_group_rolls(group_id, target_date)
+        if group_id
+        else await summary_store.get_daily_rolls(target_date)
+    )
+    events = await summary_store.list_daily_events(
+        date_str=target_date,
+        group_id=group_id,
+    )
+
+    roll_stats = _get_roll_stats(today_rolls)
+    if not events and roll_stats.get("roll_count", 0) == 0:
+        return {"total": 0, **roll_stats}
+
+    roasted_counter: Counter[str] = Counter()
+    attacker_counter: Counter[str] = Counter()
+    escape_counter: Counter[str] = Counter()
+    backfire_counter: Counter[str] = Counter()
+    name_map: dict[str, str] = {}
+
+    for event in events:
+        attacker_id = str(event.get("attacker") or "")
+        target_id = str(event.get("target") or "")
+        if event.get("attacker_name"):
+            name_map[attacker_id] = str(event["attacker_name"])
+        if event.get("target_name"):
+            name_map[target_id] = str(event["target_name"])
+
+        event_type = event.get("type", "")
+        if event_type == "success":
+            attacker_counter[attacker_id] += 1
+            # 自烤只计入发起次数，不能把自己算进“最惨食材”。
+            if attacker_id and target_id and attacker_id != target_id:
+                roasted_counter[target_id] += 1
+        elif event_type == "self_roast":
+            attacker_counter[attacker_id] += 1
+        elif event_type == "escape":
+            escape_counter[target_id] += 1
+            attacker_counter[attacker_id] += 1
+        elif event_type in {"backfire", "bot_backfire"}:
+            backfire_counter[attacker_id] += 1
+            attacker_counter[attacker_id] += 1
+
+    def get_top(counter: Counter[str]) -> tuple[str | None, str, int]:
+        """返回计数最高的用户 ID、显示名和次数；空计数器返回稳定空值。"""
+
+        if not counter:
+            return None, "", 0
+        user_id, count = counter.most_common(1)[0]
+        return user_id, name_map.get(user_id, user_id), count
+
+    most_roasted_id, most_roasted_name, most_roasted_count = get_top(roasted_counter)
+    most_active_id, most_active_name, most_active_count = get_top(attacker_counter)
+    escape_king_id, escape_king_name, escape_king_count = get_top(escape_counter)
+    backfire_king_id, backfire_king_name, backfire_king_count = get_top(backfire_counter)
+
+    return {
+        "total": len(events),
+        "most_roasted_id": most_roasted_id,
+        "most_roasted_name": most_roasted_name,
+        "most_roasted_count": most_roasted_count,
+        "most_active_id": most_active_id,
+        "most_active_name": most_active_name,
+        "most_active_count": most_active_count,
+        "escape_king_id": escape_king_id,
+        "escape_king_name": escape_king_name,
+        "escape_king_count": escape_king_count,
+        "backfire_king_id": backfire_king_id,
+        "backfire_king_name": backfire_king_name,
+        "backfire_king_count": backfire_king_count,
+        **roll_stats,
+    }
+
+
+def _get_roll_stats(today_rolls: dict[str, str]) -> dict:
+    """统计抽猪人数、最热门形态和人类形态人数。"""
+
+    if not today_rolls:
+        return {"roll_count": 0}
+
+    pig_counter = Counter(today_rolls.values())
+    top_pig_id, top_pig_count = pig_counter.most_common(1)[0]
+    return {
+        "roll_count": len(today_rolls),
+        "top_pig_id": top_pig_id,
+        "top_pig_count": top_pig_count,
+        "human_count": sum(pig_id == "human" for pig_id in today_rolls.values()),
+    }
+
+
 def build_daily_summary_text(summary: dict) -> str:
     """将按群聚合后的日报结果拼成文案。"""
 
@@ -150,15 +251,18 @@ def build_daily_summary_text(summary: dict) -> str:
     return "\n".join(lines)
 
 
-@scheduler.scheduled_job("cron", hour=23, minute=45, id="rollpig_daily_summary")
+@scheduler.scheduled_job("cron", hour=23, minute=45, timezone="Asia/Shanghai", id="rollpig_daily_summary")
 async def daily_summary_job():
     """每晚 23:45~23:55 推送当日猪圈日报（随机延迟 0~10 分钟防风控）。"""
 
+    # 日期必须在随机延迟和逐群查询前固定，避免任务跨过零点后混入次日数据。
+    summary_date = rollpig_date_str()
+    protect_date = (dt.date.fromisoformat(summary_date) + dt.timedelta(days=1)).isoformat()
     delay = random.randint(0, 600)  # 0~10 分钟随机延迟
     logger.info(f"[每日总结] 定时触发，随机延迟 {delay} 秒后推送")
     await asyncio.sleep(delay)
     try:
-        active_groups = await store.get_active_group_ids()
+        active_groups = await store.get_active_group_ids(summary_date)
         if not active_groups:
             logger.info("[每日总结] 今日无活跃群，跳过推送")
             return
@@ -187,15 +291,25 @@ async def daily_summary_job():
             logger.info("[每日总结] 已完成旧数据清理，但没有群开启日报推送")
             return
 
-        group_summaries = {}
-        protect_date = rollpig_date_str(1)
+        group_summaries: dict[str, dict] = {}
         for group_id in summary_push_groups:
-            summary = await build_daily_summary(store, group_id=group_id)
+            try:
+                summary = await build_daily_summary(
+                    store,
+                    date_str=summary_date,
+                    group_id=group_id,
+                )
+                protected_ids = (
+                    [summary["most_roasted_id"]]
+                    if summary.get("most_roasted_id") and summary.get("most_roasted_count", 0) >= 2
+                    else []
+                )
+                await store.replace_group_protections(group_id, protected_ids, protect_date)
+            except Exception as error:
+                # 单群数据或云请求异常不能阻断其它群；保护写入失败时也不发送承诺了保护的日报。
+                logger.warning(f"[每日总结] 汇总失败，已跳过该群: group={group_id} error={error}")
+                continue
             group_summaries[group_id] = summary
-            if summary.get("most_roasted_id") and summary.get("most_roasted_count", 0) >= 2:
-                await store.replace_group_protections(group_id, [summary["most_roasted_id"]], protect_date)
-            else:
-                await store.replace_group_protections(group_id, [], protect_date)
 
         await store.prune_events(days_to_keep=7)
         await store.prune_history(days_to_keep=14)
@@ -206,16 +320,15 @@ async def daily_summary_job():
             logger.warning("[每日总结] 无可用 Bot，跳过推送")
             return
 
-        for group_id in summary_push_groups:
+        for group_id, summary in group_summaries.items():
             try:
-                text = build_daily_summary_text(group_summaries[group_id])
+                text = build_daily_summary_text(summary)
                 await bot.send_group_msg(group_id=int(group_id), message=text)
             except Exception as error:
                 logger.warning(f"[每日总结] 推送失败: group={group_id} error={error}")
 
-        logger.info(f"[每日总结] 推送完成, 共 {len(summary_push_groups)} 个群")
+        logger.info(f"[每日总结] 推送完成, 成功汇总 {len(group_summaries)}/{len(summary_push_groups)} 个群")
     except CloudStoreError as error:
         logger.warning(f"[每日总结] 云端账本暂时不可用，跳过本轮推送: {error}")
     except Exception as error:
         logger.error(f"[每日总结] 任务异常: {error}")
-
