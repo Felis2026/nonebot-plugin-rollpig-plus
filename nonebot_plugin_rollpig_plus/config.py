@@ -83,7 +83,7 @@ class Config(BaseModel):
     rollpig_storage_backend: str = "local"  # local / cloud
     rollpig_cloud_api_url: Optional[str] = None
     rollpig_cloud_token: Optional[str] = None
-    rollpig_cloud_timeout: float = 3.0
+    rollpig_cloud_timeout: float = 5.0  # 云存储单次请求超时（秒），运行时限制为 0.5～60
     rollpig_cloud_strict_mode: bool = True  # true=云端异常直接失败；false=读接口可安全兜底，写接口仍提示稍后重试
 
     # --- 小猪资源云端同步 ---
@@ -91,7 +91,7 @@ class Config(BaseModel):
     rollpig_resource_sync_enabled: bool = True
     rollpig_resource_manifest_url: str = "https://pig.felislab.cc/resources/rollpig/manifest.json"
     rollpig_resource_sync_interval_hours: int = 24
-    rollpig_resource_sync_timeout: float = 10.0
+    rollpig_resource_sync_timeout: float = 10.0  # 资源请求超时（秒），运行时限制为 1～240
     rollpig_resource_max_file_size: int = 10 * 1024 * 1024
     # 私有资源包是公有全量包之上的用户 overlay；官方 GIF 包由资源管理器固定随云端资源启用。
     # 0.8.2 起使用 rollpig_private_resource_manifests 配置多个 overlay；
@@ -112,10 +112,11 @@ class Config(BaseModel):
 
     # --- 图片版小猪图鉴 ---
     rollpig_catalog_enabled: bool = True
+    # 单次 2× 绘制会同时持有多张大尺寸 RGBA 中间图；默认限制 2 个并发，
+    # 防止突发请求把线程池和内存打满。512MB 部署建议显式设为 1。
     rollpig_catalog_render_concurrency: int = 2
     rollpig_catalog_cache_seconds: int = 300
     rollpig_catalog_output_format: str = "png"
-    rollpig_catalog_render_timeout: float = 8.0
     rollpig_catalog_scale_factor: float = 2.0
 
     # --- 代理设置 (可选，如果服务器在国内连不上API) ---

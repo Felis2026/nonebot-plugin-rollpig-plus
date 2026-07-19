@@ -18,6 +18,13 @@ from ..helpers import guard_group_enabled, guard_store_errors
 from ..helpers import get_event_group_id, is_superuser_user
 
 
+def _build_pighub_image_message(pig: dict, image_url: str, fallback_title: str) -> Message:
+    """把外部 PigHub 标题封装成纯文本消息，并追加已解析的图片段。"""
+
+    title = str(pig.get("title") or fallback_title)
+    return MessageSegment.text(title) + MessageSegment.image(image_url)
+
+
 # 0. 小猪资源同步（管理员）
 cmd_sync_resources = on_command("同步小猪资源", aliases={"刷新小猪图鉴"}, block=True)
 
@@ -40,7 +47,7 @@ async def _(event: Event):
         MessageSegment.reply(event.message_id)
         + (
             "🐷 小猪资源同步结果\n"
-            f"{message}\n"
+            f"{message}\n\n"
             f"🐽 小猪数量：{len(PIG_LIST)}"
         )
     )
@@ -115,7 +122,8 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
             "data": {
                 "name": "随机小猪Bot",
                 "uin": event.self_id,
-                "content": Message(pig.get("title", "随机小猪")) + MessageSegment.image(url),
+                # PigHub 标题属于外部数据，必须作为纯文本，不能让其中的 CQ 码变成消息段。
+                "content": _build_pighub_image_message(pig, url, "随机小猪"),
             },
         })
 
@@ -168,7 +176,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
                 "data": {
                     "name": "搜猪小助手",
                     "uin": event.self_id,
-                    "content": Message(pig.get("title", "未命名小猪")) + MessageSegment.image(image_url),
+                    "content": _build_pighub_image_message(pig, image_url, "未命名小猪"),
                 },
             })
         if not messages:
@@ -191,10 +199,9 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if not image_url:
         await cmd_find.finish("搜索结果数据异常，请稍后再试。")
         return
-    msg = Message(pig.get("title", "未命名小猪"))
-    msg += MessageSegment.image(image_url)
+    msg = _build_pighub_image_message(pig, image_url, "未命名小猪")
     if len(found_pigs) > 1:
-        msg += Message(f"\n共找到 {len(found_pigs)} 张，私聊仅展示第 1 张。")
+        msg += MessageSegment.text(f"\n共找到 {len(found_pigs)} 张，私聊仅展示第 1 张。")
     await cmd_find.finish(MessageSegment.reply(event.message_id) + msg)
 
 

@@ -49,6 +49,15 @@ RESOURCE_RULES_JSON_MAX_SIZE = 256 * 1024
 RESOURCE_PACKAGE_MAX_SIZE = 128 * 1024 * 1024
 RESOURCE_MAX_IMAGES = 500
 RESOURCE_MAX_FILES = 700
+RESOURCE_SYNC_TIMEOUT_MIN_SECONDS = 1.0
+RESOURCE_SYNC_TIMEOUT_MAX_SECONDS = 240.0
+
+
+def _resource_sync_timeout() -> float:
+    """返回资源请求的有效超时；配置保持兼容，实际网络等待限制在 1～240 秒。"""
+
+    configured = float(plugin_config.rollpig_resource_sync_timeout or 10.0)
+    return min(RESOURCE_SYNC_TIMEOUT_MAX_SECONDS, max(RESOURCE_SYNC_TIMEOUT_MIN_SECONDS, configured))
 
 
 @dataclass
@@ -411,7 +420,7 @@ class RollPigResourceManager:
         if not manifest_url:
             return ResourceSyncResult(updated=False, skipped=True, message="未配置资源 manifest URL")
 
-        timeout = max(1.0, float(plugin_config.rollpig_resource_sync_timeout or 10.0))
+        timeout = _resource_sync_timeout()
         max_file_size = max(1024, int(plugin_config.rollpig_resource_max_file_size or 10 * 1024 * 1024))
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             manifest = await self._download_json(client, manifest_url, max_size=RESOURCE_MANIFEST_MAX_SIZE)
@@ -487,7 +496,7 @@ class RollPigResourceManager:
         *,
         force: bool = False,
     ) -> ResourceSyncResult:
-        timeout = max(1.0, float(plugin_config.rollpig_resource_sync_timeout or 10.0))
+        timeout = _resource_sync_timeout()
         headers: dict[str, str] = {}
         if source.token:
             headers["Authorization"] = f"Bearer {source.token}"

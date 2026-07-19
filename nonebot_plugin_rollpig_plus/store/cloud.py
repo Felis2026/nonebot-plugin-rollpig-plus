@@ -23,7 +23,8 @@ class CloudStore(RollpigStore):
             raise ValueError("启用 cloud 存储时必须配置 rollpig_cloud_token")
 
         self.base_url = plugin_config.rollpig_cloud_api_url.rstrip("/")
-        self.timeout = max(0.5, float(plugin_config.rollpig_cloud_timeout or 3.0))
+        # CloudStore 位于命令主链路，等待过久会直接拖住用户响应；有效范围固定为 0.5～60 秒。
+        self.timeout = min(60.0, max(0.5, float(plugin_config.rollpig_cloud_timeout or 5.0)))
         self.strict_mode = bool(plugin_config.rollpig_cloud_strict_mode)
         self.headers = {
             "Authorization": f"Bearer {plugin_config.rollpig_cloud_token}",

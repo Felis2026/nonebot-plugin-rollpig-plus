@@ -85,7 +85,13 @@ async def _(event: Event):
                 group_id=group_id,
             )
         )
-    await send_rendered_pig(cmd_roast, event, roasted_pig_data, extra_text=auto_roll_hint)
+    await send_rendered_pig(
+        cmd_roast,
+        event,
+        roasted_pig_data,
+        extra_text=auto_roll_hint,
+        cache_final_card=False,
+    )
 
 
 # 5.5 烤群友
@@ -253,18 +259,6 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     target_name = await get_group_member_display_name(bot, event.group_id, target_id)
 
-    # 检查攻击者 CD
-    cooldown_result = await store.consume_roast_cooldown(
-        attacker_id,
-        cooldown_seconds=resolve_roast_cooldown_seconds(),
-        max_charges=resolve_roast_charge_max(),
-    )
-    if not cooldown_result.allowed:
-        await cmd_random_roast.finish(
-            MessageSegment.reply(event.message_id) + format_cooldown_message(cooldown_result.remaining_seconds)
-        )
-        return
-
     # 读取目标形态
     target_pig = get_pig_by_id(await store.get_daily_roll(target_id))
     if not target_pig:
@@ -286,6 +280,18 @@ async def _(bot: Bot, event: GroupMessageEvent):
     block_text = pick_random_target_block_text(target_name, target_pig)
     if block_text:
         await cmd_random_roast.finish(MessageSegment.reply(event.message_id) + block_text)
+        return
+
+    # 只有可实际进入烧烤判定的目标才消耗次数；数据异常、保护和特殊形态拦截均不应扣次。
+    cooldown_result = await store.consume_roast_cooldown(
+        attacker_id,
+        cooldown_seconds=resolve_roast_cooldown_seconds(),
+        max_charges=resolve_roast_charge_max(),
+    )
+    if not cooldown_result.allowed:
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id) + format_cooldown_message(cooldown_result.remaining_seconds)
+        )
         return
 
     # 正常概率判定

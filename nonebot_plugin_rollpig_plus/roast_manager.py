@@ -1,8 +1,7 @@
 import json
 import random
 import asyncio
-from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Dict, List
 from urllib.parse import urlparse
 
 import nonebot_plugin_localstore as store
@@ -123,7 +122,8 @@ class RoastManager:
     # roast_library.json 是 AI 生成文案的可增长缓存。这里参考 data_manager.py：
     # 写入动作放到线程，避免阻塞 NoneBot 事件循环；通过临时文件 replace 保证落盘原子性。
     def _load(self) -> dict:
-        if not self.file.exists(): return {}
+        if not self.file.exists():
+            return {}
         try:
             return json.loads(self.file.read_text("utf-8"))
         except Exception as e:
@@ -138,8 +138,10 @@ class RoastManager:
 
     async def _save_new_text(self, origin_id: str, target_id: str, text: str):
         async with self._lock:
-            if origin_id not in self.library: self.library[origin_id] = {}
-            if target_id not in self.library[origin_id]: self.library[origin_id][target_id] = []
+            if origin_id not in self.library:
+                self.library[origin_id] = {}
+            if target_id not in self.library[origin_id]:
+                self.library[origin_id][target_id] = []
             if text not in self.library[origin_id][target_id]:
                 self.library[origin_id][target_id].append(text)
                 await asyncio.to_thread(self._sync_save)

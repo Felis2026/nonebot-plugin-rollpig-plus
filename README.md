@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
-    <img src="https://img.shields.io/badge/Version-0.8.2-ff69b4" alt="Version 0.8.2">
+    <img src="https://img.shields.io/badge/Version-0.9.0-ff69b4" alt="Version 0.9.0">
   </p>
 </div>
 
@@ -52,7 +52,7 @@ pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git
 或固定到指定版本：
 
 ```bash
-pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git@v0.8.2"
+pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git@v0.9.0"
 ```
 
 加载插件时使用新的模块名：
@@ -61,11 +61,7 @@ pip install -U "git+https://github.com/Felis2026/nonebot-plugin-rollpig-plus.git
 nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 ```
 
-如果首次使用图片版图鉴时 Chromium 环境缺失，可按 `nonebot-plugin-htmlrender` / Playwright 的提示安装浏览器运行时：
-
-```bash
-playwright install chromium
-```
+图片版图鉴已经完全改为纯 Pillow，插件不再依赖 HTML 模板、Playwright 或 Chromium。
 
 ## 🐷 指令一览
 
@@ -145,7 +141,7 @@ playwright install chromium
     // ================================ 存储与云端 ================================ //
     "rollpig_storage_backend": "local",        // local=本地 JSON；cloud=rollpig-cloud 多 Bot 同步
     "rollpig_cloud_api_url": null,             // cloud 模式的 rollpig-cloud 地址；默认不配置
-    "rollpig_cloud_timeout": 3.0,              // 请求 rollpig-cloud 的超时时间（秒）
+    "rollpig_cloud_timeout": 5.0,              // 请求 rollpig-cloud 的超时时间（秒）
     "rollpig_cloud_strict_mode": true,         // true=云端异常直接失败；false=读接口可安全兜底
 
     // ================================ 小猪资源包 ================================ //
@@ -174,10 +170,9 @@ playwright install chromium
 
     // ================================ 图片版小猪图鉴 ================================ //
     "rollpig_catalog_enabled": true,           // 是否启用“小猪图鉴”图片命令；不替代“我的猪圈”
-    "rollpig_catalog_render_concurrency": 2,   // 常驻 Playwright 页面池上限；小内存机器建议 1~2
+    "rollpig_catalog_render_concurrency": 2,   // 默认同时绘制 2 张；512MB 部署建议设为 1
     "rollpig_catalog_cache_seconds": 300,      // 同一状态指纹的图鉴结果缓存秒数，不会额外刷新 copies
     "rollpig_catalog_output_format": "png",   // 输出格式；默认 PNG
-    "rollpig_catalog_render_timeout": 8.0,     // 单张图鉴渲染超时时间（秒）
     "rollpig_catalog_scale_factor": 2.0        // 2x 渲染，提升文字和徽章清晰度
   }
 }
@@ -206,7 +201,7 @@ ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json
 - 云同步可自行部署 [rollpig-cloud](https://github.com/Felis2026/rollpig-cloud)，也可以联系维护者申请接入现有 API。
 - `ROLLPIG_STORAGE_BACKEND=cloud` 时，今日小猪、图鉴成长状态、普通烤群友充能、加急点火次数会在多 Bot 间同步。
 - `ROLLPIG_CLOUD_STRICT_MODE=false` 只允许读接口使用安全兜底；关键写接口不会偷偷回退本地，避免多 Bot 数据脑裂。
-- 用户私有资源 overlay 优先级高于官方 GIF、公有云端资源和插件内置资源；0.8.2 起推荐用 `rollpig_private_resource_manifests` 配置多个用户私有包，旧的 `rollpig_private_resource_manifest_url` 仍兼容。
+- 用户私有资源 overlay 优先级高于官方 GIF、公有云端资源和插件内置资源；推荐用 `rollpig_private_resource_manifests` 配置多个用户私有包，旧的 `rollpig_private_resource_manifest_url` 仍兼容。
 - 自建本地私有包的目录结构、manifest 生成与配置方式见 [rollpig-resources 自建本地私有包指南](https://github.com/Felis2026/rollpig-resources/blob/main/docs/local-private-pack-guide.md)。
 - `rollpig_daily_summary_enabled=false` 是默认值，表示未单独设置的群默认不推日报；可用 `小猪日报 开启` 为单群开启，或设为 `true` 让未覆盖的群默认开启。
 - 普通卡片由 Pillow 渲染，默认使用内置 Source Han Sans SC Medium；如需微软雅黑、韩文覆盖更好的字体或其它字形风格，可自行提供字体并配置 `rollpig_card_font_path`。
@@ -242,7 +237,7 @@ nonebot_plugin_rollpig_plus/resource/
 - 普通卡片使用内置 Source Han Sans SC Medium 渲染 CJK 文本，并使用 `pilmoji` 与内置 Google Noto Emoji 32px ZIP 离线渲染彩色 Emoji，不依赖运行时联网。
 - PNG 与 GIF 均会在普通卡片中统一渲染为 240×240 头像区域；建议资源原图也按 240×240 入库，避免缩放裁切产生偏移。
 - GIF 仅用于“今日小猪 / 烤猪 / 烤群友”等普通卡片动态展示；图片版图鉴固定取首帧缩略图，保持静态陈列。
-- GIF 资源建议透明背景、循环播放、无文字水印，帧数控制在 10–40 帧；异常或单帧 GIF 会自动退回静态 PNG 输出。
+- GIF 资源建议透明背景、循环播放、无文字水印，帧数控制在 10～60 帧；较长动画会在完整周期内均匀收敛到最多 60 帧并保留总时长。解码工作量超过 1600 万像素帧、源帧超过 600、文件异常或实际为单帧时会退回静态 PNG。
 - 公有云端资源会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/active/`。
 - 多私有 overlay 会分别缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/private_overlays/<name>/active/`；旧单私有包字段仍沿用 `private_active/`，方便无损升级。
 
@@ -252,7 +247,8 @@ nonebot_plugin_rollpig_plus/resource/
 nonebot_plugin_rollpig_plus/
 ├─ __init__.py              # 插件元数据与 handler 导入
 ├─ card_renderer.py         # 今日小猪 / 烤猪 / 烤群友等普通卡片 Pillow 渲染
-├─ catalog_renderer.py      # 图片版小猪图鉴 HTML/CSS 渲染
+├─ catalog_renderer.py      # 图鉴业务数据、结果缓存与并发编排
+├─ catalog_pillow_renderer.py # 图片版小猪图鉴纯 Pillow 绘制
 ├─ config.py                # 配置模型与 JSON 配置合并
 ├─ data_manager.py          # 本地 JSON 存储实现
 ├─ helpers.py               # 命令共享工具与消息发送辅助
@@ -266,7 +262,7 @@ nonebot_plugin_rollpig_plus/
 ├─ texts.py                 # 文案模板与特殊形态文本
 ├─ handlers/                # NoneBot 指令注册与参数解析
 ├─ store/                   # local / cloud 存储适配
-└─ resource/                # 内置小猪、字体、Emoji 与图鉴模板资源
+└─ resource/                # 内置小猪、字体、Emoji 与图鉴底图资源
 ```
 
 ## 🔗 相关项目
@@ -278,45 +274,15 @@ nonebot_plugin_rollpig_plus/
 
 ## 📋 最近更新
 
-### v0.8.2 多私有资源包
+### v0.9.0 图片版图鉴纯 Pillow 重构
 
-#### 📦 资源包叠加
-- 新增 `rollpig_private_resource_manifests`，支持同时启用多个用户私有 overlay，例如公有包 + 官方 GIF 包 + PJsk 私有包 + 用户自建私有包。
-- 多个私有包按配置顺序叠加；新增猪不能与已有 ID 重复，确实要覆盖已有猪时继续使用 `pig_overrides.json` 显式声明。
-- 每个私有包使用独立缓存目录，单个包同步失败不会影响其它资源包或当前可用缓存。
-- 官方 GIF 动态小猪 overlay 不走用户配置，升级到 0.8.2 后会随云端资源同步自动启用。
+#### 🎨 图鉴绘制
+- 图片版图鉴彻底移除 HTML 模板和 Playwright 截图，改为纯 Pillow 绘制；分页、等级、NEW / MAX 标记和统计信息保持兼容。
+- 重做半透明毛玻璃卡片、立体等级胶囊及顶部数据布局，并针对中文字体加载和固定资源缓存进行优化。
 
-#### 🔁 本地包
-- 私有资源 manifest 支持本地路径和 `file://` URL，用户可以把自己的小猪包放在本地目录，通过 JSON 配置直接叠加。
-- 自建本地私有包的目录结构、manifest 生成与配置方式见 [rollpig-resources 自建本地私有包指南](https://github.com/Felis2026/rollpig-resources/blob/main/docs/local-private-pack-guide.md)。
-
-### v0.8.1 日报默认关闭与分群控制
-
-#### 🐷 小猪日报控制
-- 每日总结默认改为关闭，避免新部署实例在管理员未确认前主动向群聊推送定时消息。
-- 新增 `小猪日报` / `小猪日报 状态` / `小猪日报 开启` / `小猪日报 关闭` 命令，群主或管理员可控制本群，SUPERUSER 可追加群号控制其他群。
-- `rollpig_daily_summary_enabled` 调整为“未被单群命令或外部控制器覆盖时的默认值”；需要全局默认开启时可显式设为 `true`。
-
-#### 🔧 控制器与定时任务
-- 新增日报控制器接口；无外部控制器时写入插件本地数据，接入外部控制器时可保持单一状态源。
-- 日报定时任务现在会先筛选已开启日报的群，再生成日报与次日保护名单，避免关闭日报的群被定时任务产生额外副作用。
-
-### v0.8.0 核心引擎重构：从 HtmlRender 到 Pillow
-#### ✨ 引擎迁移优势
-- **极速响应与内存暴降**：普通卡片不再依赖 `nonebot-plugin-htmlrender` 启动繁重的无头浏览器 (Headless Chromium)，改用 Python 原生的 Pillow 引擎进行图像绘制。这使得出图速度显著提升，同时极大缓解了小内存 VPS 的 OOM 压力。（注：生成几百只猪的“小猪图鉴长图”依然保留 Playwright 渲染以保证复杂排版）。
-- **动态小猪 (GIF) 原生支持**：得益于 Pillow 的底层重构，本次更新正式支持了 GIF 动图猪的渲染！
-
-#### 📦 解决改用 Pillow 后可能的乱码方案
-如果你使用 Docker（如 Alpine / Slim 镜像）部署 Bot，可能遭遇抽出的卡片全是“方块字（Tofu）”或 Emoji 乱码问题，本版本引入策略：
-- **内置字体**：打包了开源的 `思源黑体 (Source Han Sans SC)`，提供最高优先级的中文后备支持。
-- **内置 Emoji**：提取并压缩了 Google Noto Emoji 的 32px PNG 资源包，通过 `pilmoji` 离线贴图渲染彩色 Emoji。
-- **部署收益**：插件发行体积会增加约 15MB，但 Docker / Linux 环境不再依赖系统 Emoji 字体或在线 Emoji 源，能显著减少方块字、黑白 Emoji 和联网失败问题。
-- **可替换字体**：如果群友昵称包含更多语种，或你希望使用微软雅黑等自定义字形，可通过 `rollpig_card_font_path` 指定自己的字体文件。
-
-#### 🔧 其他特性
-- 资源图片支持 `.png` / `.gif`，普通卡片头像统一规整到 240×240 区域，图片版图鉴固定取 GIF 首帧。
-- 内置公共资源同步至 `2026-06-28.1`，默认小猪数量更新至 165 只，并同步最新资源规则。
-- **重要：DeepSeek V4 适配**：AI 烤猪默认模型切换为 `deepseek-v4-flash` 非思考模式；旧配置中的 `deepseek-chat` / `deepseek-reasoner` 会自动兼容，但建议尽快更新或删除旧模型项使用默认值。
+#### ⚙️ 依赖与性能
+- 移除 `nonebot-plugin-htmlrender` 依赖、浏览器页面池和缩略图磁盘缓存，默认部署不再为 RollPig 启动 Chromium。
+- 图鉴继续使用结果缓存、同键请求合流和有界并发；默认同时绘制 2 张，512MB 部署建议调整为 1。
 
 完整更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 
