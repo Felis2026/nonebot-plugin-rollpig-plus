@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
-    <img src="https://img.shields.io/badge/Version-0.9.0-ff69b4" alt="Version 0.9.0">
+    <img src="https://img.shields.io/badge/Version-0.10.0-ff69b4" alt="Version 0.10.0">
   </p>
 </div>
 
@@ -46,7 +46,7 @@ nb plugin install nonebot-plugin-rollpig-plus
 如需固定到指定版本：
 
 ```bash
-pip install nonebot-plugin-rollpig-plus==0.9.0
+pip install nonebot-plugin-rollpig-plus==0.10.0
 ```
 
 手动安装后，请确认 NoneBot 已加载插件模块：
@@ -144,6 +144,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
     "rollpig_resource_sync_interval_hours": 24, // 自动检查资源更新的间隔小时数
     "rollpig_resource_sync_timeout": 10.0,     // 下载 manifest / pig.json / 图片的超时时间（秒）
     "rollpig_resource_max_file_size": 10485760, // 单文件下载大小上限，默认 10 MiB
+    "rollpig_roast_library_manifest_url": "https://pig.felislab.cc/resources/rollpig-roasts/manifest.json", // 共享烤猪文案；"" / null 可关闭
     "rollpig_private_resource_manifests": [       // 推荐写法：多个私有 overlay 按顺序叠加
       {
         "name": "pjsk",                         // 可选：追加 PJsk 私有包，不需要可删除这一项
@@ -190,7 +191,10 @@ ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json
 
 补充说明：
 
-- 未开启 AI 或未配置 Key 时，会自动回退到本地文案模板。
+- 未开启 AI 或未配置 Key 时，会使用已同步的共享文案或代码内置模板；共享文案同步失败不影响现有烤猪功能。
+- `rollpig_roast_library_manifest_url` 不写时使用官方地址；填写自建 manifest 可替换来源，显式设为 `""` 或 `null` 会关闭并移除纯共享文案。
+- 共享快照只下载到实例并合并进本地 `roast_library.json`，不会上传用户文案。升级前已有内容和本机 AI 新文案都标记为本地来源，云端只能撤回纯共享内容。
+- 每个“原始猪 × 熟食 × 场景”最多主动积累 5 条本地 AI 文案；共享文案不占这 5 条额度，AI 开启时两类文案等概率选池。
 - 未配置云端时，默认继续使用本地 `pig_data.json` 存储，不影响单 Bot 正常运行。
 - 云同步可自行部署 [rollpig-cloud](https://github.com/Felis2026/rollpig-cloud)，也可以联系维护者申请接入现有 API。
 - `ROLLPIG_STORAGE_BACKEND=cloud` 时，今日小猪、图鉴成长状态、普通烤群友充能、加急点火次数会在多 Bot 间同步。
@@ -249,7 +253,7 @@ nonebot_plugin_rollpig_plus/
 ├─ jobs.py                  # 定时任务与日报流程
 ├─ pighub_service.py        # PigHub 搜索 / 随机图缓存与兜底
 ├─ resource_manager.py      # 云端资源同步、多私有 overlay 与本地缓存加载
-├─ roast_manager.py         # AI 烤猪与文案库管理
+├─ roast_manager.py         # AI 烤猪、共享文案同步与来源索引
 ├─ roll_flow.py             # 抽猪业务规则
 ├─ roast_flow.py            # 烤群友业务规则
 ├─ runtime.py               # 宿主适配 / 群开关 / 运行时工具
@@ -268,15 +272,12 @@ nonebot_plugin_rollpig_plus/
 
 ## 📋 最近更新
 
-### v0.9.0 图片版图鉴纯 Pillow 重构
+### v0.10.0 共享烤猪文案库
 
-#### 🎨 图鉴绘制
-- 图片版图鉴彻底移除 HTML 模板和 Playwright 截图，改为纯 Pillow 绘制；分页、等级、NEW / MAX 标记和统计信息保持兼容。
-- 重做半透明毛玻璃卡片、立体等级胶囊及顶部数据布局，并针对中文字体加载和固定资源缓存进行优化。
-
-#### ⚙️ 依赖与性能
-- 移除 `nonebot-plugin-htmlrender` 依赖、浏览器页面池和缩略图磁盘缓存，默认部署不再为 RollPig 启动 Chromium。
-- 图鉴继续使用结果缓存、同键请求合流和有界并发；默认同时绘制 2 张，512MB 部署建议调整为 1。
+- 默认随小猪资源同步下载经过清洗审核的共享烤猪文案；未配置 AI Key 的实例也能直接使用更丰富的烤猪与烤群友模板。
+- 共享快照无损合并进本地 `roast_library.json`，并通过持久化来源索引区分本地与共享内容；云端更新、撤回或关闭功能都不会删除实例自有文案。
+- 共享同步复用现有启动、24 小时定时检查与 `同步小猪资源` 命令，支持大小、SHA256、结构校验、原子落盘和失败回退。
+- 本地 AI 文案软目标统一为每组合 5 条，且共享文案不占本地生成额度。
 
 完整更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 

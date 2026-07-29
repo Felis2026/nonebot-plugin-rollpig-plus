@@ -13,8 +13,8 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
-from nonebot.log import logger
 import nonebot_plugin_localstore as localstore
+from nonebot.log import logger
 
 from .config import Config, plugin_config
 
@@ -463,6 +463,8 @@ class RollPigResourceManager:
         )
 
     async def _sync_private_overlays_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
+        if not plugin_config.rollpig_resource_sync_enabled and not force:
+            return ResourceSyncResult(updated=False, skipped=True, message="")
         sources = self._resolve_private_sources(plugin_config)
         if not sources:
             return ResourceSyncResult(updated=False, skipped=True, message="")
@@ -1040,16 +1042,35 @@ def get_pig_by_id(pig_id: str | None) -> dict | None:
 
 
 async def sync_rollpig_resources(force: bool = False) -> str:
-    """同步公有云端资源与可选私有 overlay；成功后立即刷新内存快照。"""
+    """同步小猪图片包和共享文案；任一附加包失败时保留其当前本地版本。"""
 
     public_result, private_result = await pig_resource_manager.sync_all(force=force, wait_if_busy=force)
     if public_result.updated or private_result.updated:
         PIG_LIST[:] = pig_resource_manager.pig_list
 
-    messages = []
+    messages: list[str] = []
     for result in (public_result, private_result):
         if result.message:
             messages.append(result.message)
+
+    # 延迟导入避免资源模块和 AI 文案管理器在初始化阶段形成双向依赖。
+    from .roast_manager import roast_manager
+
+    try:
+        roast_result = await roast_manager.sync_shared_library(
+            force=force,
+            wait_if_busy=force,
+        )
+        if roast_result.message:
+            if messages:
+                messages.append("")
+            messages.append(roast_result.message)
+    except Exception as error:
+        # 共享文案是只读增强；远端故障不能让已经成功的图片资源同步被判定为失败。
+        logger.warning(f"rollpig 共享烤猪文案同步失败，继续使用当前本地库: {error}")
+        if messages:
+            messages.append("")
+        messages.append("共享文案：同步失败，继续使用本地库")
     return "\n".join(messages) or "小猪资源无需同步"
 
 

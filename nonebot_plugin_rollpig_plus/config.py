@@ -93,6 +93,11 @@ class Config(BaseModel):
     rollpig_resource_sync_interval_hours: int = 24
     rollpig_resource_sync_timeout: float = 10.0  # 资源请求超时（秒），运行时限制为 1～240
     rollpig_resource_max_file_size: int = 10 * 1024 * 1024
+    # 未填写时使用官方共享烤猪文案；显式设为 "" 或 null 时关闭，并移除纯共享正文。
+    # 自建服务可替换为自己的 manifest URL，不需要额外增加独立开关。
+    rollpig_roast_library_manifest_url: Optional[str] = (
+        "https://pig.felislab.cc/resources/rollpig-roasts/manifest.json"
+    )
     # 私有资源包是公有全量包之上的用户 overlay；官方 GIF 包由资源管理器固定随云端资源启用。
     # 0.8.2 起使用 rollpig_private_resource_manifests 配置多个 overlay；
     # 两个旧字段保留兼容，会被当作一个 legacy overlay 追加到列表末尾。

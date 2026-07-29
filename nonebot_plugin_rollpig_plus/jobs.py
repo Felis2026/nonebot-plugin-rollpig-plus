@@ -11,20 +11,19 @@ from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
 from .card_renderer import shutdown_card_renderer
-from .config import plugin_config
 from .catalog_renderer import shutdown_catalog_renderer
+from .config import plugin_config
+from .pighub_service import PIGHUB_REFRESH_INTERVAL_HOURS, pighub_service
+from .resource_manager import get_pig_by_id, sync_rollpig_resources
 from .runtime import (
     is_daily_summary_enabled,
     is_group_rollpig_enabled,
     rollpig_date_str,
 )
-from .resource_manager import get_pig_by_id, sync_rollpig_resources
-from .pighub_service import PIGHUB_REFRESH_INTERVAL_HOURS, pighub_service
 from .store import store
 from .store.base import RollpigStore
 from .store.cloud import CloudStoreError
 from .texts import DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_FOOTER, DAILY_SUMMARY_HEADER
-
 
 background_resource_sync_tasks: set[asyncio.Task[None]] = set()
 
@@ -92,10 +91,10 @@ async def pighub_refresh_job():
 
 @get_driver().on_startup
 async def startup_resource_sync():
-    """启动后异步检查一次资源包；不阻塞 NoneBot 启动和连接。"""
+    """启动后异步检查资源；关闭联网时仍需应用共享文案的本地清理语义。"""
 
-    if not plugin_config.rollpig_resource_sync_enabled:
-        return
+    # 各同步器会自行判断总开关。这里始终安排一次轻量后台任务，
+    # 让用户把共享文案 URL 设为空后，无需临时重新开启联网也能移除纯共享正文。
     schedule_background_resource_sync("startup")
 
 
