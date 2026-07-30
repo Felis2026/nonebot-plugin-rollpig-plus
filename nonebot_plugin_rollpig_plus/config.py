@@ -49,12 +49,24 @@ def _load_json_config_file() -> dict[str, Any]:
     return {}
 
 
+_EXPLICIT_NULL_OVERRIDE_FIELDS = {
+    # 该字段默认指向官方地址，且明确约定 null 表示关闭；只要调用方传入了键，
+    # None 就是有效配置值，不能按“未提供可选配置”处理。
+    "rollpig_roast_library_manifest_url",
+}
+
+
 def _merge_json_config(env_data: dict[str, Any]) -> dict[str, Any]:
     """JSON 负责降低 .env 负担；NoneBot/.env 传入值始终覆盖 JSON。"""
     json_data = _load_json_config_file()
     if not json_data:
         return env_data
-    normalized_env = {str(key).lower(): value for key, value in env_data.items() if value is not None}
+    normalized_env: dict[str, Any] = {}
+    for key, value in env_data.items():
+        normalized_key = str(key).lower()
+        if value is None and normalized_key not in _EXPLICIT_NULL_OVERRIDE_FIELDS:
+            continue
+        normalized_env[normalized_key] = value
     return {**json_data, **normalized_env}
 
 class PrivateResourceManifestConfig(BaseModel):

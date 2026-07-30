@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from importlib import import_module
@@ -105,6 +106,35 @@ class SharedRoastLibraryTests(unittest.IsolatedAsyncioTestCase):
             sources_file=sources_file,
             cache_dir=self.root / "cache",
         )
+
+    def test_explicit_null_manifest_url_overrides_json_config(self) -> None:
+        config_path = self.root / "rollpig_config.json"
+        self._write_json(
+            config_path,
+            {
+                "rollpig": {
+                    "rollpig_roast_library_manifest_url": (
+                        "https://example.invalid/roasts/manifest.json"
+                    ),
+                    "rollpig_proxy": "http://127.0.0.1:7890",
+                }
+            },
+        )
+
+        with patch.dict(os.environ, {"ROLLPIG_CONFIG_FILE": str(config_path)}):
+            inherited = Config()
+            disabled = Config(
+                rollpig_roast_library_manifest_url=None,
+                rollpig_proxy=None,
+            )
+
+        self.assertEqual(
+            inherited.rollpig_roast_library_manifest_url,
+            "https://example.invalid/roasts/manifest.json",
+        )
+        self.assertIsNone(disabled.rollpig_roast_library_manifest_url)
+        # 其他默认即为 None 的旧字段继续把 None 视为“未提供”，避免改变既有优先级。
+        self.assertEqual(disabled.rollpig_proxy, "http://127.0.0.1:7890")
 
     async def test_first_sync_preserves_existing_local_and_marks_collision(self) -> None:
         manifest = self._write_remote(
