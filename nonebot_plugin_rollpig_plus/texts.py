@@ -55,7 +55,7 @@ TOMORROW_TEXTS = [
 # - {new_level}: 升级后专家等级
 
 DAILY_ROLL_NEW_PIG_TEXTS = [
-    "✨ 新猪入圈！【{pig}】加入图鉴｜专家等级 EX Lv. {level}",
+    "✨ 新猪入圈！【{pig}】加入图鉴｜EX Lv. {level}",
     "🎉 抓到新猪【{pig}】！图鉴进度又往前拱了一步｜EX Lv. {level}",
     "🐽 今天不是重复！【{pig}】正式住进你的猪圈｜EX Lv. {level}",
     "📖 图鉴新增【{pig}】！这只小猪先从 EX Lv. {level} 开始营业",
@@ -81,10 +81,10 @@ DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS = [
 ]
 
 DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS = [
-    "你又抽到了【{pig}】｜专家等级 EX Lv. {level}｜下次遇见新猪的机会悄悄升温。",
+    "你又抽到了【{pig}】｜EX Lv. {level}｜下次遇见新猪的机会悄悄升温。",
     "重复命中【{pig}】｜EX Lv. {level}｜猪圈正在暗中给新猪加热。",
     "【{pig}】今天又来串门｜专家等级 EX Lv. {level}｜下一抽的新鲜感正在路上。",
-    "又是【{pig}】！｜EX Lv. {level}｜虽然没升级，但新猪概率更有盼头了。",
+    "又是【{pig}】！｜EX Lv. {level}｜不过新猪概率更有盼头了。",
     "【{pig}】再次出现｜专家等级 EX Lv. {level}｜重复次数正在变成新猪运。",
     "今天还是【{pig}】｜EX Lv. {level}｜别急，猪圈已经开始偏心新面孔了。",
     "重复抽到【{pig}】｜专家等级 EX Lv. {level}｜下一次或许就不一样了。",
@@ -92,6 +92,43 @@ DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS = [
     "【{pig}】继续霸占今日席位｜专家等级 EX Lv. {level}｜新猪概率悄悄往上拱。",
     "又见【{pig}】｜EX Lv. {level}｜这份重复会被猪圈记在小本本上。",
 ]
+
+DAILY_ROLL_VARIANT_LEVEL_UP_TEXTS = {
+    "image": [
+        "你又抽到了【{pig}】｜EX Lv. {old_level} → {new_level}｜它的模样也随着成长悄悄变化。",
+        "重复命中【{pig}】｜EX Lv. {old_level} → {new_level}｜今天的它看起来有些不一样。",
+        "【{pig}】今天又来报到｜EX Lv. {old_level} → {new_level}｜这次还换了一副新模样。",
+        "又是【{pig}】！不过它变强了｜EX Lv. {old_level} → {new_level}｜成长已经写在了新的模样上。",
+        "【{pig}】熟练度上升｜EX Lv. {old_level} → {new_level}｜它的样子也跟着发生了变化。",
+        "重复也不是白重复：【{pig}】EX Lv. {old_level} → {new_level}｜猪圈为它记录下了一副新模样。",
+        "今天和【{pig}】很有缘｜EX Lv. {old_level} → {new_level}｜这次相遇似乎多了一点新鲜感。",
+        "【{pig}】再次出现，并且更会营业了｜EX Lv. {old_level} → {new_level}｜今天还换了身新行头。",
+        "抽到重复【{pig}】｜EX Lv. {old_level} → {new_level}｜它用新的模样回应了这次成长。",
+        "【{pig}】又被你拱出来了｜EX Lv. {old_level} → {new_level}｜这回的样子已经不一样了。",
+    ],
+    "text": [
+        "你又抽到了【{pig}】｜EX Lv. {old_level} → {new_level}｜关于它的新故事也翻开了一页。",
+        "重复命中【{pig}】｜EX Lv. {old_level} → {new_level}｜你对它的了解又深了一层。",
+        "【{pig}】今天又来报到｜EX Lv. {old_level} → {new_level}｜猪圈里也多了一段关于它的新记录。",
+        "又是【{pig}】！不过它变强了｜EX Lv. {old_level} → {new_level}｜它似乎有了些新的话想说。",
+        "【{pig}】熟练度上升｜EX Lv. {old_level} → {new_level}｜它的成长故事有了新的篇章。",
+        "重复也不是白重复：【{pig}】EX Lv. {old_level} → {new_level}｜这次还带来了一段新的故事。",
+        "今天和【{pig}】很有缘｜EX Lv. {old_level} → {new_level}｜今天又听见了关于它的新故事。",
+        "【{pig}】再次出现，并且更会营业了｜EX Lv. {old_level} → {new_level}｜关于它的记录也丰富了一些。",
+        "抽到重复【{pig}】｜EX Lv. {old_level} → {new_level}｜猪圈对它又多了一分了解。",
+        "【{pig}】又被你拱出来了｜EX Lv. {old_level} → {new_level}｜这次还拱出了一段没见过的故事。",
+    ],
+    "image_text": [
+        "重复命中【{pig}】｜EX Lv. {old_level} → {new_level}｜今天的它看起来不同，给人的感觉也不一样了。",
+        "【{pig}】今天又来报到｜EX Lv. {old_level} → {new_level}｜这次不只换了造型，还展现出了新的一面。",
+        "又是【{pig}】！不过它变强了｜EX Lv. {old_level} → {new_level}｜从外表到气质，都显出了新的成长。",
+        "今天和【{pig}】很有缘｜EX Lv. {old_level} → {new_level}｜再见面时，它已经换了模样，也添了几分新个性。",
+        "【{pig}】再次出现，并且更会营业了｜EX Lv. {old_level} → {new_level}｜它换了新造型，说起自己来也有了不同的口吻。",
+        "【{pig}】又被你拱出来了｜EX Lv. {old_level} → {new_level}｜这回无论样子还是感觉，都和以前不太一样了。",
+        "【{pig}】再次被你抽中｜EX Lv. {old_level} → {new_level}｜新的形象之下，也多了些不同以往的特点。",
+        "又见【{pig}】｜EX Lv. {old_level} → {new_level}｜它这次的样子和表现都与以往不同。",
+    ],
+}
 
 # --- 熟食形态 ID 列表（烧烤/烤群友相关拦截逻辑） ---
 # 新增资源中的熟食类形态也必须并入这里，否则会绕过“熟食禁止再烤”的统一拦截。

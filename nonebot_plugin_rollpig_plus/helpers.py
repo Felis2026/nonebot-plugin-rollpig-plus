@@ -11,7 +11,7 @@ from nonebot.log import logger
 from nonebot.log import logger as nonebot_logger
 
 from .card_renderer import render_pig_card_image
-from .resource_manager import find_image_file
+from .resource_manager import pig_resource_manager
 from .runtime import is_group_rollpig_enabled, rollpig_date_str
 from .store import store
 from .store.cloud import CloudStoreError
@@ -192,27 +192,56 @@ async def send_rendered_pig(
     extra_text: str = "",
     *,
     cache_final_card: bool = True,
+    ex_level: int = 0,
 ) -> None:
     """渲染并发送卡片；固定卡缓存成品，烤猪动态文案只复用 GIF 源帧。"""
 
     started_at = time.perf_counter()
     pig_id = str(pig_data.get("id", ""))
-    avatar_file = find_image_file(pig_id)
-    name = pig_data.get("name", "未知小猪")
+    appearance = pig_resource_manager.resolve_pig_appearance(pig_data, ex_level)
+    render_data = appearance.pig_data
+    avatar_file = appearance.image_path
+    name = render_data.get("name", "未知小猪")
+    variant_fallback = False
     payload_ready_at = time.perf_counter()
 
     try:
         render_started_at = time.perf_counter()
         render_result = await render_pig_card_image(
-            pig_data,
+            render_data,
             avatar_file,
             cache_final_card=cache_final_card,
         )
         render_finished_at = time.perf_counter()
     except Exception as error:
-        logger.error(f"图片渲染失败: pig_id={pig_id}, renderer=pillow, error={error}")
-        await matcher.finish("图片生成失败。")
-        return
+        if appearance.applied_level <= 0:
+            logger.error(f"图片渲染失败: pig_id={pig_id}, renderer=pillow, error={error}")
+            await matcher.finish("图片生成失败。")
+            return
+
+        # 差分是可选增强。文件在激活后损坏或被手动删除时，必须重试基础资源，
+        # 不能让一张坏差分拖垮“今日小猪”本身。
+        variant_fallback = True
+        logger.warning(
+            "rollpig EX 差分渲染失败，已回退基础资源: "
+            f"pig_id={pig_id} requested={appearance.requested_level} "
+            f"applied={appearance.applied_level} error={error}"
+        )
+        try:
+            render_result = await render_pig_card_image(
+                dict(pig_data),
+                appearance.base_image_path,
+                cache_final_card=cache_final_card,
+            )
+            render_finished_at = time.perf_counter()
+        except Exception as fallback_error:
+            logger.error(
+                "图片渲染失败: "
+                f"pig_id={pig_id}, renderer=pillow, variant_error={error}, "
+                f"fallback_error={fallback_error}"
+            )
+            await matcher.finish("图片生成失败。")
+            return
 
     msg = MessageSegment.reply(event.message_id)
     if extra_text:
@@ -232,7 +261,9 @@ async def send_rendered_pig(
         f"analysis_font={render_result.analysis_font_size} "
         f"analysis_lines={render_result.analysis_lines} "
         f"emoji={render_result.emoji_enabled} extra={bool(extra_text)} "
-        f"card_cache={'final-disk' if cache_final_card else 'dynamic'}"
+        f"card_cache={'final-disk' if cache_final_card else 'dynamic'} "
+        f"requested_ex={appearance.requested_level} applied_ex={appearance.applied_level} "
+        f"variant_fallback={variant_fallback}"
     )
     await matcher.finish(msg)
 

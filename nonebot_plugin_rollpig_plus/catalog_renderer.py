@@ -26,7 +26,7 @@ from .catalog_pillow_renderer import (
 from .resource_manager import pig_resource_manager
 from .helpers import log_perf
 from .runtime import ROLLPIG_TIMEZONE, rollpig_today
-from .store.models import CatalogSnapshot, DrawState, PigProgress
+from .store.models import MAX_EXPERT_LEVEL, CatalogSnapshot, DrawState, PigProgress
 
 
 RESOURCE_DIR = Path(__file__).parent / "resource"
@@ -82,7 +82,6 @@ CATALOG_FONT = RESOURCE_DIR / "fonts" / "SourceHanSansSC-Medium.otf"
 CATALOG_PAGE_SIZE = 38
 CATALOG_CACHE_MAX_ENTRIES = 64
 CATALOG_CACHE_MAX_BYTES = 64 * 1024 * 1024
-MAX_EXPERT_LEVEL = 5
 NEW_BADGE_DAYS = 7
 
 
@@ -157,11 +156,6 @@ def _store_catalog_cache_locked(cache_key: str, payload: bytes, *, ttl: int, now
     _prune_catalog_cache(ttl=ttl, now=now)
 
 
-def get_expert_level(copies: int) -> int:
-    """图鉴渲染侧的等级算法必须和命令文案保持一致：1 次为 Lv.0，6 次封顶。"""
-    return min(max(int(copies or 0) - 1, 0), MAX_EXPERT_LEVEL)
-
-
 def _parse_datetime(value: str | None) -> dt.datetime | None:
     if not value:
         return None
@@ -206,7 +200,7 @@ def _sort_progress_items(draw_state: DrawState) -> list[tuple[str, PigProgress]]
     return sorted(
         draw_state.progress.items(),
         key=lambda item: (
-            -get_expert_level(item[1].copies),
+            -item[1].expert_level,
             -int(item[1].copies or 0),
             item[1].first_obtained_at or "",
             resource_order.get(item[0], 10**9),
@@ -235,9 +229,9 @@ def _build_catalog_data(
 
     cards: list[CatalogCard] = []
     for pig_id, progress in page_items:
-        pig = pig_resource_manager.pig_map.get(pig_id, {})
-        image_file = pig_resource_manager.find_image_file(pig_id)
-        level = get_expert_level(progress.copies)
+        pig = pig_resource_manager.pig_map.get(pig_id) or {"id": pig_id}
+        level = progress.expert_level
+        appearance = pig_resource_manager.resolve_pig_appearance(pig, level)
         is_max = level >= MAX_EXPERT_LEVEL
         is_new = (not is_max) and _is_recent_new(progress.first_obtained_at, today=today)
         badge = "MAX" if is_max else ("NEW" if is_new else "")
@@ -245,7 +239,7 @@ def _build_catalog_data(
             CatalogCard(
                 pig_id=pig_id,
                 name=str(pig.get("name") or pig_id),
-                image_path=image_file,
+                image_path=appearance.image_path,
                 level=level,
                 badge=badge,
             )
@@ -253,18 +247,21 @@ def _build_catalog_data(
 
     if progress_items:
         favorite_id, favorite_progress = progress_items[0]
-        favorite_pig = pig_resource_manager.pig_map.get(favorite_id, {})
-        favorite_image_file = pig_resource_manager.find_image_file(favorite_id)
+        favorite_pig = pig_resource_manager.pig_map.get(favorite_id) or {"id": favorite_id}
+        favorite_appearance = pig_resource_manager.resolve_pig_appearance(
+            favorite_pig,
+            favorite_progress.expert_level,
+        )
         favorite = CatalogFavorite(
             name=str(favorite_pig.get("name") or favorite_id),
-            image_path=favorite_image_file,
-            level=get_expert_level(favorite_progress.copies),
+            image_path=favorite_appearance.image_path,
+            level=favorite_progress.expert_level,
             copies=int(favorite_progress.copies or 0),
         )
     else:
         favorite = CatalogFavorite()
 
-    levels = [get_expert_level(progress.copies) for _, progress in progress_items]
+    levels = [progress.expert_level for _, progress in progress_items]
     recent_new_count = sum(
         1
         for _, progress in progress_items
@@ -316,7 +313,10 @@ def _build_cache_key(data: CatalogData, snapshot: CatalogSnapshot) -> str:
             stats.page,
             stats.pages,
         ),
-        "cards": [(card.pig_id, card.level, card.badge) for card in data.cards],
+        "cards": [
+            (card.pig_id, card.level, card.badge, str(card.image_path or ""))
+            for card in data.cards
+        ],
         "favorite": (
             favorite.name,
             str(favorite.image_path or ""),

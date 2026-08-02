@@ -62,12 +62,18 @@ cmd_today = on_command("今天是什么小猪", aliases={"今日小猪"}, block=
 async def _(event: Event):
     user_id = str(event.user_id)
     group_id = get_event_group_id(event)
-    resolution = await resolve_daily_pig(user_id, group_id)
+    resolution = await resolve_daily_pig(user_id, group_id, include_progress=True)
     if resolution.missing_resources or not resolution.pig:
         await cmd_today.finish("猪圈塌房了（数据缺失）")
         return
 
-    await send_rendered_pig(cmd_today, event, resolution.pig, extra_text=resolution.growth_text)
+    await send_rendered_pig(
+        cmd_today,
+        event,
+        resolution.pig,
+        extra_text=resolution.growth_text,
+        ex_level=resolution.ex_level or 0,
+    )
 
 
 # 2. 随机小猪

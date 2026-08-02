@@ -11,11 +11,16 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import nonebot
+from nonebot.plugin import get_plugin
 
 # 单元测试只需要 NoneBot 的插件生命周期，不应额外依赖 FastAPI Driver。
-nonebot.init(driver="~none")
-if nonebot.load_plugin("nonebot_plugin_rollpig_plus") is None:
-    raise RuntimeError("failed to load nonebot_plugin_rollpig_plus for tests")
+try:
+    nonebot.get_driver()
+except ValueError:
+    nonebot.init(driver="~none")
+if get_plugin("nonebot_plugin_rollpig_plus") is None:
+    if nonebot.load_plugin("nonebot_plugin_rollpig_plus") is None:
+        raise RuntimeError("failed to load nonebot_plugin_rollpig_plus for tests")
 
 config_module = import_module("nonebot_plugin_rollpig_plus.config")
 roast_manager_module = import_module("nonebot_plugin_rollpig_plus.roast_manager")
