@@ -1602,14 +1602,19 @@ def get_pig_by_id(pig_id: str | None) -> dict | None:
 async def sync_rollpig_resources(force: bool = False) -> str:
     """同步小猪图片包和共享文案；任一附加包失败时保留其当前本地版本。"""
 
-    public_result, private_result = await pig_resource_manager.sync_all(force=force, wait_if_busy=force)
-    if public_result.updated or private_result.updated:
-        PIG_LIST[:] = pig_resource_manager.pig_list
-
     messages: list[str] = []
-    for result in (public_result, private_result):
-        if result.message:
-            messages.append(result.message)
+    try:
+        public_result, private_result = await pig_resource_manager.sync_all(force=force, wait_if_busy=force)
+        if public_result.updated or private_result.updated:
+            PIG_LIST[:] = pig_resource_manager.pig_list
+        for result in (public_result, private_result):
+            if result.message:
+                messages.append(result.message)
+    except Exception as error:
+        # 图片包与共享文案是两个独立来源。图片端点故障时仍应继续同步一份
+        # 可用的共享文案快照，不能让前者提前终止整条同步流程。
+        logger.warning(f"rollpig 小猪图片资源同步失败，继续使用当前资源: {error}")
+        messages.append("小猪资源：同步失败，继续使用当前资源")
 
     # 延迟导入避免资源模块和 AI 文案管理器在初始化阶段形成双向依赖。
     from .roast_manager import roast_manager

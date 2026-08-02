@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import nonebot
@@ -23,6 +24,7 @@ if get_plugin("nonebot_plugin_rollpig_plus") is None:
         raise RuntimeError("failed to load nonebot_plugin_rollpig_plus for tests")
 
 config_module = import_module("nonebot_plugin_rollpig_plus.config")
+resource_manager_module = import_module("nonebot_plugin_rollpig_plus.resource_manager")
 roast_manager_module = import_module("nonebot_plugin_rollpig_plus.roast_manager")
 Config = config_module.Config
 SOURCE_LOCAL = roast_manager_module.SOURCE_LOCAL
@@ -167,6 +169,47 @@ class SharedRoastLibraryTests(unittest.IsolatedAsyncioTestCase):
         persisted_hashes = persisted_sources["entries"]["pig"]["food"]
         self.assertNotIn(_roast_text_identity("local"), persisted_hashes)
         self.assertIn(_roast_text_identity("shared"), persisted_hashes)
+
+    async def test_first_sync_preserves_all_normalized_duplicate_local_entries(self) -> None:
+        manifest = self._write_remote(
+            "roasts-2026-07-29.1",
+            {"pig": {"food": ["same", "shared-only"]}},
+        )
+        original_local_texts = ["same", " “same” ", "  same  ", "local"]
+        manager = self._make_manager(
+            manifest,
+            library={"pig": {"food": original_local_texts}},
+        )
+
+        result = await manager.sync_shared_library()
+
+        self.assertEqual(
+            manager.library["pig"]["food"],
+            ["same", "shared-only", " “same” ", "  same  ", "local"],
+        )
+        self.assertEqual(result.local_count, len(original_local_texts))
+        flags = manager._source_flags[("pig", "food")]
+        self.assertEqual(
+            flags[_roast_text_identity("same")],
+            SOURCE_LOCAL | SOURCE_SHARED,
+        )
+
+    async def test_disabling_shared_library_preserves_normalized_duplicate_local_entries(self) -> None:
+        manifest = self._write_remote(
+            "roasts-2026-07-29.1",
+            {"pig": {"food": ["same", "shared-only"]}},
+        )
+        manager = self._make_manager(
+            manifest,
+            library={"pig": {"food": ["same", " “same” ", "  same  "]}},
+        )
+        await manager.sync_shared_library()
+
+        result = await manager._disable_shared_library()
+
+        self.assertEqual(manager.library["pig"]["food"], ["same", " “same” ", "  same  "])
+        self.assertEqual(result.removed, 1)
+        self.assertEqual(result.local_count, 3)
 
     async def test_remote_removal_deletes_only_shared_only_text(self) -> None:
         manifest = self._write_remote(
@@ -438,6 +481,23 @@ class SharedRoastLibraryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sum(result.updated for result in (first, second)), 1)
         self.assertEqual(sum(result.skipped for result in (first, second)), 1)
+
+    async def test_shared_sync_continues_after_image_sync_failure(self) -> None:
+        image_sync = AsyncMock(side_effect=RuntimeError("image endpoint unavailable"))
+        shared_sync = AsyncMock(
+            return_value=SimpleNamespace(message="共享文案：已更新（roasts-test）")
+        )
+
+        with (
+            patch.object(resource_manager_module.pig_resource_manager, "sync_all", image_sync),
+            patch.object(roast_manager_module.roast_manager, "sync_shared_library", shared_sync),
+        ):
+            message = await resource_manager_module.sync_rollpig_resources(force=True)
+
+        image_sync.assert_awaited_once_with(force=True, wait_if_busy=True)
+        shared_sync.assert_awaited_once_with(force=True, wait_if_busy=True)
+        self.assertIn("小猪资源：同步失败，继续使用当前资源", message)
+        self.assertIn("共享文案：已更新（roasts-test）", message)
 
 
 if __name__ == "__main__":

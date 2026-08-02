@@ -765,7 +765,7 @@ class RoastManager:
         int,
         int,
     ]:
-        """共享文案排在前部、本地文案保持旧顺序；双来源正文只保留一次。"""
+        """共享文案排在前部，并无损保留每一条旧本地原文及其顺序。"""
 
         reconciled_flags = self._reconcile_source_flags(current_library, current_flags)
         before_identities = self._library_identities(current_library)
@@ -783,35 +783,42 @@ class RoastManager:
             for target_id in ordered_targets:
                 key = (origin_id, target_id)
                 old_flags = reconciled_flags.get(key, {})
-                local_by_identity: dict[str, str] = {}
-                local_order: list[str] = []
+                local_entries: list[tuple[str, str]] = []
+                first_local_index: dict[str, int] = {}
                 for text in current_targets.get(target_id, []):
                     identity = _roast_text_identity(text)
-                    if old_flags.get(identity, SOURCE_LOCAL) & SOURCE_LOCAL and identity not in local_by_identity:
-                        local_by_identity[identity] = text
-                        local_order.append(identity)
+                    if old_flags.get(identity, SOURCE_LOCAL) & SOURCE_LOCAL:
+                        index = len(local_entries)
+                        local_entries.append((identity, text))
+                        first_local_index.setdefault(identity, index)
 
                 merged_texts: list[str] = []
                 flags_by_hash: dict[str, int] = {}
-                used: set[str] = set()
+                used_shared_identities: set[str] = set()
+                consumed_local_indexes: set[int] = set()
                 for shared_text in shared_targets.get(target_id, []):
                     identity = _roast_text_identity(shared_text)
-                    if identity in used:
+                    if identity in used_shared_identities:
                         continue
-                    # 同文在升级前已属于本地时，保留用户原始正文，但同时记录 shared 来源。
-                    merged_texts.append(local_by_identity.get(identity, shared_text))
+                    # 同身份正文在升级前已属于本地时，用第一条本地原文占据共享位置；
+                    # 其余原文稍后仍按旧顺序追加，不能因引入规范化身份而静默丢失。
+                    local_index = first_local_index.get(identity)
+                    if local_index is None:
+                        merged_texts.append(shared_text)
+                    else:
+                        merged_texts.append(local_entries[local_index][1])
+                        consumed_local_indexes.add(local_index)
                     flags = SOURCE_SHARED
-                    if identity in local_by_identity:
+                    if local_index is not None:
                         flags |= SOURCE_LOCAL
                     flags_by_hash[identity] = flags
-                    used.add(identity)
+                    used_shared_identities.add(identity)
 
-                for identity in local_order:
-                    if identity in used:
+                for index, (identity, text) in enumerate(local_entries):
+                    if index in consumed_local_indexes:
                         continue
-                    merged_texts.append(local_by_identity[identity])
-                    flags_by_hash[identity] = SOURCE_LOCAL
-                    used.add(identity)
+                    merged_texts.append(text)
+                    flags_by_hash[identity] = flags_by_hash.get(identity, 0) | SOURCE_LOCAL
 
                 if merged_texts:
                     result.setdefault(origin_id, {})[target_id] = merged_texts
@@ -819,9 +826,12 @@ class RoastManager:
 
         after_identities = self._library_identities(result)
         local_count = sum(
-            bool(flags & SOURCE_LOCAL)
-            for flags_by_hash in result_flags.values()
-            for flags in flags_by_hash.values()
+            1
+            for origin_id, targets in result.items()
+            for target_id, texts in targets.items()
+            for text in texts
+            if result_flags.get((origin_id, target_id), {}).get(_roast_text_identity(text), 0)
+            & SOURCE_LOCAL
         )
         return (
             result,
@@ -852,12 +862,10 @@ class RoastManager:
                 old_flags = reconciled_flags.get(key, {})
                 kept: list[str] = []
                 flags_by_hash: dict[str, int] = {}
-                seen: set[str] = set()
                 for text in texts:
                     identity = _roast_text_identity(text)
-                    if identity in seen:
-                        continue
-                    seen.add(identity)
+                    # 来源索引按规范化身份记录；同一身份可能对应多条升级前的本地原文，
+                    # 关闭共享库时必须逐条保留，不能再次按身份去重。
                     if old_flags.get(identity, SOURCE_LOCAL) & SOURCE_LOCAL:
                         kept.append(text)
                         flags_by_hash[identity] = SOURCE_LOCAL
