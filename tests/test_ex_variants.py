@@ -21,6 +21,7 @@ if get_plugin("nonebot_plugin_rollpig_plus") is None:
         raise RuntimeError("failed to load nonebot_plugin_rollpig_plus for tests")
 
 from nonebot_plugin_rollpig_plus import catalog_renderer as catalog_module
+from nonebot_plugin_rollpig_plus import catalog_pillow_renderer as catalog_pillow_module
 from nonebot_plugin_rollpig_plus import helpers as helpers_module
 from nonebot_plugin_rollpig_plus import resource_manager as resource_module
 from nonebot_plugin_rollpig_plus import roll_flow as roll_flow_module
@@ -354,7 +355,34 @@ class ExVariantResourceTests(ExVariantFixtureMixin, unittest.TestCase):
 
         self.assertEqual(data.cards[0].level, 5)
         self.assertEqual(data.cards[0].image_path.name, "pig_ex5.png")
+        self.assertEqual(data.cards[0].fallback_image_path.name, "pig.png")
         self.assertEqual(data.favorite.image_path.name, "pig_ex5.png")
+        self.assertEqual(data.favorite.fallback_image_path.name, "pig.png")
+
+    def test_catalog_pig_image_falls_back_when_variant_cannot_be_decoded(self) -> None:
+        renderer = object.__new__(catalog_pillow_module.CatalogRenderer)
+        renderer.scale = 1.0
+        canvas = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+        variant_path = self.root / "pig_ex5.png"
+        base_path = self.root / "pig.png"
+        fallback_patch = Image.new("RGBA", (4, 4), (255, 0, 0, 255))
+
+        with patch.object(
+            catalog_pillow_module,
+            "_load_pig_patch",
+            side_effect=[None, (fallback_patch, 4, 4)],
+        ) as load_mock:
+            renderer._draw_pig_image(
+                canvas,
+                variant_path,
+                fallback_image_path=base_path,
+                center=(50, 50),
+                max_size=(10, 10),
+            )
+
+        self.assertEqual(load_mock.call_args_list[0].args[0], variant_path)
+        self.assertEqual(load_mock.call_args_list[1].args[0], base_path)
+        self.assertEqual(canvas.getpixel((50, 50)), (255, 0, 0, 255))
 
 
 class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase):

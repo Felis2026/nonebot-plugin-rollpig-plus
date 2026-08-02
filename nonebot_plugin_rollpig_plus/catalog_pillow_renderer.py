@@ -33,6 +33,7 @@ class CatalogCard:
     image_path: Path | None
     level: int = 0
     badge: str = ""
+    fallback_image_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class CatalogFavorite:
     image_path: Path | None = None
     level: int = 0
     copies: int = 0
+    fallback_image_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -469,6 +471,7 @@ class CatalogRenderer:
         self._draw_pig_image(
             canvas,
             card.image_path,
+            fallback_image_path=card.fallback_image_path,
             center=(left + 74, top + 30),
             max_size=(54, 48),
         )
@@ -741,6 +744,7 @@ class CatalogRenderer:
         canvas: Image.Image,
         image_path: Path | None,
         *,
+        fallback_image_path: Path | None = None,
         center: tuple[float, float],
         max_size: tuple[int, int] = (58, 52),
     ) -> None:
@@ -751,6 +755,15 @@ class CatalogRenderer:
             shadow_blur=self._v(2),
             shadow_offset=self._v(3),
         )
+        # EX 立绘是可选增强；文件虽然存在但无法解码时，优先回退仍可用的基础立绘，
+        # 只有两者都失败才显示通用占位猪。
+        if pig_patch is None and fallback_image_path != image_path:
+            pig_patch = _load_pig_patch(
+                fallback_image_path,
+                target_size=target_size,
+                shadow_blur=self._v(2),
+                shadow_offset=self._v(3),
+            )
         if pig_patch is None:
             draw = ImageDraw.Draw(canvas)
             radius = self._v(22)
@@ -794,7 +807,13 @@ class CatalogRenderer:
             outline=(255, 180, 224, 112),
             width=max(1, self._v(1)),
         )
-        self._draw_pig_image(canvas, favorite.image_path, center=(379, 932), max_size=(39, 39))
+        self._draw_pig_image(
+            canvas,
+            favorite.image_path,
+            fallback_image_path=favorite.fallback_image_path,
+            center=(379, 932),
+            max_size=(39, 39),
+        )
 
         draw = ImageDraw.Draw(canvas)
         draw.text(

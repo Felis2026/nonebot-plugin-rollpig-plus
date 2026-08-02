@@ -240,6 +240,7 @@ def _build_catalog_data(
                 pig_id=pig_id,
                 name=str(pig.get("name") or pig_id),
                 image_path=appearance.image_path,
+                fallback_image_path=appearance.base_image_path,
                 level=level,
                 badge=badge,
             )
@@ -255,6 +256,7 @@ def _build_catalog_data(
         favorite = CatalogFavorite(
             name=str(favorite_pig.get("name") or favorite_id),
             image_path=favorite_appearance.image_path,
+            fallback_image_path=favorite_appearance.base_image_path,
             level=favorite_progress.expert_level,
             copies=int(favorite_progress.copies or 0),
         )
@@ -314,12 +316,19 @@ def _build_cache_key(data: CatalogData, snapshot: CatalogSnapshot) -> str:
             stats.pages,
         ),
         "cards": [
-            (card.pig_id, card.level, card.badge, str(card.image_path or ""))
+            (
+                card.pig_id,
+                card.level,
+                card.badge,
+                str(card.image_path or ""),
+                str(card.fallback_image_path or ""),
+            )
             for card in data.cards
         ],
         "favorite": (
             favorite.name,
             str(favorite.image_path or ""),
+            str(favorite.fallback_image_path or ""),
             favorite.level,
             favorite.copies,
         ),
