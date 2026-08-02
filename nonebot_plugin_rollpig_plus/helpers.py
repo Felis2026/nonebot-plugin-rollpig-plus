@@ -243,6 +243,11 @@ async def send_rendered_pig(
             await matcher.finish("图片生成失败。")
             return
 
+    # 差分图片存在但无法解码时，卡片已经回退到基础图片和基础文案；继续发送
+    # “新外观/新介绍”成长提示会与实际成品矛盾，因此本次只发送可用的基础卡。
+    if variant_fallback:
+        extra_text = ""
+
     msg = MessageSegment.reply(event.message_id)
     if extra_text:
         msg += extra_text + "\n"

@@ -383,6 +383,10 @@ class RollPigResourceManager:
 
         fields: set[str] = set()
         if variant.image_path is not None:
+            # 声明图片的差分以整档为单位应用；图片在加载后被删除或替换为链接时，
+            # resolve_pig_appearance 也会跳过整档，因此这里不能再宣称图片或文案已变化。
+            if not variant.image_path.is_file() or variant.image_path.is_symlink():
+                return frozenset()
             fields.add("image")
         if variant.description is not None or variant.analysis is not None:
             fields.add("text")
@@ -982,8 +986,15 @@ class RollPigResourceManager:
         optional_files = manifest.get("optional_files") or {}
         if not isinstance(optional_files, dict):
             raise ValueError("私有资源 optional_files 必须是 object")
-        if "pig_ex_variants" in optional_files or "variant_images" in manifest:
+        if optional_files.get("pig_ex_variants") is not None:
             raise ValueError("当前版本暂不支持私有 Overlay 提供 EX 等级差分")
+        private_variant_images = manifest.get("variant_images")
+        if private_variant_images is not None:
+            if not isinstance(private_variant_images, list):
+                raise ValueError("私有资源 variant_images 必须是 list 或 null")
+            # 旧版构建器可能统一写出空列表；它不包含任何差分，继续按普通 Overlay 处理。
+            if private_variant_images:
+                raise ValueError("当前版本暂不支持私有 Overlay 提供 EX 等级差分")
         for key, filename in (("pig_rules", "pig_rules.json"), ("pig_overrides", "pig_overrides.json")):
             file_meta = optional_files.get(key)
             if isinstance(file_meta, dict):

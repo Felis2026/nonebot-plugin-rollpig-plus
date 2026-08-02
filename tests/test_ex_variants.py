@@ -317,6 +317,28 @@ class ExVariantResourceTests(ExVariantFixtureMixin, unittest.TestCase):
         self.assertEqual(manager.newly_unlocked_variant_levels("pig", 2, 4), ())
         self.assertEqual(manager.newly_unlocked_variant_levels("pig", 4, 5), (5,))
 
+    def test_missing_variant_image_is_excluded_from_growth_changes(self) -> None:
+        manager = self._manager_from_pack(
+            self._create_pack(
+                variants={
+                    "schema_version": 1,
+                    "pigs": {
+                        "pig": {
+                            "levels": {
+                                "2": {
+                                    "image": "pig_ex2.png",
+                                    "description": "EX2 描述",
+                                }
+                            }
+                        }
+                    },
+                }
+            )
+        )
+        (self.root / "pack" / "images" / "pig_ex2.png").unlink()
+
+        self.assertEqual(manager.variant_change_fields("pig", 2), frozenset())
+
     def test_catalog_uses_resolved_variant_image(self) -> None:
         manager = self._manager_from_pack(self._create_pack())
         snapshot = CatalogSnapshot(
@@ -430,6 +452,37 @@ class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
         self.assertIs(choice_mock.call_args.args[0], roll_flow_module.DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS)
         self.assertIn("EX Lv. 2 → 3", text)
 
+    def test_growth_text_uses_regular_pool_when_unlocked_variant_image_is_missing(self) -> None:
+        manager = self._manager_from_pack(
+            self._create_pack(
+                variants={
+                    "schema_version": 1,
+                    "pigs": {"pig": {"levels": {"2": {"image": "pig_ex2.png"}}}},
+                }
+            )
+        )
+        (self.root / "pack" / "images" / "pig_ex2.png").unlink()
+        result = DailyRollResult(
+            pig_id="pig",
+            created=True,
+            is_new_pig=False,
+            previous_copies=2,
+            copies=3,
+        )
+
+        with (
+            patch.object(roll_flow_module, "pig_resource_manager", manager),
+            patch.object(
+                roll_flow_module.random,
+                "choice",
+                side_effect=lambda choices: choices[0],
+            ) as choice_mock,
+        ):
+            text = roll_flow_module.build_roll_growth_text(result, manager.pig_map["pig"])
+
+        self.assertIs(choice_mock.call_args.args[0], roll_flow_module.DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS)
+        self.assertIn("EX Lv. 1 → 2", text)
+
     async def test_variant_render_failure_retries_base_card(self) -> None:
         result = PigCardRenderResult(
             data=b"image",
@@ -452,6 +505,7 @@ class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
                 fake_matcher,
                 fake_event,
                 self.manager.pig_map["pig"],
+                extra_text="差分专属成长提示",
                 ex_level=5,
             )
 
@@ -459,6 +513,7 @@ class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
         self.assertEqual(render_mock.await_args_list[0].args[1].name, "pig_ex5.png")
         self.assertEqual(render_mock.await_args_list[1].args[1].name, "pig.png")
         fake_matcher.finish.assert_awaited_once()
+        self.assertNotIn("差分专属成长提示", str(fake_matcher.finish.await_args.args[0]))
 
 
 class ExVariantSyncTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase):
@@ -468,6 +523,52 @@ class ExVariantSyncTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    async def test_private_manifest_allows_empty_variant_image_list(self) -> None:
+        manager = RollPigResourceManager()
+        staging_dir = self.root / "private-staging"
+        download_mock = AsyncMock()
+        manifest = {
+            "pig_json": {},
+            "optional_files": {"pig_ex_variants": None},
+            "variant_images": [],
+            "images": [],
+        }
+
+        with patch.object(manager, "_download_file_by_meta", download_mock):
+            await manager._download_private_manifest_files(
+                AsyncMock(),
+                manifest_url=str(self.root / "manifest.json"),
+                manifest=manifest,
+                staging_dir=staging_dir,
+                max_size=1024 * 1024,
+            )
+
+        download_mock.assert_awaited_once()
+
+    async def test_private_manifest_rejects_nonempty_or_malformed_variant_images(self) -> None:
+        manager = RollPigResourceManager()
+        base_manifest = {
+            "pig_json": {},
+            "optional_files": {},
+            "images": [],
+        }
+        cases = ({}, [{"pig_id": "pig", "level": 2}])
+
+        for variant_images in cases:
+            with self.subTest(variant_images=variant_images):
+                manifest = {**base_manifest, "variant_images": variant_images}
+                with (
+                    patch.object(manager, "_download_file_by_meta", AsyncMock()),
+                    self.assertRaisesRegex(ValueError, "variant_images|EX 等级差分"),
+                ):
+                    await manager._download_private_manifest_files(
+                        AsyncMock(),
+                        manifest_url=str(self.root / "manifest.json"),
+                        manifest=manifest,
+                        staging_dir=self.root / "private-staging",
+                        max_size=1024 * 1024,
+                    )
 
     async def test_local_sync_activates_complete_variants_and_preserves_old_active_on_hash_failure(self) -> None:
         pack_dir = self._create_pack()
