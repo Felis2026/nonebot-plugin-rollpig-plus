@@ -4,10 +4,25 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+MAX_EXPERT_LEVEL = 5
+
+
+def expert_level_from_copies(copies: int) -> int:
+    """根据累计抽取次数计算 EX Lv.；异常或旧数据统一钳制到 0～5。"""
+
+    return min(max(int(copies or 0) - 1, 0), MAX_EXPERT_LEVEL)
+
+
 @dataclass(frozen=True)
 class PigProgress:
     copies: int = 0
     first_obtained_at: Optional[str] = None
+
+    @property
+    def expert_level(self) -> int:
+        """返回当前小猪的只读 EX Lv.，避免展示层重复等级公式。"""
+
+        return expert_level_from_copies(self.copies)
 
 
 @dataclass(frozen=True)
@@ -19,6 +34,11 @@ class DrawState:
     def copies_of(self, pig_id: str) -> int:
         item = self.progress.get(pig_id)
         return int(item.copies) if item else 0
+
+    def expert_level_of(self, pig_id: str) -> int:
+        """返回指定小猪的 EX Lv.；未拥有或记录缺失时为 EX0。"""
+
+        return expert_level_from_copies(self.copies_of(pig_id))
 
 
 @dataclass(frozen=True)

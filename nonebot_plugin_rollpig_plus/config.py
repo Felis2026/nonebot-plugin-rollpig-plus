@@ -49,12 +49,24 @@ def _load_json_config_file() -> dict[str, Any]:
     return {}
 
 
+_EXPLICIT_NULL_OVERRIDE_FIELDS = {
+    # 该字段默认指向官方地址，且明确约定 null 表示关闭；只要调用方传入了键，
+    # None 就是有效配置值，不能按“未提供可选配置”处理。
+    "rollpig_roast_library_manifest_url",
+}
+
+
 def _merge_json_config(env_data: dict[str, Any]) -> dict[str, Any]:
     """JSON 负责降低 .env 负担；NoneBot/.env 传入值始终覆盖 JSON。"""
     json_data = _load_json_config_file()
     if not json_data:
         return env_data
-    normalized_env = {str(key).lower(): value for key, value in env_data.items() if value is not None}
+    normalized_env: dict[str, Any] = {}
+    for key, value in env_data.items():
+        normalized_key = str(key).lower()
+        if value is None and normalized_key not in _EXPLICIT_NULL_OVERRIDE_FIELDS:
+            continue
+        normalized_env[normalized_key] = value
     return {**json_data, **normalized_env}
 
 class PrivateResourceManifestConfig(BaseModel):
@@ -93,6 +105,11 @@ class Config(BaseModel):
     rollpig_resource_sync_interval_hours: int = 24
     rollpig_resource_sync_timeout: float = 10.0  # 资源请求超时（秒），运行时限制为 1～240
     rollpig_resource_max_file_size: int = 10 * 1024 * 1024
+    # 未填写时使用官方共享烤猪文案；显式设为 "" 或 null 时关闭，并移除纯共享正文。
+    # 自建服务可替换为自己的 manifest URL，不需要额外增加独立开关。
+    rollpig_roast_library_manifest_url: Optional[str] = (
+        "https://pig.felislab.cc/resources/rollpig-roasts/manifest.json"
+    )
     # 私有资源包是公有全量包之上的用户 overlay；官方 GIF 包由资源管理器固定随云端资源启用。
     # 0.8.2 起使用 rollpig_private_resource_manifests 配置多个 overlay；
     # 两个旧字段保留兼容，会被当作一个 legacy overlay 追加到列表末尾。

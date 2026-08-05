@@ -47,7 +47,7 @@ GIF_SOURCE_CACHE_MAX_BYTES = 24 * 1024 * 1024
 # 固定卡片只按磁盘总字节淘汰，不另设条目数上限。
 CARD_DISK_CACHE_MAX_BYTES = 64 * 1024 * 1024
 # 修改卡片布局或编码规则时必须递增；源图、文案、字体和 Emoji 已各自包含内容指纹。
-CARD_CACHE_VERSION = 3
+CARD_CACHE_VERSION = 4
 CARD_DISK_CACHE_MAGIC = b"ROLLPIG-CARD-CACHE-V1\n"
 CARD_DISK_CACHE_HEADER_MAX_BYTES = 4096
 CARD_CACHE_DIR = localstore.get_plugin_cache_dir() / "cards"
@@ -78,6 +78,10 @@ EXTRA_EMOJI_SYMBOLS = {
     "\u266a": "\U0001f3b5",
 }
 PACKAGE_FONT_DIR = RESOURCE_DIR / "fonts"
+
+
+class PigCardImageLoadError(RuntimeError):
+    """严格头像模式下，指定图片未能解码为可用头像时抛出的异常。"""
 
 
 @dataclass(frozen=True)
@@ -686,8 +690,10 @@ def _gif_file_signature(image_file: Path | None) -> tuple[object, ...] | None:
 def _fixed_card_cache_key(
     pig_data: Mapping[str, Any],
     image_file: Path | None,
+    *,
+    require_avatar: bool = False,
 ) -> tuple[object, ...] | None:
-    """生成固定卡片键；源图、文案或渲染资源任一变化都会生成新条目。"""
+    """生成固定卡片键；严格头像模式必须与可显示占位图的普通模式隔离。"""
 
     signature = _card_image_signature(image_file)
     if signature is None:
@@ -697,6 +703,8 @@ def _fixed_card_cache_key(
         *signature,
         _card_render_asset_signature(),
         *_card_text_values(pig_data),
+        "require-avatar",
+        bool(require_avatar),
     )
 
 
@@ -1251,12 +1259,15 @@ def _encode_png_card(
     image_file: Path | None,
     *,
     cache_source_avatar: bool,
+    require_avatar: bool,
 ) -> PigCardRenderResult:
     """把静态卡片编码为 PNG；静态 GIF 也会走这里取首帧。"""
 
     canvas = prepared.canvas.copy()
     avatar = _load_avatar(image_file, cache_source_avatar=cache_source_avatar)
     try:
+        if avatar is None and require_avatar and image_file is not None:
+            raise PigCardImageLoadError(f"指定头像无法读取: {image_file}")
         _draw_avatar(canvas, avatar, prepared.avatar_y)
         rgb_canvas = canvas.convert("RGB")
         try:
@@ -1387,13 +1398,18 @@ def _render_pig_card_image_sync(
     image_file: Path | None,
     *,
     cache_final_card: bool = True,
+    require_avatar: bool = False,
     _final_cache_key: tuple[object, ...] | None = None,
 ) -> PigCardRenderResult:
     """同步生成卡片；固定文案缓存最终成品，动态文案 GIF 仅缓存受限源帧。"""
 
     final_cache_key = _final_cache_key
     if cache_final_card and final_cache_key is None:
-        final_cache_key = _fixed_card_cache_key(pig_data, image_file)
+        final_cache_key = _fixed_card_cache_key(
+            pig_data,
+            image_file,
+            require_avatar=require_avatar,
+        )
     if final_cache_key is not None:
         cached = _get_fixed_card(final_cache_key)
         if cached is not None:
@@ -1414,6 +1430,7 @@ def _render_pig_card_image_sync(
                 prepared,
                 image_file,
                 cache_source_avatar=not cache_final_card,
+                require_avatar=require_avatar,
             )
         )
     finally:
@@ -1425,7 +1442,11 @@ def _render_pig_card_image_sync(
     if final_cache_key is not None:
         # 资源同步可能在渲染期间切换 active 目录；只把结果写回仍与当前源图一致的键，
         # 避免极短竞态把新图片成品记到旧图片摘要名下。
-        current_cache_key = _fixed_card_cache_key(pig_data, image_file)
+        current_cache_key = _fixed_card_cache_key(
+            pig_data,
+            image_file,
+            require_avatar=require_avatar,
+        )
         if current_cache_key == final_cache_key:
             _store_fixed_card(final_cache_key, result)
     return result
@@ -1434,10 +1455,16 @@ def _render_pig_card_image_sync(
 def _read_fixed_card_cache(
     pig_data: Mapping[str, Any],
     image_file: Path | None,
+    *,
+    require_avatar: bool = False,
 ) -> tuple[tuple[object, ...] | None, PigCardRenderResult | None]:
     """在线程中计算源图摘要并查磁盘，避免文件 I/O 阻塞 NoneBot 事件循环。"""
 
-    cache_key = _fixed_card_cache_key(pig_data, image_file)
+    cache_key = _fixed_card_cache_key(
+        pig_data,
+        image_file,
+        require_avatar=require_avatar,
+    )
     cached = _get_fixed_card(cache_key) if cache_key is not None else None
     return cache_key, cached
 
@@ -1448,6 +1475,7 @@ async def render_pig_card_image(
     *,
     cache_final_card: bool = True,
     cache_final_gif: bool | None = None,
+    require_avatar: bool = False,
 ) -> PigCardRenderResult:
     """异步入口：固定卡片查磁盘；首次 GIF 双并发，同一成品只生成一次。"""
 
@@ -1457,7 +1485,12 @@ async def render_pig_card_image(
 
     final_cache_key: tuple[object, ...] | None = None
     if cache_final_card:
-        final_cache_key, cached = await asyncio.to_thread(_read_fixed_card_cache, pig_data, image_file)
+        final_cache_key, cached = await asyncio.to_thread(
+            _read_fixed_card_cache,
+            pig_data,
+            image_file,
+            require_avatar=require_avatar,
+        )
         if cached is not None:
             return cached
 
@@ -1472,6 +1505,8 @@ async def render_pig_card_image(
                 "dynamic-card" if not cache_final_card else "uncached-card",
                 *(signature or (str(image_file),)),
                 *_card_text_values(pig_data),
+                "require-avatar",
+                bool(require_avatar),
             )
 
         async with _card_render_tasks_lock:
@@ -1483,6 +1518,7 @@ async def render_pig_card_image(
                         pig_data,
                         image_file,
                         cache_final_card=cache_final_card,
+                        require_avatar=require_avatar,
                         final_cache_key=final_cache_key,
                         limit_gif=is_gif,
                     )
@@ -1496,6 +1532,7 @@ async def render_pig_card_image(
         pig_data,
         image_file,
         cache_final_card=cache_final_card,
+        require_avatar=require_avatar,
     )
 
 
@@ -1505,6 +1542,7 @@ async def _render_card_once(
     image_file: Path | None,
     *,
     cache_final_card: bool,
+    require_avatar: bool,
     final_cache_key: tuple[object, ...] | None,
     limit_gif: bool,
 ) -> PigCardRenderResult:
@@ -1518,6 +1556,7 @@ async def _render_card_once(
                     pig_data,
                     image_file,
                     cache_final_card=cache_final_card,
+                    require_avatar=require_avatar,
                     _final_cache_key=final_cache_key,
                 )
         return await asyncio.to_thread(
@@ -1525,6 +1564,7 @@ async def _render_card_once(
             pig_data,
             image_file,
             cache_final_card=cache_final_card,
+            require_avatar=require_avatar,
             _final_cache_key=final_cache_key,
         )
     finally:

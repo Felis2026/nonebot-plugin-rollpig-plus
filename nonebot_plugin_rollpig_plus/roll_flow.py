@@ -7,15 +7,15 @@ from nonebot.log import logger
 
 from .resource_manager import pig_resource_manager
 from .store import store
-from .store.models import DailyRollResult, DrawState
+from .store.models import MAX_EXPERT_LEVEL, DailyRollResult, DrawState, expert_level_from_copies
 from .texts import (
     DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS,
     DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS,
     DAILY_ROLL_NEW_PIG_TEXTS,
+    DAILY_ROLL_VARIANT_LEVEL_UP_TEXTS,
 )
 
 
-MAX_EXPERT_LEVEL = 5
 DUPLICATE_PITY_WEIGHT_STEP = 0.5
 DUPLICATE_PITY_WEIGHT_CAP = 4.0
 
@@ -28,17 +28,13 @@ class DailyPigResolution:
     roll_result: DailyRollResult | None = None
     growth_text: str = ""
     missing_resources: bool = False
+    ex_level: int | None = None
 
     @property
     def was_auto_created(self) -> bool:
         """本次命令是否顺手创建了今日抽猪记录。"""
 
         return bool(self.roll_result and self.roll_result.created)
-
-
-def get_expert_level(copies: int) -> int:
-    """根据累计抽到次数计算专家等级：1 次为 Lv.0，6 次及以上封顶 Lv.5。"""
-    return min(max(int(copies) - 1, 0), MAX_EXPERT_LEVEL)
 
 
 # ================================ 今日小猪成长流程 ================================ #
@@ -69,21 +65,56 @@ def build_roll_growth_text(result: DailyRollResult, pig_data: dict) -> str:
         return ""
 
     pig_name = pig_data.get("name", "未知小猪")
-    current_level = get_expert_level(result.copies)
+    current_level = expert_level_from_copies(result.copies)
     if result.is_new_pig:
         return random.choice(DAILY_ROLL_NEW_PIG_TEXTS).format(pig=pig_name, level=current_level)
 
-    previous_level = get_expert_level(result.previous_copies)
-    if previous_level != current_level:
-        return random.choice(DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS).format(
+    previous_level = expert_level_from_copies(result.previous_copies)
+    if previous_level == current_level:
+        return random.choice(DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS).format(
             pig=pig_name,
-            old_level=previous_level,
-            new_level=current_level,
+            level=current_level,
         )
-    return random.choice(DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS).format(pig=pig_name, level=current_level)
+
+    unlocked_levels = pig_resource_manager.newly_unlocked_variant_levels(
+        str(pig_data.get("id") or ""),
+        previous_level,
+        current_level,
+    )
+    if unlocked_levels:
+        # 一次升级可能跨过多个稀疏档位；合并本次真实变化后只发送一条完整提示，
+        # 避免先说普通升级、再追加“解锁图片/文案”的重复表达。
+        changed_fields = frozenset().union(
+            *(
+                pig_resource_manager.variant_change_fields(str(pig_data.get("id") or ""), level)
+                for level in unlocked_levels
+            )
+        )
+        pool_key = {
+            frozenset({"image"}): "image",
+            frozenset({"text"}): "text",
+            frozenset({"image", "text"}): "image_text",
+        }.get(changed_fields)
+        if pool_key is not None:
+            return random.choice(DAILY_ROLL_VARIANT_LEVEL_UP_TEXTS[pool_key]).format(
+                pig=pig_name,
+                old_level=previous_level,
+                new_level=current_level,
+            )
+
+    return random.choice(DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS).format(
+        pig=pig_name,
+        old_level=previous_level,
+        new_level=current_level,
+    )
 
 
-async def resolve_daily_pig(user_id: str, group_id: str = "") -> DailyPigResolution:
+async def resolve_daily_pig(
+    user_id: str,
+    group_id: str = "",
+    *,
+    include_progress: bool = False,
+) -> DailyPigResolution:
     """
     取得用户今日形态；没有记录时自动抽取并更新图鉴进度。
 
@@ -98,7 +129,11 @@ async def resolve_daily_pig(user_id: str, group_id: str = "") -> DailyPigResolut
     if current_pig:
         if group_id:
             await store.mark_group_roll_seen(user_id, current_pig["id"], group_id)
-        return DailyPigResolution(pig=current_pig)
+        ex_level: int | None = None
+        if include_progress:
+            draw_state = await store.get_draw_state(user_id)
+            ex_level = draw_state.expert_level_of(current_pig["id"])
+        return DailyPigResolution(pig=current_pig, ex_level=ex_level)
 
     if pig_id:
         # 已保存的 ID 缺失时绝不能用随机候选替代，否则展示结果会与账本永久不一致。
@@ -119,7 +154,8 @@ async def resolve_daily_pig(user_id: str, group_id: str = "") -> DailyPigResolut
     return DailyPigResolution(
         pig=pig,
         roll_result=roll_result,
-        growth_text=build_roll_growth_text(roll_result, pig),
+        growth_text=build_roll_growth_text(roll_result, pig) if include_progress else "",
+        ex_level=expert_level_from_copies(roll_result.copies) if include_progress else None,
     )
 
 
@@ -137,14 +173,14 @@ def build_pigsty_growth_summary(user_name: str, draw_state: DrawState, total_pig
     max_level = 0
     maxed_count = 0
     if ranked_progress:
-        levels = [get_expert_level(progress.copies) for _, progress in ranked_progress]
+        levels = [progress.expert_level for _, progress in ranked_progress]
         max_level = max(levels)
         maxed_count = sum(1 for level in levels if level >= MAX_EXPERT_LEVEL)
 
         favorite_id, favorite_progress = ranked_progress[0]
         favorite = pig_resource_manager.pig_map.get(favorite_id)
         favorite_name = favorite.get("name", favorite_id) if favorite else favorite_id
-        favorite_level = get_expert_level(favorite_progress.copies)
+        favorite_level = favorite_progress.expert_level
         favorite_line = f"🐷 本命猪：【{favorite_name}】EX Lv.{favorite_level}（累计 {favorite_progress.copies} 次）"
 
         repeat_items = [
@@ -157,7 +193,7 @@ def build_pigsty_growth_summary(user_name: str, draw_state: DrawState, total_pig
             for pig_id, progress in repeat_items:
                 pig = pig_resource_manager.pig_map.get(pig_id)
                 pig_name = pig.get("name", pig_id) if pig else pig_id
-                parts.append(f"【{pig_name}】EX Lv.{get_expert_level(progress.copies)}")
+                parts.append(f"【{pig_name}】EX Lv.{progress.expert_level}")
             top_repeat_line = "⭐ 高等级小猪：" + "、".join(parts)
 
     if draw_state.duplicate_streak > 0:
