@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -22,10 +24,11 @@ if get_plugin("nonebot_plugin_rollpig_plus") is None:
 
 from nonebot_plugin_rollpig_plus import catalog_renderer as catalog_module
 from nonebot_plugin_rollpig_plus import catalog_pillow_renderer as catalog_pillow_module
+from nonebot_plugin_rollpig_plus import card_renderer as card_module
 from nonebot_plugin_rollpig_plus import helpers as helpers_module
 from nonebot_plugin_rollpig_plus import resource_manager as resource_module
 from nonebot_plugin_rollpig_plus import roll_flow as roll_flow_module
-from nonebot_plugin_rollpig_plus.card_renderer import PigCardRenderResult
+from nonebot_plugin_rollpig_plus.card_renderer import PigCardImageLoadError, PigCardRenderResult
 from nonebot_plugin_rollpig_plus.config import Config
 from nonebot_plugin_rollpig_plus.resource_manager import RollPigResourceManager
 from nonebot_plugin_rollpig_plus.store.models import (
@@ -184,6 +187,80 @@ class ExVariantModelTests(unittest.TestCase):
         self.assertEqual(progress.expert_level, 5)
         self.assertEqual(state.expert_level_of("pig"), 5)
         self.assertEqual(state.expert_level_of("missing"), 0)
+
+
+class StrictCardRendererTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.manager = self._manager_from_pack(self._create_pack())
+
+    def tearDown(self) -> None:
+        card_module.clear_card_renderer_caches()
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _message_image_bytes(message) -> bytes:
+        for segment in message:
+            if segment.type != "image":
+                continue
+            image_file = str(segment.data["file"])
+            if not image_file.startswith("base64://"):
+                raise AssertionError(f"测试消息没有使用内嵌图片: {image_file}")
+            return base64.b64decode(image_file.removeprefix("base64://"))
+        raise AssertionError("测试消息不包含图片")
+
+    async def test_strict_mode_rejects_bad_png_and_keeps_non_strict_placeholder(self) -> None:
+        bad_variant = self.root / "bad-variant.png"
+        bad_variant.write_bytes(b"this is not a png")
+        cache_dir = self.root / "cards"
+        pig_data = self.manager.pig_map["pig"]
+
+        with patch.object(card_module, "CARD_CACHE_DIR", cache_dir):
+            loose_result = await card_module.render_pig_card_image(
+                pig_data,
+                bad_variant,
+                require_avatar=False,
+            )
+            cache_entries_after_loose = card_module.get_card_renderer_cache_stats()["final_entries"]
+            with self.assertRaises(PigCardImageLoadError):
+                await card_module.render_pig_card_image(
+                    pig_data,
+                    bad_variant,
+                    require_avatar=True,
+                )
+            self.assertEqual(
+                card_module.get_card_renderer_cache_stats()["final_entries"],
+                cache_entries_after_loose,
+            )
+
+        self.assertEqual(loose_result.image_format, "png")
+        with Image.open(BytesIO(loose_result.data)) as rendered:
+            self.assertEqual(rendered.getpixel((400, 200)), (255, 226, 239))
+
+    async def test_strict_mode_rejects_bad_gif(self) -> None:
+        bad_gif = self.root / "bad-variant.gif"
+        bad_gif.write_bytes(b"GIF89a broken")
+
+        with self.assertRaises(PigCardImageLoadError):
+            await card_module.render_pig_card_image(
+                self.manager.pig_map["pig"],
+                bad_gif,
+                require_avatar=True,
+            )
+
+    async def test_strict_mode_keeps_valid_variant_image(self) -> None:
+        appearance = self.manager.resolve_pig_appearance(self.manager.pig_map["pig"], 2)
+
+        result = await card_module.render_pig_card_image(
+            appearance.pig_data,
+            appearance.image_path,
+            require_avatar=True,
+        )
+
+        self.assertEqual(result.image_format, "png")
+        with Image.open(BytesIO(result.data)) as rendered:
+            self.assertEqual(rendered.getpixel((400, 200)), (100, 180, 255))
 
 
 class ExVariantResourceTests(ExVariantFixtureMixin, unittest.TestCase):
@@ -542,6 +619,44 @@ class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
         self.assertEqual(render_mock.await_args_list[1].args[1].name, "pig.png")
         fake_matcher.finish.assert_awaited_once()
         self.assertNotIn("差分专属成长提示", str(fake_matcher.finish.await_args.args[0]))
+
+    async def test_bad_variant_image_uses_real_base_card_fallback(self) -> None:
+        variant_path = self.root / "pack" / "images" / "pig_ex5.png"
+        variant_path.write_bytes(b"this is not a png")
+        fake_matcher = SimpleNamespace(finish=AsyncMock())
+        fake_event = SimpleNamespace(message_id=123)
+        render_spy = AsyncMock(wraps=card_module.render_pig_card_image)
+
+        with (
+            patch.object(helpers_module, "pig_resource_manager", self.manager),
+            patch.object(helpers_module, "render_pig_card_image", render_spy),
+            patch.object(helpers_module, "log_perf"),
+            patch.object(card_module, "CARD_CACHE_DIR", self.root / "cards"),
+        ):
+            await helpers_module.send_rendered_pig(
+                fake_matcher,
+                fake_event,
+                self.manager.pig_map["pig"],
+                extra_text="差分专属成长提示",
+                ex_level=5,
+            )
+
+        self.assertEqual(render_spy.await_count, 2)
+        first_call, second_call = render_spy.await_args_list
+        self.assertEqual(first_call.args[1].name, "pig_ex5.png")
+        self.assertTrue(first_call.kwargs["require_avatar"])
+        self.assertEqual(first_call.args[0]["description"], "EX5 描述")
+        self.assertEqual(second_call.args[1].name, "pig.png")
+        self.assertFalse(second_call.kwargs["require_avatar"])
+        self.assertEqual(second_call.args[0]["description"], "基础描述")
+        self.assertEqual(second_call.args[0]["analysis"], "基础分析")
+
+        fake_matcher.finish.assert_awaited_once()
+        message = fake_matcher.finish.await_args.args[0]
+        self.assertNotIn("差分专属成长提示", str(message))
+        rendered_data = StrictCardRendererTests._message_image_bytes(message)
+        with Image.open(BytesIO(rendered_data)) as rendered:
+            self.assertEqual(rendered.getpixel((400, 296)), (255, 180, 200))
 
 
 class ExVariantSyncTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase):

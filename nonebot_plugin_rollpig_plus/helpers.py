@@ -201,6 +201,10 @@ async def send_rendered_pig(
     appearance = pig_resource_manager.resolve_pig_appearance(pig_data, ex_level)
     render_data = appearance.pig_data
     avatar_file = appearance.image_path
+    uses_variant_image = (
+        avatar_file is not None
+        and avatar_file != appearance.base_image_path
+    )
     name = render_data.get("name", "未知小猪")
     variant_fallback = False
     payload_ready_at = time.perf_counter()
@@ -211,6 +215,7 @@ async def send_rendered_pig(
             render_data,
             avatar_file,
             cache_final_card=cache_final_card,
+            require_avatar=uses_variant_image,
         )
         render_finished_at = time.perf_counter()
     except Exception as error:
@@ -232,6 +237,7 @@ async def send_rendered_pig(
                 dict(pig_data),
                 appearance.base_image_path,
                 cache_final_card=cache_final_card,
+                require_avatar=False,
             )
             render_finished_at = time.perf_counter()
         except Exception as fallback_error:
