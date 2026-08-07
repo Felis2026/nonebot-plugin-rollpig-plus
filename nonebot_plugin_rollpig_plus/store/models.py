@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 MAX_EXPERT_LEVEL = 5
@@ -82,3 +82,58 @@ class RoastEvent:
     target_name: str = ""
     food: str = ""
     group_id: str = ""
+    reservation_id: str = ""
+    participant_ids: tuple[str, ...] = ()
+    participant_names: tuple[str, ...] = ()
+    participant_count: int = 0
+
+
+@dataclass(frozen=True)
+class RoastReservationParticipant:
+    user_id: str
+    display_name: str = ""
+    pig_id: str = ""
+
+
+@dataclass(frozen=True)
+class RoastReservation:
+    reservation_id: str
+    date_str: str
+    group_id: str
+    target_id: str
+    target_name: str
+    owner_id: str
+    owner_name: str
+    owner_pig_id: str
+    participants: tuple[RoastReservationParticipant, ...] = ()
+    delivery_bot_id: str = ""
+    force_mode: Optional[str] = None
+    status: str = "pending"
+    target_pig_id: str = ""
+    outcome_snapshot: Optional[dict[str, Any]] = None
+    claim_token: str = ""
+
+    @property
+    def participant_count(self) -> int:
+        return len(self.participants)
+
+
+@dataclass(frozen=True)
+class UnrolledRoastAttemptResult:
+    date_str: str
+    user_id: str
+    count: int
+
+
+@dataclass(frozen=True)
+class RoastReservationPrepareResult:
+    status: str
+    reservation: Optional[RoastReservation] = None
+    cooldown: Optional[CooldownConsumeResult] = None
+    target_pig_id: str = ""
+    protection_broken: bool = False
+
+
+@dataclass(frozen=True)
+class RoastReservationClaimResult:
+    reservations: tuple[RoastReservation, ...] = ()

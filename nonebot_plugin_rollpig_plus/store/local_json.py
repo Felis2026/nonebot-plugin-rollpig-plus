@@ -3,7 +3,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable, Optional
 
 from .base import RollpigStore
-from .models import CatalogSnapshot, CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
+from .models import (
+    CatalogSnapshot,
+    CooldownConsumeResult,
+    DailyRollResult,
+    DrawState,
+    RoastEvent,
+    RoastReservation,
+    RoastReservationClaimResult,
+    RoastReservationPrepareResult,
+    UnrolledRoastAttemptResult,
+)
 
 if TYPE_CHECKING:
     from ..data_manager import PigDataManager
@@ -87,6 +97,10 @@ class LocalJsonStore(RollpigStore):
             target_name=event.target_name,
             food=event.food,
             group_id=event.group_id,
+            reservation_id=event.reservation_id,
+            participant_ids=list(event.participant_ids),
+            participant_names=list(event.participant_names),
+            participant_count=event.participant_count,
         )
 
     async def list_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list[dict]:
@@ -111,3 +125,34 @@ class LocalJsonStore(RollpigStore):
 
     async def prune_events(self, days_to_keep: int = 7) -> None:
         await self.manager.clean_old_events(days_to_keep=days_to_keep)
+
+    async def record_unrolled_roast_attempt(self, user_id: str, date_str: Optional[str] = None) -> UnrolledRoastAttemptResult:
+        return await self.manager.record_unrolled_roast_attempt(user_id, date_str=date_str)
+
+    async def prepare_roast_reservation(self, **kwargs) -> RoastReservationPrepareResult:
+        return await self.manager.prepare_roast_reservation(**kwargs)
+
+    async def claim_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> RoastReservationClaimResult:
+        return await self.manager.claim_roast_reservations(delivery_bot_id, date_str=date_str)
+
+    async def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
+        return self.manager.has_owned_roast_reservations(delivery_bot_id, date_str=date_str)
+
+    async def save_roast_reservation_outcome(self, reservation: RoastReservation, outcome_snapshot: dict) -> Optional[RoastReservation]:
+        return await self.manager.save_roast_reservation_outcome(
+            reservation.reservation_id,
+            reservation.claim_token,
+            outcome_snapshot,
+        )
+
+    async def complete_roast_reservation(self, reservation: RoastReservation) -> bool:
+        return await self.manager.complete_roast_reservation(
+            reservation.reservation_id,
+            reservation.claim_token,
+        )
+
+    async def release_roast_reservation(self, reservation: RoastReservation) -> bool:
+        return await self.manager.release_roast_reservation(
+            reservation.reservation_id,
+            reservation.claim_token,
+        )

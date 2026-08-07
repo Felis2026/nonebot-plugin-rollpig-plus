@@ -8,11 +8,27 @@ from nonebot.log import logger
 from ..config import plugin_config
 from ..runtime import rollpig_date_str
 from .base import RollpigStore
-from .models import CatalogSnapshot, CooldownConsumeResult, DailyRollResult, DrawState, PigProgress, RoastEvent
+from .models import (
+    CatalogSnapshot,
+    CooldownConsumeResult,
+    DailyRollResult,
+    DrawState,
+    PigProgress,
+    RoastEvent,
+    RoastReservation,
+    RoastReservationClaimResult,
+    RoastReservationParticipant,
+    RoastReservationPrepareResult,
+    UnrolledRoastAttemptResult,
+)
 
 
 class CloudStoreError(RuntimeError):
     pass
+
+
+class CloudReservationUnsupportedError(CloudStoreError):
+    """旧版 Cloud 没有预约接口时抛出，handler 可只降级预约场景。"""
 
 
 class CloudStore(RollpigStore):
@@ -71,6 +87,48 @@ class CloudStore(RollpigStore):
             if not self.strict_mode and fallback is not None:
                 return fallback
             raise CloudStoreError(str(error)) from error
+
+    async def _reservation_request(self, method: str, path: str, **kwargs):
+        """预约接口使用独立兼容错误，避免旧 Cloud 拖垮正常烧烤。"""
+
+        try:
+            return await self._request(method, path, **kwargs)
+        except CloudStoreError as error:
+            cause = error.__cause__
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in {404, 405}:
+                raise CloudReservationUnsupportedError(str(error)) from error
+            raise
+
+    @staticmethod
+    def _parse_reservation(payload: dict | None) -> Optional[RoastReservation]:
+        if not isinstance(payload, dict) or not payload.get("reservation_id"):
+            return None
+        participants = tuple(
+            RoastReservationParticipant(
+                user_id=str(item.get("user_id") or ""),
+                display_name=str(item.get("display_name") or ""),
+                pig_id=str(item.get("pig_id") or ""),
+            )
+            for item in payload.get("participants", [])
+            if isinstance(item, dict) and item.get("user_id")
+        )
+        return RoastReservation(
+            reservation_id=str(payload["reservation_id"]),
+            date_str=str(payload.get("date_str") or ""),
+            group_id=str(payload.get("group_id") or ""),
+            target_id=str(payload.get("target_id") or ""),
+            target_name=str(payload.get("target_name") or ""),
+            owner_id=str(payload.get("owner_id") or ""),
+            owner_name=str(payload.get("owner_name") or ""),
+            owner_pig_id=str(payload.get("owner_pig_id") or ""),
+            participants=participants,
+            delivery_bot_id=str(payload.get("delivery_bot_id") or ""),
+            force_mode=payload.get("force_mode"),
+            status=str(payload.get("status") or "pending"),
+            target_pig_id=str(payload.get("target_pig_id") or ""),
+            outcome_snapshot=(dict(payload["outcome_snapshot"]) if isinstance(payload.get("outcome_snapshot"), dict) else None),
+            claim_token=str(payload.get("claim_token") or ""),
+        )
 
     async def get_daily_roll(self, user_id: str, date_str: Optional[str] = None) -> Optional[str]:
         payload = await self._request(
@@ -279,6 +337,10 @@ class CloudStore(RollpigStore):
                 "food": event.food,
                 "group_id": event.group_id,
                 "date_str": rollpig_date_str(),
+                "reservation_id": event.reservation_id,
+                "participant_ids": list(event.participant_ids),
+                "participant_names": list(event.participant_names),
+                "participant_count": event.participant_count,
             },
         )
 
@@ -334,3 +396,120 @@ class CloudStore(RollpigStore):
 
     async def prune_events(self, days_to_keep: int = 7) -> None:
         return None
+
+    async def record_unrolled_roast_attempt(
+        self, user_id: str, date_str: Optional[str] = None
+    ) -> UnrolledRoastAttemptResult:
+        payload = await self._reservation_request(
+            "POST",
+            "/v1/roast-reservations/unrolled-attempt",
+            json_body={"user_id": user_id, "date_str": date_str or rollpig_date_str()},
+        )
+        return UnrolledRoastAttemptResult(str(payload["date_str"]), str(payload["user_id"]), int(payload["count"]))
+
+    async def prepare_roast_reservation(
+        self,
+        *,
+        attacker_id: str,
+        attacker_name: str,
+        attacker_pig_id: str,
+        target_id: str,
+        target_name: str,
+        group_id: str,
+        delivery_bot_id: str,
+        force_mode: Optional[str] = None,
+        date_str: Optional[str] = None,
+        cooldown_seconds: Optional[int] = None,
+        max_charges: Optional[int] = None,
+    ) -> RoastReservationPrepareResult:
+        payload = await self._reservation_request(
+            "POST",
+            "/v1/roast-reservations/prepare",
+            json_body={
+                "attacker_id": attacker_id,
+                "attacker_name": attacker_name,
+                "attacker_pig_id": attacker_pig_id,
+                "target_id": target_id,
+                "target_name": target_name,
+                "group_id": group_id,
+                "delivery_bot_id": delivery_bot_id,
+                "force_mode": force_mode,
+                "date_str": date_str or rollpig_date_str(),
+                "cooldown_seconds": cooldown_seconds,
+                "max_charges": max_charges,
+            },
+        )
+        cooldown_payload = payload.get("cooldown") if isinstance(payload, dict) else None
+        cooldown = None
+        if isinstance(cooldown_payload, dict):
+            cooldown = CooldownConsumeResult(
+                allowed=bool(cooldown_payload.get("allowed")),
+                remaining_seconds=int(cooldown_payload.get("remaining_seconds") or 0),
+                charges_left=int(cooldown_payload.get("charges_left") or 0),
+                max_charges=int(cooldown_payload.get("max_charges") or 1),
+                next_recover_seconds=int(cooldown_payload.get("next_recover_seconds") or 0),
+            )
+        return RoastReservationPrepareResult(
+            status=str(payload.get("status") or "error"),
+            reservation=self._parse_reservation(payload.get("reservation")),
+            cooldown=cooldown,
+            target_pig_id=str(payload.get("target_pig_id") or ""),
+            protection_broken=bool(payload.get("protection_broken")),
+        )
+
+    async def claim_roast_reservations(
+        self, delivery_bot_id: str, date_str: Optional[str] = None
+    ) -> RoastReservationClaimResult:
+        payload = await self._reservation_request(
+            "POST",
+            "/v1/roast-reservations/claim",
+            json_body={"delivery_bot_id": delivery_bot_id, "date_str": date_str or rollpig_date_str()},
+        )
+        return RoastReservationClaimResult(
+            tuple(
+                reservation
+                for item in payload.get("items", [])
+                if (reservation := self._parse_reservation(item)) is not None
+            )
+        )
+
+    async def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
+        payload = await self._reservation_request(
+            "GET",
+            "/v1/roast-reservations/owned",
+            params={"delivery_bot_id": delivery_bot_id, "date_str": date_str or rollpig_date_str()},
+        )
+        return bool(payload.get("has_owned"))
+
+    async def save_roast_reservation_outcome(
+        self, reservation: RoastReservation, outcome_snapshot: dict
+    ) -> Optional[RoastReservation]:
+        payload = await self._reservation_request(
+            "POST",
+            "/v1/roast-reservations/outcome",
+            json_body={
+                "reservation_id": reservation.reservation_id,
+                "claim_token": reservation.claim_token,
+                "outcome_snapshot": outcome_snapshot,
+            },
+        )
+        updated = self._parse_reservation(payload.get("reservation"))
+        if updated and reservation.claim_token:
+            return RoastReservation(**{**updated.__dict__, "claim_token": reservation.claim_token})
+        return updated
+
+    async def complete_roast_reservation(self, reservation: RoastReservation) -> bool:
+        payload = await self._reservation_request(
+            "POST",
+            "/v1/roast-reservations/complete",
+            json_body={"reservation_id": reservation.reservation_id, "claim_token": reservation.claim_token},
+        )
+        return bool(payload.get("ok"))
+
+    async def release_roast_reservation(self, reservation: RoastReservation) -> bool:
+        payload = await self._reservation_request(
+            "POST",
+            "/v1/roast-reservations/release",
+            json_body={"reservation_id": reservation.reservation_id, "claim_token": reservation.claim_token},
+        )
+        return bool(payload.get("ok"))

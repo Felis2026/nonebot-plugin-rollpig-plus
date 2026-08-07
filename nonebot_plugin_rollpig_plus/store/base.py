@@ -3,7 +3,17 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from .models import CatalogSnapshot, CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
+from .models import (
+    CatalogSnapshot,
+    CooldownConsumeResult,
+    DailyRollResult,
+    DrawState,
+    RoastEvent,
+    RoastReservation,
+    RoastReservationClaimResult,
+    RoastReservationPrepareResult,
+    UnrolledRoastAttemptResult,
+)
 
 
 class RollpigStore(ABC):
@@ -104,4 +114,54 @@ class RollpigStore(ABC):
 
     @abstractmethod
     async def prune_events(self, days_to_keep: int = 7) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def record_unrolled_roast_attempt(
+        self, user_id: str, date_str: Optional[str] = None
+    ) -> UnrolledRoastAttemptResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def prepare_roast_reservation(
+        self,
+        *,
+        attacker_id: str,
+        attacker_name: str,
+        attacker_pig_id: str,
+        target_id: str,
+        target_name: str,
+        group_id: str,
+        delivery_bot_id: str,
+        force_mode: Optional[str] = None,
+        date_str: Optional[str] = None,
+        cooldown_seconds: Optional[int] = None,
+        max_charges: Optional[int] = None,
+    ) -> RoastReservationPrepareResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def claim_roast_reservations(
+        self, delivery_bot_id: str, date_str: Optional[str] = None
+    ) -> RoastReservationClaimResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def has_owned_roast_reservations(
+        self, delivery_bot_id: str, date_str: Optional[str] = None
+    ) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def save_roast_reservation_outcome(
+        self, reservation: RoastReservation, outcome_snapshot: dict
+    ) -> Optional[RoastReservation]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def complete_roast_reservation(self, reservation: RoastReservation) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def release_roast_reservation(self, reservation: RoastReservation) -> bool:
         raise NotImplementedError

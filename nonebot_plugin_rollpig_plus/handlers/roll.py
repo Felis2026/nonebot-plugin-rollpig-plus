@@ -11,6 +11,7 @@ from ..roll_flow import (
 from ..runtime import rollpig_date_str
 from ..resource_manager import PIG_LIST, get_pig_by_id, sync_rollpig_resources
 from ..helpers import send_rendered_pig
+from ..reservation_flow import deliver_newly_ready_reservations
 from ..pighub_service import build_pighub_image_url, pighub_service
 from ..store import store
 from ..texts import TOMORROW_TEXTS
@@ -73,6 +74,11 @@ async def _(event: Event):
         resolution.pig,
         extra_text=resolution.growth_text,
         ex_level=resolution.ex_level or 0,
+        after_send=(
+            (lambda: deliver_newly_ready_reservations(str(event.self_id)))
+            if resolution.was_auto_created
+            else None
+        ),
     )
 
 

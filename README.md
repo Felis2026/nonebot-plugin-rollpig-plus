@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
-    <img src="https://img.shields.io/badge/Version-0.10.0-ff69b4" alt="Version 0.10.0">
+    <img src="https://img.shields.io/badge/Version-0.11.0-ff69b4" alt="Version 0.11.0">
   </p>
 </div>
 
@@ -46,7 +46,7 @@ nb plugin install nonebot-plugin-rollpig-plus
 如需固定到指定版本：
 
 ```bash
-pip install nonebot-plugin-rollpig-plus==0.10.0
+pip install nonebot-plugin-rollpig-plus==0.11.0
 ```
 
 手动安装后，请确认 NoneBot 已加载插件模块：
@@ -67,7 +67,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `明日小猪` | 预测明天的小猪运势。 |
 | `昨日小猪` | 查看昨天抽到的小猪。 |
 | `今日烤猪` | 把今天的小猪做成美食；AI 烤猪需额外开启并配置 Key。 |
-| `烤群友 @目标` | 在群聊中烤一位群友，带充能、概率与目标状态限制。 |
+| `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪。 |
 | `我的猪圈` | 查看已解锁数量、收藏率、最高 EX Lv.、本命猪等摘要。 |
 | `小猪图鉴 [页码]` | 生成图片版小猪图鉴。 |
 | `本周小猪` | 生成本周猪猪总结长图。 |
@@ -86,8 +86,8 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 
 - 常规概率：成功 60% / 逃脱 30% / 反噬 10%。
 - 普通烤群友默认最多储存 2 次，每 8 小时恢复 1 次。
-- 常规模式下，目标需先抽过今日小猪，且不能是人类、熟食形态、吃掉了或猪售罄。
-- 加急点火口令可在限制范围内触发特殊成功判定；不会绕过目标资格检查。
+- 发起者需要已抽取自己的当日小猪。
+- 目标尚未抽猪时会建立当前群的预约烤猪：第一位用户成为主厨并消耗一次普通充能，后续最多 11 位群友可以免费添柴。
 
 ### 每日总结控制
 
@@ -257,6 +257,8 @@ nonebot_plugin_rollpig_plus/
 ├─ roast_manager.py         # AI 烤猪、共享文案同步与来源索引
 ├─ roll_flow.py             # 抽猪业务规则
 ├─ roast_flow.py            # 烤群友业务规则
+├─ reservation_flow.py      # 预约烤猪结算、结果快照与投递
+├─ reservation_delivery.py  # 跨 Bot owner 恢复与机会式检查
 ├─ runtime.py               # 宿主适配 / 群开关 / 运行时工具
 ├─ texts.py                 # 文案模板与特殊形态文本
 ├─ handlers/                # NoneBot 指令注册与参数解析
@@ -272,6 +274,12 @@ nonebot_plugin_rollpig_plus/
 - PigHub（搜猪功能支持）：[pighub.top](https://pighub.top/)
 
 ## 📋 最近更新
+
+### v0.11.0 预约烤猪
+
+- 自己未抽猪时不再能烤群友
+- 目标未抽猪时建立群内预约烤猪；主厨消耗资源，其他群友免费加入，单场最多 12 人。
+- Local 与 Cloud 后端均完整支持预约；新插件连接旧 Cloud 时只把预约场景降级为原有“目标未抽猪”提示。
 
 ### v0.10.0 共享文案与 EX 成长差分
 
