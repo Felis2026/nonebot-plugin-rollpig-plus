@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -20,6 +21,7 @@ if get_plugin("nonebot_plugin_rollpig_plus") is None:
         raise RuntimeError("failed to load nonebot_plugin_rollpig_plus for tests")
 
 from nonebot_plugin_rollpig_plus import data_manager as data_manager_module
+from nonebot_plugin_rollpig_plus import reservation_delivery
 from nonebot_plugin_rollpig_plus import reservation_flow
 from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
 from nonebot_plugin_rollpig_plus.handlers import roast as roast_handler
@@ -75,6 +77,21 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.data["draw_state"], {})
         self.assertEqual(self.manager.data["usage"], {})
         self.assertEqual(self.manager.data["force_usage"], {})
+
+    async def test_migration_quarantines_ambiguous_processing_outcome(self):
+        migrated = self.manager._migrate(
+            {
+                "roast_reservations": {
+                    "legacy": {
+                        "status": "processing",
+                        "outcome_snapshot": {"event_type": "escape"},
+                    }
+                }
+            },
+            persist=False,
+        )
+
+        self.assertEqual(migrated["roast_reservations"]["legacy"]["status"], "sending")
 
     async def test_create_join_duplicate_and_full_do_not_double_consume(self):
         created = await self._prepare()
@@ -178,6 +195,7 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
             snapshot,
         )
         self.assertEqual(saved.outcome_snapshot, snapshot)
+        self.assertEqual(saved.status, "sending")
         await self.manager.save_roast_reservation_outcome(
             reservation_id,
             reservation.claim_token,
@@ -188,6 +206,7 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         reclaimed = await self.manager.claim_roast_reservations("bot-1", "2026-08-07")
         self.assertEqual(reclaimed.reservations[0].outcome_snapshot, snapshot)
         reclaimed_reservation = reclaimed.reservations[0]
+        self.assertEqual(reclaimed_reservation.status, "sending")
         self.assertTrue(
             await self.manager.complete_roast_reservation(
                 reservation_id,
@@ -221,6 +240,58 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             await self.manager.release_roast_reservation(second.reservation_id, second.claim_token)
         )
+
+    async def test_sending_reservation_is_not_reclaimed_after_claim_timeout(self):
+        await self._prepare()
+        await self.manager.get_or_create_today_pig("target", "target-pig", date_str="2026-08-07")
+        reservation = (await self.manager.claim_roast_reservations("bot-1", "2026-08-07")).reservations[0]
+        saved = await self.manager.save_roast_reservation_outcome(
+            reservation.reservation_id,
+            reservation.claim_token,
+            {"event_type": "escape", "plain_text": "fixed"},
+        )
+        raw = self.manager.data["roast_reservations"][reservation.reservation_id]
+        raw["claimed_at"] = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+        ).isoformat()
+
+        reclaimed = await self.manager.claim_roast_reservations("bot-1", "2026-08-07")
+
+        self.assertEqual(saved.status, "sending")
+        self.assertFalse(reclaimed.reservations)
+        self.assertFalse(self.manager.has_owned_roast_reservations("bot-1", "2026-08-07"))
+
+    async def test_in_flight_reservation_can_release_after_day_changes(self):
+        await self._prepare()
+        await self.manager.get_or_create_today_pig("target", "target-pig", date_str="2026-08-07")
+        reservation = (await self.manager.claim_roast_reservations("bot-1", "2026-08-07")).reservations[0]
+
+        with patch.object(data_manager_module, "rollpig_date_str", return_value="2026-08-08"):
+            saved = await self.manager.save_roast_reservation_outcome(
+                reservation.reservation_id,
+                reservation.claim_token,
+                {"event_type": "escape"},
+            )
+            released = await self.manager.release_roast_reservation(
+                reservation.reservation_id,
+                reservation.claim_token,
+            )
+
+        self.assertEqual(saved.status, "sending")
+        self.assertTrue(released)
+
+    async def test_history_cleanup_prunes_all_expired_reservations(self):
+        self.manager.data["roast_reservations"] = {
+            "old-completed": {"date_str": "2026-08-07", "status": "completed"},
+            "old-pending": {"date_str": "2026-08-07", "status": "pending"},
+            "current-completed": {"date_str": "2026-08-08", "status": "completed"},
+            "current-pending": {"date_str": "2026-08-08", "status": "pending"},
+        }
+
+        with patch.object(data_manager_module, "rollpig_today", return_value=datetime.date(2026, 8, 8)):
+            await self.manager.clean_old_history()
+
+        self.assertEqual(set(self.manager.data["roast_reservations"]), {"current-pending"})
 
     async def test_same_target_reservations_in_multiple_groups_activate_independently(self):
         first = await self._prepare(group_id="100", delivery_bot_id="bot-1")
@@ -270,6 +341,48 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         joined = await self._prepare("b")
         self.assertEqual(joined.status, "reservation_joined")
         self.assertNotIn("b", self.manager.data["usage"])
+
+
+class ReservationDeliveryRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reservation_delivery._owned_bot_ids.clear()
+        reservation_delivery._retryable_bot_ids.clear()
+        reservation_delivery._last_check_by_bot.clear()
+        reservation_delivery._tasks_by_bot.clear()
+
+    async def test_failed_restore_retries_on_next_opportunistic_check(self):
+        has_owned = AsyncMock(side_effect=[CloudStoreError("timeout"), True])
+        deliver = AsyncMock(return_value=1)
+        mocked_store = SimpleNamespace(has_owned_roast_reservations=has_owned)
+        with (
+            patch.object(reservation_delivery, "store", mocked_store),
+            patch.object(reservation_flow, "deliver_ready_reservations", deliver),
+            patch.object(reservation_delivery.time, "monotonic", return_value=1000.0),
+        ):
+            await reservation_delivery.restore_owned_reservations("bot-1")
+            self.assertIn("bot-1", reservation_delivery._retryable_bot_ids)
+
+            await reservation_delivery._deliver_if_due("bot-1")
+
+        self.assertIn("bot-1", reservation_delivery._owned_bot_ids)
+        self.assertNotIn("bot-1", reservation_delivery._retryable_bot_ids)
+        deliver.assert_awaited_once_with("bot-1")
+
+    async def test_retryable_bot_is_allowed_to_schedule_recovery(self):
+        reservation_delivery._retryable_bot_ids.add("bot-1")
+        created_coroutines = []
+        fake_task = SimpleNamespace(done=lambda: False)
+
+        def create_task(coroutine):
+            created_coroutines.append(coroutine)
+            coroutine.close()
+            return fake_task
+
+        with patch.object(reservation_delivery.asyncio, "create_task", side_effect=create_task):
+            reservation_delivery.schedule_opportunistic_delivery("bot-1")
+
+        self.assertEqual(len(created_coroutines), 1)
+        self.assertIs(reservation_delivery._tasks_by_bot["bot-1"], fake_task)
 
 
 class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
@@ -400,6 +513,19 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await reservation_flow._complete_after_send(reservation))
 
         self.assertEqual(complete.await_count, 2)
+        mocked_store.release_roast_reservation.assert_not_called()
+
+    async def test_complete_after_send_exhaustion_keeps_unconfirmed_state(self):
+        reservation = self._reservation()
+        complete = AsyncMock(side_effect=CloudStoreError("timeout"))
+        with (
+            patch.object(reservation_flow, "store") as mocked_store,
+            patch.object(reservation_flow.asyncio, "sleep", new_callable=AsyncMock),
+        ):
+            mocked_store.complete_roast_reservation = complete
+            self.assertFalse(await reservation_flow._complete_after_send(reservation))
+
+        self.assertEqual(complete.await_count, 3)
         mocked_store.release_roast_reservation.assert_not_called()
 
 

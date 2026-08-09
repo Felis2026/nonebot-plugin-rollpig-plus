@@ -234,6 +234,18 @@ class PigDataManager:
             if normalized_protected != protected:
                 data["protected"] = normalized_protected
                 migrated = True
+
+        # ================================ 预约投递状态迁移 ================================ #
+        # 旧版本可能在 QQ 消息成功后、completed 落盘前遗留 processing + outcome。
+        # 这类记录是否已经发送无法可靠判断，必须按“可能已发送”处理，禁止超时重领。
+        for reservation in data.get("roast_reservations", {}).values():
+            if (
+                isinstance(reservation, dict)
+                and reservation.get("status") == "processing"
+                and isinstance(reservation.get("outcome_snapshot"), dict)
+            ):
+                reservation["status"] = "sending"
+                migrated = True
         if migrated:
             logger.info("pig_data.json 数据结构已自动迁移/补全，开始落盘...")
             if persist:
@@ -711,7 +723,7 @@ class PigDataManager:
     async def claim_roast_reservations(
         self, delivery_bot_id: str, date_str: Optional[str] = None
     ) -> RoastReservationClaimResult:
-        """领取当前 Bot 当天可投递的预约；processing 防止同进程重复结算。"""
+        """领取当前 Bot 当天可投递的预约；只回收尚未开始发送的 processing。"""
 
         target_date = date_str or rollpig_date_str()
         claimed: list[RoastReservation] = []
@@ -722,7 +734,9 @@ class PigDataManager:
                     continue
                 claimed_at = raw.get("claimed_at")
                 stale_processing = False
-                if raw.get("status") == "processing":
+                # sending 表示已经开始调用外部消息接口，结果可能已经到达群聊，绝不能
+                # 依赖超时自动重领。processing 只覆盖发送前阶段，可以安全使用租约恢复。
+                if raw.get("status") == "processing" and not isinstance(raw.get("outcome_snapshot"), dict):
                     if not isinstance(claimed_at, str):
                         stale_processing = True
                     else:
@@ -738,7 +752,11 @@ class PigDataManager:
                     and raw.get("delivery_bot_id") == str(delivery_bot_id)
                     and (raw.get("status") == "ready" or stale_processing)
                 ):
-                    raw["status"] = "processing"
+                    # 明确发送失败后会保留固定快照并退回 ready；再次领取时直接进入
+                    # sending，避免进程在重试窗口退出后把可能已发送的结果再次领取。
+                    raw["status"] = (
+                        "sending" if isinstance(raw.get("outcome_snapshot"), dict) else "processing"
+                    )
                     raw["claim_token"] = uuid.uuid4().hex
                     raw["claimed_at"] = now.isoformat()
                     claimed.append(self._reservation_from_raw(raw))
@@ -762,19 +780,24 @@ class PigDataManager:
         claim_token: str,
         outcome_snapshot: dict,
     ) -> Optional[RoastReservation]:
-        """首次确定预约结果后持久化；重试只能继续投递同一份快照。"""
+        """原子固化结果并进入发送态；sending 不参与超时回收。"""
 
         async with self._lock:
             raw = self._find_reservation_locked(reservation_id)
             if (
                 raw is None
-                or raw.get("date_str") != rollpig_date_str()
-                or raw.get("status") not in {"processing", "completed"}
+                or raw.get("status") not in {"processing", "sending", "completed"}
                 or raw.get("claim_token") != claim_token
             ):
                 return None
+            changed = False
             if not isinstance(raw.get("outcome_snapshot"), dict):
                 raw["outcome_snapshot"] = dict(outcome_snapshot)
+                changed = True
+            if raw.get("status") == "processing":
+                raw["status"] = "sending"
+                changed = True
+            if changed:
                 await self._atomic_save()
             return self._reservation_from_raw(raw)
 
@@ -784,7 +807,7 @@ class PigDataManager:
             if (
                 raw is None
                 or raw.get("claim_token") != claim_token
-                or raw.get("status") not in {"processing", "completed"}
+                or raw.get("status") not in {"sending", "completed"}
             ):
                 return False
             if raw.get("status") == "completed":
@@ -795,17 +818,15 @@ class PigDataManager:
             return True
 
     async def release_roast_reservation(self, reservation_id: str, claim_token: str) -> bool:
-        """发送失败时把 processing 放回 ready；已确定 outcome 会原样保留。"""
+        """明确发送失败时放回 ready；已确定 outcome 会原样保留。"""
 
         async with self._lock:
             raw = self._find_reservation_locked(reservation_id)
             if (
                 raw is None
-                or raw.get("status") != "processing"
+                or raw.get("status") not in {"processing", "sending"}
                 or raw.get("claim_token") != claim_token
             ):
-                return False
-            if raw.get("date_str") != rollpig_date_str():
                 return False
             raw["status"] = "ready"
             raw.pop("claimed_at", None)
@@ -857,7 +878,25 @@ class PigDataManager:
             for d in group_dates_to_del:
                 del group_rolls[d]
 
-            if history_dates_to_del or group_dates_to_del:
+            # completed 已由事件记录承接，其他预约跨日后也不再有效；每日清理直接
+            # 移除这些终态/过期记录，避免结果快照让 JSON 与滚动备份无限增长。
+            reservations = self.data.get("roast_reservations", {})
+            reservation_ids_to_del = [
+                reservation_id
+                for reservation_id, raw in reservations.items()
+                if isinstance(raw, dict)
+                and (
+                    raw.get("status") == "completed"
+                    or (
+                        _is_valid_date(str(raw.get("date_str") or ""))
+                        and datetime.date.fromisoformat(str(raw["date_str"])) < today
+                    )
+                )
+            ]
+            for reservation_id in reservation_ids_to_del:
+                del reservations[reservation_id]
+
+            if history_dates_to_del or group_dates_to_del or reservation_ids_to_del:
                 await self._atomic_save()
 
     # ---- 烤群友 普通模式充能 ----

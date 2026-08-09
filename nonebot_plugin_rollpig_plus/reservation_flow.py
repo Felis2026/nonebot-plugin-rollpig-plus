@@ -185,10 +185,13 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> int:
                 outcome = _deserialize_outcome(reservation.outcome_snapshot)
             else:
                 outcome = await build_reservation_outcome(reservation)
+
+            # 首次结果落盘时原子进入 sending；带固定快照的重领已在 claim 阶段进入
+            # sending，无需再增加一次 Cloud 请求或本地写盘。
+            if reservation.status != "sending":
                 updated = await store.save_roast_reservation_outcome(reservation, _serialize_outcome(outcome))
                 if updated is None:
-                    # 结果必须先可靠落盘再发送，否则发送成功后进程退出会在重试时重新随机。
-                    raise RuntimeError("预约结果持久化失败，取消本次投递")
+                    raise RuntimeError("预约结果或发送状态持久化失败，取消本次投递")
                 reservation = replace(updated, claim_token=reservation.claim_token or updated.claim_token)
 
             await _send_reservation_outcome(bot, reservation, outcome)
@@ -201,10 +204,10 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> int:
             continue
 
         # 从这里开始 QQ 消息已经成功发送。即使 Cloud complete 暂时失败，也不能再把
-        # processing 放回 ready，否则下一次机会式检查会把同一条结果重复发进群。
+        # sending 放回 ready，否则下一次机会式检查会把同一条结果重复发进群。
         if not await _complete_after_send(reservation):
             logger.error(
-                "rollpig 预约消息已发送但完成状态仍未确认，保留 processing 等待人工核查: "
+                "rollpig 预约消息已发送但完成状态仍未确认，保留 sending 等待人工核查: "
                 f"reservation={reservation.reservation_id} bot={delivery_bot_id}"
             )
             continue
