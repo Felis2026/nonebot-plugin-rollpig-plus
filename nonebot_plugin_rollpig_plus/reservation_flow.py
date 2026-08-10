@@ -11,6 +11,7 @@ from nonebot.log import logger
 
 from .card_renderer import render_pig_card_image
 from .resource_manager import get_pig_by_id, pig_resource_manager
+from .runtime import is_group_rollpig_enabled
 from .roast_flow import (
     RoastFoodMissingError,
     RoastOutcome,
@@ -53,6 +54,8 @@ def _serialize_outcome(outcome: RoastOutcome) -> dict[str, Any]:
         "plain_text": outcome.plain_text,
         "extra_text": outcome.extra_text,
         "food_name": outcome.food_name,
+        "backfire_victim_id": outcome.backfire_victim_id,
+        "backfire_victim_name": outcome.backfire_victim_name,
     }
 
 
@@ -63,7 +66,38 @@ def _deserialize_outcome(snapshot: dict[str, Any]) -> RoastOutcome:
         plain_text=str(snapshot.get("plain_text") or ""),
         extra_text=str(snapshot.get("extra_text") or ""),
         food_name=str(snapshot.get("food_name") or ""),
+        backfire_victim_id=str(snapshot.get("backfire_victim_id") or ""),
+        backfire_victim_name=str(snapshot.get("backfire_victim_name") or ""),
     )
+
+
+# ================================ 预约投递可靠性 ================================ #
+
+
+async def _release_after_delivery_failure(reservation: RoastReservation, *, reason: str) -> bool:
+    """安全释放明确未发送的预约；Cloud 瞬时异常或拒绝都会短暂重试。"""
+
+    for attempt, delay in enumerate((0.0, 0.25, 0.75), start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            if await store.release_roast_reservation(reservation):
+                return True
+            logger.warning(
+                "rollpig 预约释放被拒绝并将重试: "
+                f"reservation={reservation.reservation_id} attempt={attempt} reason={reason}"
+            )
+        except Exception as error:
+            logger.warning(
+                "rollpig 预约释放失败并将重试: "
+                f"reservation={reservation.reservation_id} attempt={attempt} reason={reason} error={error}"
+            )
+
+    logger.error(
+        "rollpig 预约释放重试耗尽，保留当前状态等待人工核查: "
+        f"reservation={reservation.reservation_id} reason={reason}"
+    )
+    return False
 
 
 async def _complete_after_send(reservation: RoastReservation) -> bool:
@@ -149,11 +183,39 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
         **values,
         victim=victim.display_name or victim.user_id,
     ) + "\n\n"
-    return await build_backfire_roast_outcome(
+    outcome = await build_backfire_roast_outcome(
         victim_pig,
         attacker_name=victim.display_name or victim.user_id,
         target_name=reservation.target_name or reservation.target_id,
         extra_text=prefix,
+    )
+    return replace(
+        outcome,
+        backfire_victim_id=victim.user_id,
+        backfire_victim_name=victim.display_name or victim.user_id,
+    )
+
+
+def _build_reservation_event(reservation: RoastReservation, outcome: RoastOutcome) -> RoastEvent:
+    """构造预约统计事件；多人反噬必须归到实际被反噬的参与者。"""
+
+    attacker_id = reservation.owner_id
+    attacker_name = reservation.owner_name
+    if outcome.event_type == "backfire" and outcome.backfire_victim_id:
+        attacker_id = outcome.backfire_victim_id
+        attacker_name = outcome.backfire_victim_name or outcome.backfire_victim_id
+    return RoastEvent(
+        event_type=outcome.event_type,
+        attacker_id=attacker_id,
+        target_id=reservation.target_id,
+        attacker_name=attacker_name,
+        target_name=reservation.target_name,
+        food=outcome.food_name,
+        group_id=reservation.group_id,
+        reservation_id=reservation.reservation_id,
+        participant_ids=tuple(item.user_id for item in reservation.participants),
+        participant_names=tuple(item.display_name for item in reservation.participants),
+        participant_count=reservation.participant_count,
     )
 
 
@@ -180,6 +242,13 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> int:
     claimed = await store.claim_roast_reservations(str(delivery_bot_id))
     completed = 0
     for reservation in claimed.reservations:
+        if not is_group_rollpig_enabled(reservation.group_id):
+            logger.info(
+                "rollpig 目标群已关闭，预约结果延期投递: "
+                f"reservation={reservation.reservation_id} group={reservation.group_id}"
+            )
+            await _release_after_delivery_failure(reservation, reason="group_disabled")
+            continue
         try:
             if reservation.outcome_snapshot:
                 outcome = _deserialize_outcome(reservation.outcome_snapshot)
@@ -194,13 +263,17 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> int:
                     raise RuntimeError("预约结果或发送状态持久化失败，取消本次投递")
                 reservation = replace(updated, claim_token=reservation.claim_token or updated.claim_token)
 
+            # 群开关可能在结果生成期间变化，真正发送前必须再次确认。
+            if not is_group_rollpig_enabled(reservation.group_id):
+                await _release_after_delivery_failure(reservation, reason="group_disabled_before_send")
+                continue
             await _send_reservation_outcome(bot, reservation, outcome)
         except Exception as error:
             logger.warning(
                 "rollpig 预约投递失败，已保留固定结果等待重试: "
                 f"reservation={reservation.reservation_id} bot={delivery_bot_id} error={error}"
             )
-            await store.release_roast_reservation(reservation)
+            await _release_after_delivery_failure(reservation, reason="delivery_failed")
             continue
 
         # 从这里开始 QQ 消息已经成功发送。即使 Cloud complete 暂时失败，也不能再把
@@ -213,21 +286,7 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> int:
             continue
         completed += 1
         try:
-            await store.append_roast_event(
-                RoastEvent(
-                    event_type=outcome.event_type,
-                    attacker_id=reservation.owner_id,
-                    target_id=reservation.target_id,
-                    attacker_name=reservation.owner_name,
-                    target_name=reservation.target_name,
-                    food=outcome.food_name,
-                    group_id=reservation.group_id,
-                    reservation_id=reservation.reservation_id,
-                    participant_ids=tuple(item.user_id for item in reservation.participants),
-                    participant_names=tuple(item.display_name for item in reservation.participants),
-                    participant_count=reservation.participant_count,
-                )
-            )
+            await store.append_roast_event(_build_reservation_event(reservation, outcome))
         except Exception as event_error:
             # 消息已经发出且预约已完成，事件只是日报扩展数据；不能因为统计写入失败
             # 把预约重新放回 ready，否则下次会向群里重复投递同一场结果。

@@ -896,7 +896,17 @@ class PigDataManager:
             for reservation_id in reservation_ids_to_del:
                 del reservations[reservation_id]
 
-            if history_dates_to_del or group_dates_to_del or reservation_ids_to_del:
+            # 未抽猪违规次数只在当日判定中使用，跨日后直接清理，避免日期分区无限增长。
+            unrolled_attempts = self.data.get("unrolled_roast_attempts", {})
+            attempt_dates_to_del = [
+                date_str
+                for date_str in unrolled_attempts
+                if _is_valid_date(date_str) and datetime.date.fromisoformat(date_str) < today
+            ]
+            for date_str in attempt_dates_to_del:
+                del unrolled_attempts[date_str]
+
+            if history_dates_to_del or group_dates_to_del or reservation_ids_to_del or attempt_dates_to_del:
                 await self._atomic_save()
 
     # ---- 烤群友 普通模式充能 ----

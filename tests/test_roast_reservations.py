@@ -293,6 +293,17 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(set(self.manager.data["roast_reservations"]), {"current-pending"})
 
+    async def test_history_cleanup_prunes_expired_unrolled_attempts(self):
+        self.manager.data["unrolled_roast_attempts"] = {
+            "2026-08-07": {"old": 3},
+            "2026-08-08": {"current": 2},
+        }
+
+        with patch.object(data_manager_module, "rollpig_today", return_value=datetime.date(2026, 8, 8)):
+            await self.manager.clean_old_history()
+
+        self.assertEqual(self.manager.data["unrolled_roast_attempts"], {"2026-08-08": {"current": 2}})
+
     async def test_same_target_reservations_in_multiple_groups_activate_independently(self):
         first = await self._prepare(group_id="100", delivery_bot_id="bot-1")
         second = await self._prepare(group_id="200", delivery_bot_id="bot-2")
@@ -497,10 +508,98 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(reservation_flow.random, "randint", return_value=91),
                 patch.object(reservation_flow.random, "choice", side_effect=choose),
             ):
-                self.assertEqual((await reservation_flow.build_reservation_outcome(self._reservation())).event_type, "backfire")
+                outcome = await reservation_flow.build_reservation_outcome(self._reservation())
+                self.assertEqual(outcome.event_type, "backfire")
 
         self.assertEqual(backfire.await_args.args[0], victim)
         self.assertEqual(backfire.await_args.kwargs["attacker_name"], "帮厨")
+        self.assertEqual(outcome.backfire_victim_id, "helper")
+        self.assertEqual(outcome.backfire_victim_name, "帮厨")
+
+    async def test_backfire_event_records_actual_victim_and_old_snapshot_falls_back(self):
+        reservation = self._reservation()
+        outcome = RoastOutcome(
+            event_type="backfire",
+            backfire_victim_id="helper",
+            backfire_victim_name="帮厨",
+        )
+
+        event = reservation_flow._build_reservation_event(reservation, outcome)
+        legacy_event = reservation_flow._build_reservation_event(
+            reservation,
+            reservation_flow._deserialize_outcome({"event_type": "backfire"}),
+        )
+
+        self.assertEqual((event.attacker_id, event.attacker_name), ("helper", "帮厨"))
+        self.assertEqual((legacy_event.attacker_id, legacy_event.attacker_name), ("owner", "主厨"))
+
+    async def test_release_after_delivery_failure_retries_exception_and_false(self):
+        reservation = self._reservation()
+        release = AsyncMock(side_effect=[CloudStoreError("timeout"), False, True])
+        with (
+            patch.object(reservation_flow, "store") as mocked_store,
+            patch.object(reservation_flow.asyncio, "sleep", new_callable=AsyncMock),
+        ):
+            mocked_store.release_roast_reservation = release
+            released = await reservation_flow._release_after_delivery_failure(
+                reservation,
+                reason="test",
+            )
+
+        self.assertTrue(released)
+        self.assertEqual(release.await_count, 3)
+
+    async def test_disabled_destination_group_releases_without_sending(self):
+        reservation = self._reservation()
+        bot = SimpleNamespace(send_group_msg=AsyncMock())
+        mocked_store = SimpleNamespace(
+            claim_roast_reservations=AsyncMock(
+                return_value=SimpleNamespace(reservations=(reservation,))
+            ),
+            release_roast_reservation=AsyncMock(return_value=True),
+        )
+        with (
+            patch.object(reservation_flow, "store", mocked_store),
+            patch.object(reservation_flow, "get_bots", return_value={"bot-1": bot}),
+            patch.object(reservation_flow, "is_group_rollpig_enabled", return_value=False),
+            patch.object(reservation_flow, "build_reservation_outcome", new_callable=AsyncMock) as build,
+        ):
+            completed = await reservation_flow.deliver_ready_reservations("bot-1")
+
+        self.assertEqual(completed, 0)
+        mocked_store.release_roast_reservation.assert_awaited_once_with(reservation)
+        build.assert_not_awaited()
+        bot.send_group_msg.assert_not_awaited()
+
+    async def test_group_disabled_after_outcome_save_still_prevents_sending(self):
+        reservation = self._reservation()
+        updated = RoastReservation(**{**reservation.__dict__, "status": "sending"})
+        outcome = RoastOutcome(event_type="escape", plain_text="fixed")
+        bot = SimpleNamespace(send_group_msg=AsyncMock())
+        mocked_store = SimpleNamespace(
+            claim_roast_reservations=AsyncMock(
+                return_value=SimpleNamespace(reservations=(reservation,))
+            ),
+            save_roast_reservation_outcome=AsyncMock(return_value=updated),
+            release_roast_reservation=AsyncMock(return_value=True),
+        )
+        with (
+            patch.object(reservation_flow, "store", mocked_store),
+            patch.object(reservation_flow, "get_bots", return_value={"bot-1": bot}),
+            patch.object(reservation_flow, "is_group_rollpig_enabled", side_effect=[True, False]),
+            patch.object(
+                reservation_flow,
+                "build_reservation_outcome",
+                new_callable=AsyncMock,
+                return_value=outcome,
+            ),
+        ):
+            completed = await reservation_flow.deliver_ready_reservations("bot-1")
+
+        self.assertEqual(completed, 0)
+        mocked_store.save_roast_reservation_outcome.assert_awaited_once()
+        mocked_store.release_roast_reservation.assert_awaited_once_with(updated)
+        bot.send_group_msg.assert_not_awaited()
 
     async def test_complete_after_send_retries_without_releasing(self):
         reservation = self._reservation()

@@ -49,6 +49,8 @@ class RoastOutcome:
     plain_text: str = ""
     extra_text: str = ""
     food_name: str = ""
+    backfire_victim_id: str = ""
+    backfire_victim_name: str = ""
 
 
 class RoastFoodMissingError(RuntimeError):
