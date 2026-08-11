@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import random
-from dataclasses import replace
+import time
+from dataclasses import dataclass, replace
 from typing import Any
 
 from nonebot import get_bots
@@ -13,7 +14,6 @@ from .card_renderer import render_pig_card_image
 from .resource_manager import get_pig_by_id, pig_resource_manager
 from .runtime import is_group_rollpig_enabled
 from .roast_flow import (
-    RoastFoodMissingError,
     RoastOutcome,
     build_backfire_roast_outcome,
     build_success_roast_outcome,
@@ -33,6 +33,78 @@ from .texts import (
     ROAST_RESERVATION_ESCAPE_TEXTS,
     ROAST_RESERVATION_SUCCESS_TEXTS,
 )
+
+
+class ReservationResourceUnavailableError(RuntimeError):
+    """预约引用的小猪尚未出现在当前 Bot 的资源版本中，可在同步后重试。"""
+
+
+@dataclass(frozen=True)
+class ReservationDeliveryResult:
+    """一次 claim/deliver 的结果，同时携带 Owner 是否仍需继续轮询。"""
+
+    completed: int = 0
+    has_owned: bool = False
+
+
+# ================================ 本地失败退避 ================================ #
+# 退避只抑制当前进程重复领取，不改变 Cloud 的可靠状态。资源同步或群内正常指令
+# 可以提前解除；进程重启最多重新发现一次，不会留下新的持久状态。
+RESOURCE_RETRY_BACKOFF_SECONDS = 5 * 60.0
+GROUP_DISABLED_BACKOFF_SECONDS = 15 * 60.0
+_resource_backoff_until: dict[str, float] = {}
+_group_backoff: dict[str, tuple[str, float]] = {}
+
+
+def _active_backoff_reservation_ids() -> set[str]:
+    """返回仍在暂缓期的预约，并顺手清理过期本地记录。"""
+
+    now = time.monotonic()
+    for reservation_id, retry_at in list(_resource_backoff_until.items()):
+        if retry_at <= now:
+            _resource_backoff_until.pop(reservation_id, None)
+    for reservation_id, (_group_id, retry_at) in list(_group_backoff.items()):
+        if retry_at <= now:
+            _group_backoff.pop(reservation_id, None)
+    return set(_resource_backoff_until) | set(_group_backoff)
+
+
+def _defer_for_resource_sync(reservation: RoastReservation) -> None:
+    _resource_backoff_until[reservation.reservation_id] = (
+        time.monotonic() + RESOURCE_RETRY_BACKOFF_SECONDS
+    )
+
+
+def _defer_for_disabled_group(reservation: RoastReservation) -> None:
+    _group_backoff[reservation.reservation_id] = (
+        reservation.group_id,
+        time.monotonic() + GROUP_DISABLED_BACKOFF_SECONDS,
+    )
+
+
+def clear_resource_reservation_backoffs() -> bool:
+    """资源同步成功后解除资源暂缓；返回是否存在需要立即唤醒的预约。"""
+
+    had_backoff = bool(_resource_backoff_until)
+    _resource_backoff_until.clear()
+    return had_backoff
+
+
+def clear_group_reservation_backoffs(group_id: str) -> bool:
+    """群内再次出现有效指令时提前解除该群暂缓。"""
+
+    normalized_group_id = str(group_id or "")
+    cleared = False
+    for reservation_id, (blocked_group_id, _retry_at) in list(_group_backoff.items()):
+        if blocked_group_id == normalized_group_id:
+            _group_backoff.pop(reservation_id, None)
+            cleared = True
+    return cleared
+
+
+def _clear_reservation_backoff(reservation_id: str) -> None:
+    _resource_backoff_until.pop(reservation_id, None)
+    _group_backoff.pop(reservation_id, None)
 
 
 def _participants_label(reservation: RoastReservation) -> str:
@@ -72,6 +144,55 @@ def _deserialize_outcome(snapshot: dict[str, Any]) -> RoastOutcome:
 
 
 # ================================ 预约投递可靠性 ================================ #
+
+
+async def _prepare_outcome_with_retry(
+    reservation: RoastReservation,
+    outcome_snapshot: dict[str, Any],
+) -> RoastReservation | None:
+    """利用相同 token/snapshot 幂等重试，覆盖 Cloud 成功但响应丢失的窗口。"""
+
+    for attempt, delay in enumerate((0.0, 0.25, 0.75), start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            updated = await store.save_roast_reservation_outcome(reservation, outcome_snapshot)
+            if updated is not None:
+                return updated
+            logger.error(
+                "rollpig 预约结果固化被拒绝: "
+                f"reservation={reservation.reservation_id} attempt={attempt}"
+            )
+            return None
+        except Exception as error:
+            logger.warning(
+                "rollpig 预约结果固化响应失败并将幂等重试: "
+                f"reservation={reservation.reservation_id} attempt={attempt} error={error}"
+            )
+    return None
+
+
+async def _mark_sending_with_retry(reservation: RoastReservation) -> RoastReservation | None:
+    """幂等确认 sending；只有拿到成功响应后才调用外部 QQ 发送接口。"""
+
+    for attempt, delay in enumerate((0.0, 0.25, 0.75), start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            updated = await store.mark_roast_reservation_sending(reservation)
+            if updated is not None:
+                return updated
+            logger.error(
+                "rollpig 预约进入发送态被拒绝: "
+                f"reservation={reservation.reservation_id} attempt={attempt}"
+            )
+            return None
+        except Exception as error:
+            logger.warning(
+                "rollpig 预约发送态响应失败并将幂等重试: "
+                f"reservation={reservation.reservation_id} attempt={attempt} error={error}"
+            )
+    return None
 
 
 async def _release_after_delivery_failure(reservation: RoastReservation, *, reason: str) -> bool:
@@ -147,7 +268,9 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
 
     target_pig = get_pig_by_id(reservation.target_pig_id)
     if not target_pig:
-        return RoastOutcome(event_type="reserved_missing", plain_text="预约目标的小猪资源暂时缺失，本场预约烤猪已安全停机。")
+        raise ReservationResourceUnavailableError(
+            f"预约目标资源暂时缺失: pig_id={reservation.target_pig_id}"
+        )
 
     special = _special_target_outcome(reservation, target_pig)
     if special:
@@ -179,6 +302,10 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
 
     victim = random.choice(reservation.participants)
     victim_pig = get_pig_by_id(victim.pig_id)
+    if not victim_pig:
+        raise ReservationResourceUnavailableError(
+            f"预约参与者资源暂时缺失: user_id={victim.user_id} pig_id={victim.pig_id}"
+        )
     prefix = random.choice(ROAST_RESERVATION_BACKFIRE_TEXTS).format(
         **values,
         victim=victim.display_name or victim.user_id,
@@ -197,18 +324,13 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
 
 
 def _build_reservation_event(reservation: RoastReservation, outcome: RoastOutcome) -> RoastEvent:
-    """构造预约统计事件；多人反噬必须归到实际被反噬的参与者。"""
+    """保留旧事件语义：attacker 是主厨，target 是原烧烤目标。"""
 
-    attacker_id = reservation.owner_id
-    attacker_name = reservation.owner_name
-    if outcome.event_type == "backfire" and outcome.backfire_victim_id:
-        attacker_id = outcome.backfire_victim_id
-        attacker_name = outcome.backfire_victim_name or outcome.backfire_victim_id
     return RoastEvent(
         event_type=outcome.event_type,
-        attacker_id=attacker_id,
+        attacker_id=reservation.owner_id,
         target_id=reservation.target_id,
-        attacker_name=attacker_name,
+        attacker_name=reservation.owner_name,
         target_name=reservation.target_name,
         food=outcome.food_name,
         group_id=reservation.group_id,
@@ -216,10 +338,14 @@ def _build_reservation_event(reservation: RoastReservation, outcome: RoastOutcom
         participant_ids=tuple(item.user_id for item in reservation.participants),
         participant_names=tuple(item.display_name for item in reservation.participants),
         participant_count=reservation.participant_count,
+        backfire_victim_id=outcome.backfire_victim_id,
+        backfire_victim_name=outcome.backfire_victim_name,
     )
 
 
-async def _send_reservation_outcome(bot, reservation: RoastReservation, outcome: RoastOutcome) -> None:
+async def _prepare_reservation_message(outcome: RoastOutcome):
+    """在进入 sending 前完成所有可能失败或耗时的图片渲染。"""
+
     if outcome.render_data:
         image_file = pig_resource_manager.find_image_file(str(outcome.render_data.get("id") or ""))
         render_result = await render_pig_card_image(
@@ -227,19 +353,26 @@ async def _send_reservation_outcome(bot, reservation: RoastReservation, outcome:
             image_file,
             cache_final_card=False,
         )
-        message = MessageSegment.text(outcome.extra_text) + MessageSegment.image(render_result.data)
-    else:
-        message = MessageSegment.text(outcome.plain_text)
+        return MessageSegment.text(outcome.extra_text) + MessageSegment.image(render_result.data)
+    return MessageSegment.text(outcome.plain_text)
+
+
+async def _send_reservation_message(bot, reservation: RoastReservation, message) -> None:
+    """调用外部 OneBot 发送接口；调用前预约必须已经进入 sending。"""
+
     await bot.send_group_msg(group_id=int(reservation.group_id), message=message)
 
 
-async def deliver_ready_reservations(delivery_bot_id: str) -> int:
+async def deliver_ready_reservations(delivery_bot_id: str) -> ReservationDeliveryResult:
     """机会式领取并投递当前 Bot 的 ready 预约；失败只 release，不重新随机。"""
 
     bot = get_bots().get(str(delivery_bot_id))
     if bot is None:
-        return 0
-    claimed = await store.claim_roast_reservations(str(delivery_bot_id))
+        return ReservationDeliveryResult()
+    claimed = await store.claim_roast_reservations(
+        str(delivery_bot_id),
+        excluded_reservation_ids=_active_backoff_reservation_ids(),
+    )
     completed = 0
     for reservation in claimed.reservations:
         if not is_group_rollpig_enabled(reservation.group_id):
@@ -247,33 +380,73 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> int:
                 "rollpig 目标群已关闭，预约结果延期投递: "
                 f"reservation={reservation.reservation_id} group={reservation.group_id}"
             )
+            _defer_for_disabled_group(reservation)
             await _release_after_delivery_failure(reservation, reason="group_disabled")
             continue
+        # ================================ 可恢复的发送前阶段 ================================ #
+        # 结果生成、快照落盘和图片渲染都可能被取消或因资源同步滞后而失败；这些步骤
+        # 只能处于 processing/prepared，使进程退出后仍可依赖租约重新领取。
         try:
             if reservation.outcome_snapshot:
                 outcome = _deserialize_outcome(reservation.outcome_snapshot)
             else:
                 outcome = await build_reservation_outcome(reservation)
 
-            # 首次结果落盘时原子进入 sending；带固定快照的重领已在 claim 阶段进入
-            # sending，无需再增加一次 Cloud 请求或本地写盘。
-            if reservation.status != "sending":
-                updated = await store.save_roast_reservation_outcome(reservation, _serialize_outcome(outcome))
+            if reservation.status != "prepared":
+                updated = await _prepare_outcome_with_retry(
+                    reservation,
+                    _serialize_outcome(outcome),
+                )
                 if updated is None:
-                    raise RuntimeError("预约结果或发送状态持久化失败，取消本次投递")
+                    raise RuntimeError("预约结果持久化失败，取消本次投递")
                 reservation = replace(updated, claim_token=reservation.claim_token or updated.claim_token)
+
+            message = await _prepare_reservation_message(outcome)
 
             # 群开关可能在结果生成期间变化，真正发送前必须再次确认。
             if not is_group_rollpig_enabled(reservation.group_id):
+                _defer_for_disabled_group(reservation)
                 await _release_after_delivery_failure(reservation, reason="group_disabled_before_send")
                 continue
-            await _send_reservation_outcome(bot, reservation, outcome)
-        except Exception as error:
+        except ReservationResourceUnavailableError as error:
+            _defer_for_resource_sync(reservation)
             logger.warning(
-                "rollpig 预约投递失败，已保留固定结果等待重试: "
+                "rollpig 预约资源暂时缺失，已延后至资源同步或退避到期后重试: "
                 f"reservation={reservation.reservation_id} bot={delivery_bot_id} error={error}"
             )
-            await _release_after_delivery_failure(reservation, reason="delivery_failed")
+            await _release_after_delivery_failure(reservation, reason="resource_unavailable")
+            continue
+        except Exception as error:
+            logger.warning(
+                "rollpig 预约发送前准备失败，已保留固定结果等待重试: "
+                f"reservation={reservation.reservation_id} bot={delivery_bot_id} error={error}"
+            )
+            await _release_after_delivery_failure(reservation, reason="prepare_failed")
+            continue
+
+        # ================================ 不可判定的外部发送阶段 ================================ #
+        # 状态推进与 OneBot 发送无法组成同一事务。先在独立事务进入 sending，再立即
+        # 调用外部接口；此后的异常可能发生在消息已送达之后，绝不能自动 release。
+        try:
+            updated = await _mark_sending_with_retry(reservation)
+            if updated is None:
+                raise RuntimeError("预约发送状态持久化失败，取消本次投递")
+            reservation = replace(updated, claim_token=reservation.claim_token or updated.claim_token)
+        except Exception as error:
+            logger.warning(
+                "rollpig 预约进入发送态失败，将尝试释放发送前租约: "
+                f"reservation={reservation.reservation_id} bot={delivery_bot_id} error={error}"
+            )
+            await _release_after_delivery_failure(reservation, reason="mark_sending_failed")
+            continue
+
+        try:
+            await _send_reservation_message(bot, reservation, message)
+        except Exception as error:
+            logger.error(
+                "rollpig 预约外部发送结果不确定，保留 sending 防止重复消息: "
+                f"reservation={reservation.reservation_id} bot={delivery_bot_id} error={error}"
+            )
             continue
 
         # 从这里开始 QQ 消息已经成功发送。即使 Cloud complete 暂时失败，也不能再把
@@ -285,6 +458,7 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> int:
             )
             continue
         completed += 1
+        _clear_reservation_backoff(reservation.reservation_id)
         try:
             await store.append_roast_event(_build_reservation_event(reservation, outcome))
         except Exception as event_error:
@@ -294,7 +468,7 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> int:
                 "rollpig 预约事件记录失败，预约保持 completed: "
                 f"reservation={reservation.reservation_id} error={event_error}"
             )
-    return completed
+    return ReservationDeliveryResult(completed=completed, has_owned=claimed.has_owned)
 
 
 async def deliver_newly_ready_reservations(current_bot_id: str) -> None:
@@ -303,7 +477,6 @@ async def deliver_newly_ready_reservations(current_bot_id: str) -> None:
     bot_ids = {str(current_bot_id), *map(str, get_bots().keys())}
     for bot_id in bot_ids:
         try:
-            if await store.has_owned_roast_reservations(bot_id):
-                await deliver_ready_reservations(bot_id)
+            await deliver_ready_reservations(bot_id)
         except Exception as error:
             logger.warning(f"rollpig 检查预约投递失败: bot={bot_id} error={error}")

@@ -86,6 +86,8 @@ class RoastEvent:
     participant_ids: tuple[str, ...] = ()
     participant_names: tuple[str, ...] = ()
     participant_count: int = 0
+    backfire_victim_id: str = ""
+    backfire_victim_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -137,3 +139,4 @@ class RoastReservationPrepareResult:
 @dataclass(frozen=True)
 class RoastReservationClaimResult:
     reservations: tuple[RoastReservation, ...] = ()
+    has_owned: bool = False

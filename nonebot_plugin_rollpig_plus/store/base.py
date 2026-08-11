@@ -142,7 +142,10 @@ class RollpigStore(ABC):
 
     @abstractmethod
     async def claim_roast_reservations(
-        self, delivery_bot_id: str, date_str: Optional[str] = None
+        self,
+        delivery_bot_id: str,
+        date_str: Optional[str] = None,
+        excluded_reservation_ids: Optional[set[str]] = None,
     ) -> RoastReservationClaimResult:
         raise NotImplementedError
 
@@ -155,6 +158,13 @@ class RollpigStore(ABC):
     @abstractmethod
     async def save_roast_reservation_outcome(
         self, reservation: RoastReservation, outcome_snapshot: dict
+    ) -> Optional[RoastReservation]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def mark_roast_reservation_sending(
+        self,
+        reservation: RoastReservation,
     ) -> Optional[RoastReservation]:
         raise NotImplementedError
 

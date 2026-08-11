@@ -75,6 +75,28 @@ async def _finish_unrolled_attacker_attempt(matcher, event: GroupMessageEvent, a
     await send_rendered_pig(matcher, event, food_pig, cache_final_card=False)
 
 
+async def _load_attacker_pig_or_finish(
+    matcher,
+    event: GroupMessageEvent,
+    attacker_name: str,
+    force_mode,
+):
+    """区分真正未抽猪与本机资源落后，避免把资源故障计成违规。"""
+
+    attacker_pig_id = await store.get_daily_roll(str(event.user_id))
+    if not attacker_pig_id:
+        await _finish_unrolled_attacker_attempt(matcher, event, attacker_name, force_mode)
+        return None
+    attacker_pig = get_pig_by_id(attacker_pig_id)
+    if not attacker_pig:
+        await matcher.finish(
+            MessageSegment.reply(event.message_id)
+            + "你的今日小猪记录存在，但本机资源暂时缺失，请稍后再试。"
+        )
+        return None
+    return attacker_pig
+
+
 # 5. 今日烤猪
 cmd_roast = on_command("今日烤猪", block=True)
 
@@ -150,16 +172,23 @@ async def _(bot: Bot, event: GroupMessageEvent):
     attacker_name = event.sender.card or event.sender.nickname
     group_id = str(event.group_id)
     force_mode = detect_force_roast_mode(event.get_plaintext(), attacker_id)
-    attacker_pig = get_pig_by_id(await store.get_daily_roll(attacker_id))
-
-    if attacker_pig:
-        await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
-
     if force_mode == "super_denied":
         await cmd_roast_member.finish(
             MessageSegment.reply(event.message_id) + "口令【强行点火】仅 superuser 可用。"
         )
         return
+
+    attacker_pig = await _load_attacker_pig_or_finish(
+        cmd_roast_member,
+        event,
+        attacker_name,
+        force_mode,
+    )
+
+    if not attacker_pig:
+        return
+
+    await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
 
     target = await resolve_roast_target(bot, event)
     target_id = target.target_id
@@ -167,10 +196,6 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     if not target_id:
         await cmd_roast_member.finish("请 At 或回复你要烤的群友！")
-        return
-
-    if not attacker_pig:
-        await _finish_unrolled_attacker_attempt(cmd_roast_member, event, attacker_name, force_mode)
         return
 
     if target_id == attacker_id:
@@ -216,10 +241,16 @@ async def _(bot: Bot, event: GroupMessageEvent):
             max_charges=resolve_roast_charge_max(),
         )
     except CloudReservationUnsupportedError:
-        target_pig = get_pig_by_id(await store.get_daily_roll(target_id))
-        if not target_pig:
+        target_pig_id = await store.get_daily_roll(target_id)
+        if not target_pig_id:
             await cmd_roast_member.finish(
                 MessageSegment.reply(event.message_id) + f"【{target_name}】今天还没抽猪，没法下嘴！"
+            )
+            return
+        target_pig = get_pig_by_id(target_pig_id)
+        if not target_pig:
+            await cmd_roast_member.finish(
+                MessageSegment.reply(event.message_id) + "目标的小猪记录存在，但本机资源暂时缺失，请稍后再试。"
             )
             return
         if await store.is_protected(group_id, target_id):
@@ -348,13 +379,16 @@ async def _(bot: Bot, event: GroupMessageEvent):
     attacker_id = str(event.user_id)
     attacker_name = event.sender.card or event.sender.nickname
     group_id = str(event.group_id)
-    attacker_pig = get_pig_by_id(await store.get_daily_roll(attacker_id))
+    attacker_pig = await _load_attacker_pig_or_finish(
+        cmd_random_roast,
+        event,
+        attacker_name,
+        None,
+    )
 
-    if attacker_pig:
-        await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
-    else:
-        await _finish_unrolled_attacker_attempt(cmd_random_roast, event, attacker_name, None)
+    if not attacker_pig:
         return
+    await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
 
     bot_id = str(event.self_id)
     candidates = await get_group_roll_candidates(bot, event.group_id, {attacker_id, bot_id})

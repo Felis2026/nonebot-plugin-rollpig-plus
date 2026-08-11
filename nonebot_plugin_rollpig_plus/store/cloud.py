@@ -341,6 +341,8 @@ class CloudStore(RollpigStore):
                 "participant_ids": list(event.participant_ids),
                 "participant_names": list(event.participant_names),
                 "participant_count": event.participant_count,
+                "backfire_victim_id": event.backfire_victim_id,
+                "backfire_victim_name": event.backfire_victim_name,
             },
         )
 
@@ -458,19 +460,30 @@ class CloudStore(RollpigStore):
         )
 
     async def claim_roast_reservations(
-        self, delivery_bot_id: str, date_str: Optional[str] = None
+        self,
+        delivery_bot_id: str,
+        date_str: Optional[str] = None,
+        excluded_reservation_ids: Optional[set[str]] = None,
     ) -> RoastReservationClaimResult:
         payload = await self._reservation_request(
             "POST",
             "/v1/roast-reservations/claim",
-            json_body={"delivery_bot_id": delivery_bot_id, "date_str": date_str or rollpig_date_str()},
+            json_body={
+                "delivery_bot_id": delivery_bot_id,
+                "date_str": date_str or rollpig_date_str(),
+                "supports_prepared": True,
+                "excluded_reservation_ids": sorted(excluded_reservation_ids or ()),
+            },
         )
         return RoastReservationClaimResult(
             tuple(
                 reservation
                 for item in payload.get("items", [])
                 if (reservation := self._parse_reservation(item)) is not None
-            )
+            ),
+            # 旧 Cloud 没有 has_owned；若已经返回项目，至少保留本轮 Owner 状态，
+            # 避免安全降级期间过早停止后续恢复。
+            has_owned=bool(payload.get("has_owned", payload.get("items"))),
         )
 
     async def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
@@ -486,11 +499,28 @@ class CloudStore(RollpigStore):
     ) -> Optional[RoastReservation]:
         payload = await self._reservation_request(
             "POST",
-            "/v1/roast-reservations/outcome",
+            "/v1/roast-reservations/outcome/prepare",
             json_body={
                 "reservation_id": reservation.reservation_id,
                 "claim_token": reservation.claim_token,
                 "outcome_snapshot": outcome_snapshot,
+            },
+        )
+        updated = self._parse_reservation(payload.get("reservation"))
+        if updated and reservation.claim_token:
+            return RoastReservation(**{**updated.__dict__, "claim_token": reservation.claim_token})
+        return updated
+
+    async def mark_roast_reservation_sending(
+        self,
+        reservation: RoastReservation,
+    ) -> Optional[RoastReservation]:
+        payload = await self._reservation_request(
+            "POST",
+            "/v1/roast-reservations/sending",
+            json_body={
+                "reservation_id": reservation.reservation_id,
+                "claim_token": reservation.claim_token,
             },
         )
         updated = self._parse_reservation(payload.get("reservation"))

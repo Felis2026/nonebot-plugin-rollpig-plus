@@ -258,7 +258,7 @@ nonebot_plugin_rollpig_plus/
 ├─ roll_flow.py             # 抽猪业务规则
 ├─ roast_flow.py            # 烤群友业务规则
 ├─ reservation_flow.py      # 预约烤猪结算、结果快照与投递
-├─ reservation_delivery.py  # 跨 Bot owner 恢复与机会式检查
+├─ reservation_delivery.py  # 跨 Bot Owner 恢复、机会式检查与低频轮询
 ├─ runtime.py               # 宿主适配 / 群开关 / 运行时工具
 ├─ texts.py                 # 文案模板与特殊形态文本
 ├─ handlers/                # NoneBot 指令注册与参数解析

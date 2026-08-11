@@ -138,12 +138,17 @@ def guard_group_enabled(matcher):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             event = _find_event(args, kwargs)
-            if event is not None:
-                schedule_opportunistic_delivery(str(getattr(event, "self_id", "")))
             group_id = get_event_group_id(event)
             if group_id and not is_group_rollpig_enabled(group_id):
                 logger.debug(f"rollpig 群功能未启用，跳过处理: group={group_id}")
                 await matcher.finish()
+            if event is not None:
+                # 有效群指令可以提前解除该群的本地关群退避；私聊仍作为普通
+                # Owner 检查机会，但不会影响任何群级暂缓。
+                schedule_opportunistic_delivery(
+                    str(getattr(event, "self_id", "")),
+                    active_group_id=group_id,
+                )
 
             return await func(*args, **kwargs)
 

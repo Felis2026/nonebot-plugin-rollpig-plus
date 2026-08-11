@@ -721,48 +721,63 @@ class PigDataManager:
             )
 
     async def claim_roast_reservations(
-        self, delivery_bot_id: str, date_str: Optional[str] = None
+        self,
+        delivery_bot_id: str,
+        date_str: Optional[str] = None,
+        excluded_reservation_ids: Optional[set[str]] = None,
     ) -> RoastReservationClaimResult:
-        """领取当前 Bot 当天可投递的预约；只回收尚未开始发送的 processing。"""
+        """领取当前 Bot 当天可投递的预约；只回收仍可安全重试的发送前租约。"""
 
         target_date = date_str or rollpig_date_str()
+        excluded_ids = set(excluded_reservation_ids or ())
         claimed: list[RoastReservation] = []
         async with self._lock:
             now = datetime.datetime.now(datetime.timezone.utc)
-            for raw in self.data.setdefault("roast_reservations", {}).values():
+            reservations = self.data.setdefault("roast_reservations", {})
+            for reservation_id, raw in reservations.items():
                 if not isinstance(raw, dict):
                     continue
                 claimed_at = raw.get("claimed_at")
-                stale_processing = False
-                # sending 表示已经开始调用外部消息接口，结果可能已经到达群聊，绝不能
-                # 依赖超时自动重领。processing 只覆盖发送前阶段，可以安全使用租约恢复。
-                if raw.get("status") == "processing" and not isinstance(raw.get("outcome_snapshot"), dict):
+                stale_presend = False
+                # processing 负责生成结果，prepared 表示结果已固化但还在渲染消息；两者
+                # 都没有调用外部发送接口，可以依赖租约恢复。sending 绝不能自动重领。
+                if raw.get("status") in {"processing", "prepared"}:
                     if not isinstance(claimed_at, str):
-                        stale_processing = True
+                        stale_presend = True
                     else:
                         try:
                             claimed_time = datetime.datetime.fromisoformat(claimed_at)
                             if claimed_time.tzinfo is None:
                                 claimed_time = claimed_time.replace(tzinfo=datetime.timezone.utc)
-                            stale_processing = (now - claimed_time).total_seconds() >= ROAST_RESERVATION_CLAIM_TIMEOUT_SECONDS
+                            stale_presend = (
+                                now - claimed_time
+                            ).total_seconds() >= ROAST_RESERVATION_CLAIM_TIMEOUT_SECONDS
                         except ValueError:
-                            stale_processing = True
+                            stale_presend = True
                 if (
                     raw.get("date_str") == target_date
                     and raw.get("delivery_bot_id") == str(delivery_bot_id)
-                    and (raw.get("status") == "ready" or stale_processing)
+                    and reservation_id not in excluded_ids
+                    and (raw.get("status") == "ready" or stale_presend)
                 ):
-                    # 明确发送失败后会保留固定快照并退回 ready；再次领取时直接进入
-                    # sending，避免进程在重试窗口退出后把可能已发送的结果再次领取。
+                    # 固定快照仍需先渲染成最终消息，因此重领只能进入 prepared；真正
+                    # 调用 OneBot 发送前由独立事务推进到 sending。
                     raw["status"] = (
-                        "sending" if isinstance(raw.get("outcome_snapshot"), dict) else "processing"
+                        "prepared" if isinstance(raw.get("outcome_snapshot"), dict) else "processing"
                     )
                     raw["claim_token"] = uuid.uuid4().hex
                     raw["claimed_at"] = now.isoformat()
                     claimed.append(self._reservation_from_raw(raw))
             if claimed:
                 await self._atomic_save()
-        return RoastReservationClaimResult(tuple(claimed))
+            has_owned = any(
+                isinstance(raw, dict)
+                and raw.get("date_str") == target_date
+                and raw.get("delivery_bot_id") == str(delivery_bot_id)
+                and raw.get("status") in {"pending", "ready", "processing", "prepared"}
+                for raw in reservations.values()
+            )
+        return RoastReservationClaimResult(tuple(claimed), has_owned=has_owned)
 
     def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
         target_date = date_str or rollpig_date_str()
@@ -770,7 +785,7 @@ class PigDataManager:
             isinstance(raw, dict)
             and raw.get("date_str") == target_date
             and raw.get("delivery_bot_id") == str(delivery_bot_id)
-            and raw.get("status") in {"pending", "ready", "processing"}
+            and raw.get("status") in {"pending", "ready", "processing", "prepared"}
             for raw in self.data.setdefault("roast_reservations", {}).values()
         )
 
@@ -780,24 +795,49 @@ class PigDataManager:
         claim_token: str,
         outcome_snapshot: dict,
     ) -> Optional[RoastReservation]:
-        """原子固化结果并进入发送态；sending 不参与超时回收。"""
+        """原子固化结果并进入可恢复的 prepared；此时尚未调用外部发送接口。"""
 
         async with self._lock:
             raw = self._find_reservation_locked(reservation_id)
             if (
                 raw is None
-                or raw.get("status") not in {"processing", "sending", "completed"}
+                or raw.get("status") not in {"processing", "prepared", "sending", "completed"}
                 or raw.get("claim_token") != claim_token
             ):
                 return None
             changed = False
             if not isinstance(raw.get("outcome_snapshot"), dict):
+                if raw.get("status") != "processing":
+                    return None
                 raw["outcome_snapshot"] = dict(outcome_snapshot)
                 changed = True
+            elif raw.get("outcome_snapshot") != outcome_snapshot:
+                return None
             if raw.get("status") == "processing":
-                raw["status"] = "sending"
+                raw["status"] = "prepared"
                 changed = True
             if changed:
+                await self._atomic_save()
+            return self._reservation_from_raw(raw)
+
+    async def mark_roast_reservation_sending(
+        self,
+        reservation_id: str,
+        claim_token: str,
+    ) -> Optional[RoastReservation]:
+        """最终消息准备完成后进入不可自动重领的 sending。"""
+
+        async with self._lock:
+            raw = self._find_reservation_locked(reservation_id)
+            if (
+                raw is None
+                or raw.get("claim_token") != claim_token
+                or raw.get("status") not in {"prepared", "sending", "completed"}
+                or not isinstance(raw.get("outcome_snapshot"), dict)
+            ):
+                return None
+            if raw.get("status") == "prepared":
+                raw["status"] = "sending"
                 await self._atomic_save()
             return self._reservation_from_raw(raw)
 
@@ -818,13 +858,13 @@ class PigDataManager:
             return True
 
     async def release_roast_reservation(self, reservation_id: str, claim_token: str) -> bool:
-        """明确发送失败时放回 ready；已确定 outcome 会原样保留。"""
+        """发送开始前失败时放回 ready；已确定 outcome 会原样保留。"""
 
         async with self._lock:
             raw = self._find_reservation_locked(reservation_id)
             if (
                 raw is None
-                or raw.get("status") not in {"processing", "sending"}
+                or raw.get("status") not in {"processing", "prepared"}
                 or raw.get("claim_token") != claim_token
             ):
                 return False
@@ -1034,7 +1074,8 @@ class PigDataManager:
                                attacker_name: str = "", target_name: str = "",
                                food: str = "", group_id: str = "",
                                reservation_id: str = "", participant_ids: Optional[list[str]] = None,
-                               participant_names: Optional[list[str]] = None, participant_count: int = 0):
+                               participant_names: Optional[list[str]] = None, participant_count: int = 0,
+                               backfire_victim_id: str = "", backfire_victim_name: str = ""):
         """
         记录一次烤群友事件。
         event_type: "success" / "escape" / "backfire" / "bot_backfire" / "self_roast"
@@ -1055,6 +1096,8 @@ class PigDataManager:
                 "participant_ids": list(participant_ids or []),
                 "participant_names": list(participant_names or []),
                 "participant_count": max(0, int(participant_count or 0)),
+                "backfire_victim_id": str(backfire_victim_id or ""),
+                "backfire_victim_name": str(backfire_victim_name or ""),
             })
             await self._atomic_save()
 
