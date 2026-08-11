@@ -393,6 +393,29 @@ async def _(bot: Bot, event: GroupMessageEvent):
     )
 
 
+# ================================ 随机烤目标预检 ================================ #
+
+
+async def _load_random_roast_context_or_finish(matcher, bot: Bot, event: GroupMessageEvent, attacker_name: str):
+    """先确认群内存在可选目标，再检查攻击者并记录未抽猪违规。"""
+
+    attacker_id = str(event.user_id)
+    bot_id = str(event.self_id)
+    candidates = await get_group_roll_candidates(bot, event.group_id, {attacker_id, bot_id})
+    if not candidates:
+        await matcher.finish(
+            MessageSegment.reply(event.message_id) + "今天还没有别人抽猪，没有可以烤的目标！"
+        )
+        return None, []
+    attacker_pig = await _load_attacker_pig_or_finish(
+        matcher,
+        event,
+        attacker_name,
+        None,
+    )
+    return attacker_pig, candidates
+
+
 # 5.6 随机烤群友
 cmd_random_roast = on_command("随机烤群友", aliases={"随机烤猪", "抽个群友烤了"}, block=True)
 
@@ -403,25 +426,16 @@ async def _(bot: Bot, event: GroupMessageEvent):
     attacker_id = str(event.user_id)
     attacker_name = event.sender.card or event.sender.nickname
     group_id = str(event.group_id)
-    attacker_pig = await _load_attacker_pig_or_finish(
+    attacker_pig, candidates = await _load_random_roast_context_or_finish(
         cmd_random_roast,
+        bot,
         event,
         attacker_name,
-        None,
     )
 
     if not attacker_pig:
         return
     await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
-
-    bot_id = str(event.self_id)
-    candidates = await get_group_roll_candidates(bot, event.group_id, {attacker_id, bot_id})
-
-    if not candidates:
-        await cmd_random_roast.finish(
-            MessageSegment.reply(event.message_id) + "今天还没有别人抽猪，没有可以烤的目标！"
-        )
-        return
 
     target_id = random.choice(candidates)
 

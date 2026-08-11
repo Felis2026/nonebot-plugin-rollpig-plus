@@ -191,6 +191,35 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         matcher.finish.assert_awaited_once()
         self.assertIn("资源暂时缺失", str(matcher.finish.await_args.args[0]))
 
+    async def test_random_roast_checks_candidates_before_recording_unrolled_attempt(self):
+        matcher = SimpleNamespace(finish=AsyncMock())
+        bot = SimpleNamespace()
+        event = SimpleNamespace(user_id=123, self_id=456, group_id=789, message_id=101)
+        with (
+            patch.object(
+                roast_handler,
+                "get_group_roll_candidates",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                roast_handler,
+                "_load_attacker_pig_or_finish",
+                new_callable=AsyncMock,
+            ) as load_attacker,
+        ):
+            attacker_pig, candidates = await roast_handler._load_random_roast_context_or_finish(
+                matcher,
+                bot,
+                event,
+                "测试员",
+            )
+
+        self.assertIsNone(attacker_pig)
+        self.assertFalse(candidates)
+        matcher.finish.assert_awaited_once()
+        load_attacker.assert_not_awaited()
+
     async def test_daily_roll_activates_once_and_outcome_survives_release(self):
         created = await self._prepare()
         reservation_id = created.reservation.reservation_id
@@ -354,11 +383,26 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(saved.status, "prepared")
         self.assertTrue(released)
+        self.assertTrue(self.manager.has_owned_roast_reservations("bot-1", "2026-08-08"))
+
+        # 每日清理不能在短暂跨日重试窗口内删除已付费预约。
+        with patch.object(data_manager_module, "rollpig_today", return_value=datetime.date(2026, 8, 8)):
+            await self.manager.clean_old_history()
+
+        reclaimed = await self.manager.claim_roast_reservations("bot-1", "2026-08-08")
+        self.assertEqual(len(reclaimed.reservations), 1)
+        self.assertEqual(reclaimed.reservations[0].reservation_id, reservation.reservation_id)
+        self.assertEqual(reclaimed.reservations[0].status, "prepared")
 
     async def test_history_cleanup_prunes_all_expired_reservations(self):
         self.manager.data["roast_reservations"] = {
             "old-completed": {"date_str": "2026-08-07", "status": "completed"},
             "old-pending": {"date_str": "2026-08-07", "status": "pending"},
+            "old-released": {
+                "date_str": "2026-08-07",
+                "status": "ready",
+                "released_at": "2026-08-07T16:00:00+00:00",
+            },
             "current-completed": {"date_str": "2026-08-08", "status": "completed"},
             "current-pending": {"date_str": "2026-08-08", "status": "pending"},
         }

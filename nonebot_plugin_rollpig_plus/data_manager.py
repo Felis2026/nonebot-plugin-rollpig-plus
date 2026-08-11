@@ -29,6 +29,35 @@ ROAST_COOLDOWN_SECONDS = resolve_roast_cooldown_seconds()
 DEFAULT_ROAST_CHARGE_MAX = 2
 ROAST_RESERVATION_MAX_PARTICIPANTS = 12
 ROAST_RESERVATION_CLAIM_TIMEOUT_SECONDS = 5 * 60
+ROAST_RESERVATION_CROSS_DAY_GRACE_SECONDS = 10 * 60
+
+
+# ================================ 预约跨日重试 ================================ #
+
+
+def _matches_reservation_claim_date(raw: dict, target_date: str, now: datetime.datetime) -> bool:
+    """匹配当日预约，并为刚在零点后释放的昨日发送前任务保留短暂重试窗口。"""
+
+    reservation_date = str(raw.get("date_str") or "")
+    if reservation_date == target_date:
+        return True
+    if raw.get("status") not in {"ready", "processing", "prepared"}:
+        return False
+    released_at_raw = raw.get("released_at")
+    if not isinstance(released_at_raw, str):
+        return False
+    try:
+        reservation_day = datetime.date.fromisoformat(reservation_date)
+        target_day = datetime.date.fromisoformat(target_date)
+        released_at = datetime.datetime.fromisoformat(released_at_raw)
+    except ValueError:
+        return False
+    if reservation_day != target_day - datetime.timedelta(days=1):
+        return False
+    if released_at.tzinfo is None:
+        released_at = released_at.replace(tzinfo=datetime.timezone.utc)
+    elapsed = (now - released_at).total_seconds()
+    return 0 <= elapsed <= ROAST_RESERVATION_CROSS_DAY_GRACE_SECONDS
 
 
 def _normalize_charge_settings(cooldown_seconds: Optional[int], max_charges: Optional[int]) -> tuple[int, int]:
@@ -776,7 +805,7 @@ class PigDataManager:
                         except ValueError:
                             stale_presend = True
                 if (
-                    raw.get("date_str") == target_date
+                    _matches_reservation_claim_date(raw, target_date, now)
                     and raw.get("delivery_bot_id") == str(delivery_bot_id)
                     and reservation_id not in excluded_ids
                     and (raw.get("status") == "ready" or stale_presend)
@@ -793,7 +822,7 @@ class PigDataManager:
                 await self._atomic_save()
             has_owned = any(
                 isinstance(raw, dict)
-                and raw.get("date_str") == target_date
+                and _matches_reservation_claim_date(raw, target_date, now)
                 and raw.get("delivery_bot_id") == str(delivery_bot_id)
                 and raw.get("status") in {"pending", "ready", "processing", "prepared"}
                 for raw in reservations.values()
@@ -802,9 +831,10 @@ class PigDataManager:
 
     def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
         target_date = date_str or rollpig_date_str()
+        now = datetime.datetime.now(datetime.timezone.utc)
         return any(
             isinstance(raw, dict)
-            and raw.get("date_str") == target_date
+            and _matches_reservation_claim_date(raw, target_date, now)
             and raw.get("delivery_bot_id") == str(delivery_bot_id)
             and raw.get("status") in {"pending", "ready", "processing", "prepared"}
             for raw in self.data.setdefault("roast_reservations", {}).values()
@@ -905,6 +935,8 @@ class PigDataManager:
             ):
                 return False
             raw["status"] = "ready"
+            # 保留释放时间，使零点前领取、零点后失败的发送前任务仍能在短暂窗口内重领。
+            raw["released_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             raw.pop("claimed_at", None)
             raw.pop("claim_token", None)
             await self._atomic_save()
@@ -937,6 +969,7 @@ class PigDataManager:
         """清理超过 days_to_keep 天的历史记录（不影响图鉴数据）。"""
         async with self._lock:
             today = rollpig_today()
+            now = datetime.datetime.now(datetime.timezone.utc)
             history_dates_to_del = [
                 d for d in self.data["history"]
                 if _is_valid_date(d)  # 必须先过滤非法日期键，再做计算（防止 ValueError）
@@ -966,6 +999,7 @@ class PigDataManager:
                     or (
                         _is_valid_date(str(raw.get("date_str") or ""))
                         and datetime.date.fromisoformat(str(raw["date_str"])) < today
+                        and not _matches_reservation_claim_date(raw, today.isoformat(), now)
                     )
                 )
             ]
