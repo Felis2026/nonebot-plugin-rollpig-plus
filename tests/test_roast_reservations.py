@@ -28,6 +28,7 @@ from nonebot_plugin_rollpig_plus.handlers import roast as roast_handler
 from nonebot_plugin_rollpig_plus.roast_flow import RoastOutcome
 from nonebot_plugin_rollpig_plus.store.cloud import CloudReservationUnsupportedError, CloudStore, CloudStoreError
 from nonebot_plugin_rollpig_plus.store.models import (
+    RoastEvent,
     RoastReservation,
     RoastReservationParticipant,
     UnrolledRoastAttemptResult,
@@ -413,6 +414,96 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.target_pig_id, "target-pig")
         self.assertNotIn("a", self.manager.data["usage"])
 
+    async def test_complete_atomically_records_reservation_event_once(self):
+        created = await self._prepare()
+        await self.manager.get_or_create_today_pig("target", "target-pig", date_str="2026-08-07")
+        claimed = (await self.manager.claim_roast_reservations("bot-1", "2026-08-07")).reservations[0]
+        prepared = await self.manager.save_roast_reservation_outcome(
+            claimed.reservation_id,
+            claimed.claim_token,
+            {"event_type": "escape", "plain_text": "fixed"},
+        )
+        sending = await self.manager.mark_roast_reservation_sending(
+            prepared.reservation_id,
+            prepared.claim_token,
+        )
+        event = RoastEvent(
+            event_type="escape",
+            attacker_id="a",
+            target_id="target",
+            group_id="100",
+            reservation_id=created.reservation.reservation_id,
+        )
+
+        first = await self.manager.complete_roast_reservation(
+            sending.reservation_id,
+            sending.claim_token,
+            event,
+        )
+        repeated = await self.manager.complete_roast_reservation(
+            sending.reservation_id,
+            sending.claim_token,
+            event,
+        )
+
+        self.assertTrue(first and repeated)
+        self.assertEqual(
+            self.manager.data["roast_reservations"][sending.reservation_id]["status"],
+            "completed",
+        )
+        self.assertEqual(len(self.manager.data["daily_events"]["2026-08-07"]), 1)
+
+    async def test_complete_binds_event_identity_to_reservation_snapshot(self):
+        created = await self._prepare()
+        joined = await self._prepare("b")
+        await self.manager.get_or_create_today_pig("target", "target-pig", date_str="2026-08-07")
+        claimed = (await self.manager.claim_roast_reservations("bot-1", "2026-08-07")).reservations[0]
+        prepared = await self.manager.save_roast_reservation_outcome(
+            claimed.reservation_id,
+            claimed.claim_token,
+            {"event_type": "backfire", "plain_text": "fixed"},
+        )
+        sending = await self.manager.mark_roast_reservation_sending(
+            prepared.reservation_id,
+            prepared.claim_token,
+        )
+
+        completed = await self.manager.complete_roast_reservation(
+            sending.reservation_id,
+            sending.claim_token,
+            RoastEvent(
+                event_type="backfire",
+                attacker_id="wrong-owner",
+                target_id="wrong-target",
+                attacker_name="错误主厨",
+                target_name="错误目标",
+                group_id="999",
+                reservation_id="wrong-reservation",
+                participant_ids=("intruder",),
+                participant_names=("闯入者",),
+                participant_count=99,
+                backfire_victim_id="b",
+                backfire_victim_name="B",
+            ),
+        )
+
+        self.assertTrue(completed)
+        self.assertEqual(created.reservation.reservation_id, joined.reservation.reservation_id)
+        event = self.manager.data["daily_events"]["2026-08-07"][0]
+        self.assertEqual(
+            (
+                event["reservation_id"],
+                event["group_id"],
+                event["attacker"],
+                event["target"],
+            ),
+            (created.reservation.reservation_id, "100", "a", "target"),
+        )
+        self.assertEqual(event["participant_ids"], ["a", "b"])
+        self.assertEqual(event["participant_names"], ["A", "B"])
+        self.assertEqual(event["participant_count"], 2)
+        self.assertEqual(event["backfire_victim_id"], "b")
+
     async def test_protection_blocks_creation_but_not_joining_existing_reservation(self):
         self.manager.data["protected"] = {"2026-08-07": {"100": ["target"]}}
         blocked = await self._prepare()
@@ -489,6 +580,55 @@ class ReservationDeliveryRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await reservation_delivery.poll_owned_reservations()
 
         schedule.assert_called_once_with("bot-1")
+
+    async def test_unsupported_cloud_does_not_enter_permanent_retry_poll(self):
+        mocked_store = SimpleNamespace(
+            has_owned_roast_reservations=AsyncMock(
+                side_effect=CloudReservationUnsupportedError("unsupported")
+            )
+        )
+        with patch.object(reservation_delivery, "store", mocked_store):
+            await reservation_delivery.restore_owned_reservations("bot-1")
+
+        self.assertNotIn("bot-1", reservation_delivery._owned_bot_ids)
+        self.assertNotIn("bot-1", reservation_delivery._retryable_bot_ids)
+
+    async def test_unsupported_claim_clears_previous_retry_state(self):
+        reservation_delivery._retryable_bot_ids.add("bot-1")
+        deliver = AsyncMock(side_effect=CloudReservationUnsupportedError("unsupported"))
+        with (
+            patch.object(reservation_flow, "deliver_ready_reservations", deliver),
+            patch.object(reservation_delivery.time, "monotonic", return_value=1000.0),
+        ):
+            await reservation_delivery._deliver_if_due("bot-1")
+
+        self.assertNotIn("bot-1", reservation_delivery._owned_bot_ids)
+        self.assertNotIn("bot-1", reservation_delivery._retryable_bot_ids)
+
+    def test_existing_owner_response_restores_poll_registration(self):
+        reservation = RoastReservation(
+            reservation_id="reservation",
+            date_str="2026-08-07",
+            group_id="100",
+            target_id="target",
+            target_name="目标",
+            owner_id="owner",
+            owner_name="主厨",
+            owner_pig_id="owner-pig",
+            delivery_bot_id="bot-1",
+        )
+        preparation = SimpleNamespace(status="already_joined", reservation=reservation)
+        with patch.object(roast_handler, "register_owned_reservation") as register:
+            roast_handler._register_preparation_owner(preparation, "bot-1")
+            roast_handler._register_preparation_owner(preparation, "bot-2")
+
+        register.assert_called_once_with("bot-1")
+
+    def test_only_valid_member_target_reaches_unrolled_penalty(self):
+        self.assertEqual(roast_handler._classify_roast_target("a", "", "bot"), "missing")
+        self.assertEqual(roast_handler._classify_roast_target("a", "a", "bot"), "self")
+        self.assertEqual(roast_handler._classify_roast_target("a", "bot", "bot"), "bot")
+        self.assertEqual(roast_handler._classify_roast_target("a", "b", "bot"), "member")
 
 
 class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
@@ -739,7 +879,7 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         async def send_group_msg(**_kwargs):
             trace.append("send")
 
-        async def complete(_reservation):
+        async def complete(_reservation, _event):
             trace.append("complete")
             return True
 
@@ -944,31 +1084,40 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mocked_store.save_roast_reservation_outcome.await_count, 2)
         self.assertEqual(mocked_store.mark_roast_reservation_sending.await_count, 2)
         bot.send_group_msg.assert_awaited_once()
-        mocked_store.complete_roast_reservation.assert_awaited_once_with(sending)
+        expected_event = reservation_flow._build_reservation_event(sending, outcome)
+        mocked_store.complete_roast_reservation.assert_awaited_once_with(sending, expected_event)
         mocked_store.release_roast_reservation.assert_not_awaited()
 
     async def test_complete_after_send_retries_without_releasing(self):
         reservation = self._reservation()
+        event = reservation_flow._build_reservation_event(
+            reservation,
+            RoastOutcome(event_type="escape"),
+        )
         complete = AsyncMock(side_effect=[CloudStoreError("timeout"), True])
         with (
             patch.object(reservation_flow, "store") as mocked_store,
             patch.object(reservation_flow.asyncio, "sleep", new_callable=AsyncMock),
         ):
             mocked_store.complete_roast_reservation = complete
-            self.assertTrue(await reservation_flow._complete_after_send(reservation))
+            self.assertTrue(await reservation_flow._complete_after_send(reservation, event))
 
         self.assertEqual(complete.await_count, 2)
         mocked_store.release_roast_reservation.assert_not_called()
 
     async def test_complete_after_send_exhaustion_keeps_unconfirmed_state(self):
         reservation = self._reservation()
+        event = reservation_flow._build_reservation_event(
+            reservation,
+            RoastOutcome(event_type="escape"),
+        )
         complete = AsyncMock(side_effect=CloudStoreError("timeout"))
         with (
             patch.object(reservation_flow, "store") as mocked_store,
             patch.object(reservation_flow.asyncio, "sleep", new_callable=AsyncMock),
         ):
             mocked_store.complete_roast_reservation = complete
-            self.assertFalse(await reservation_flow._complete_after_send(reservation))
+            self.assertFalse(await reservation_flow._complete_after_send(reservation, event))
 
         self.assertEqual(complete.await_count, 3)
         mocked_store.release_roast_reservation.assert_not_called()
@@ -1018,6 +1167,67 @@ class CloudReservationCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(CloudReservationUnsupportedError):
             await store._reservation_request("POST", "/v1/roast-reservations/prepare")
+
+    async def test_complete_submits_event_atomically_to_new_cloud(self):
+        store = object.__new__(CloudStore)
+        store._reservation_request = AsyncMock(return_value={"ok": True, "event_recorded": True})
+        store._append_roast_event = AsyncMock()
+        reservation = RoastReservation(
+            reservation_id="reservation",
+            date_str="2026-08-07",
+            group_id="100",
+            target_id="target",
+            target_name="目标",
+            owner_id="owner",
+            owner_name="主厨",
+            owner_pig_id="owner-pig",
+            delivery_bot_id="bot-1",
+            claim_token="claim",
+        )
+        event = RoastEvent(
+            event_type="escape",
+            attacker_id="owner",
+            target_id="target",
+            group_id="100",
+            reservation_id="reservation",
+        )
+
+        completed = await store.complete_roast_reservation(reservation, event)
+
+        self.assertTrue(completed)
+        body = store._reservation_request.await_args.kwargs["json_body"]
+        self.assertEqual(body["event"]["date_str"], "2026-08-07")
+        self.assertEqual(body["event"]["reservation_id"], "reservation")
+        store._append_roast_event.assert_not_awaited()
+
+    async def test_complete_falls_back_to_event_endpoint_for_old_cloud(self):
+        store = object.__new__(CloudStore)
+        store._reservation_request = AsyncMock(return_value={"ok": True})
+        store._append_roast_event = AsyncMock()
+        reservation = RoastReservation(
+            reservation_id="reservation",
+            date_str="2026-08-07",
+            group_id="100",
+            target_id="target",
+            target_name="目标",
+            owner_id="owner",
+            owner_name="主厨",
+            owner_pig_id="owner-pig",
+            delivery_bot_id="bot-1",
+            claim_token="claim",
+        )
+        event = RoastEvent(
+            event_type="escape",
+            attacker_id="owner",
+            target_id="target",
+            group_id="100",
+            reservation_id="reservation",
+        )
+
+        completed = await store.complete_roast_reservation(reservation, event)
+
+        self.assertTrue(completed)
+        store._append_roast_event.assert_awaited_once_with(event, date_str="2026-08-07")
 
 
 if __name__ == "__main__":

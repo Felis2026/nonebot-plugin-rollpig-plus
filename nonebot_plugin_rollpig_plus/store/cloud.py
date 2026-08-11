@@ -99,6 +99,8 @@ class CloudStore(RollpigStore):
                 raise CloudReservationUnsupportedError(str(error)) from error
             raise
 
+    # ================================ 事件与预约完成 ================================ #
+
     @staticmethod
     def _parse_reservation(payload: dict | None) -> Optional[RoastReservation]:
         if not isinstance(payload, dict) or not payload.get("reservation_id"):
@@ -324,27 +326,36 @@ class CloudStore(RollpigStore):
         )
         return bool(payload.get("allowed"))
 
-    async def append_roast_event(self, event: RoastEvent) -> None:
+    @staticmethod
+    def _roast_event_payload(event: RoastEvent, *, date_str: str) -> dict:
+        """生成 Cloud 事件负载；预约完成可显式沿用预约所属业务日期。"""
+
+        return {
+            "event_type": event.event_type,
+            "attacker_id": event.attacker_id,
+            "target_id": event.target_id,
+            "attacker_name": event.attacker_name,
+            "target_name": event.target_name,
+            "food": event.food,
+            "group_id": event.group_id,
+            "date_str": date_str,
+            "reservation_id": event.reservation_id,
+            "participant_ids": list(event.participant_ids),
+            "participant_names": list(event.participant_names),
+            "participant_count": event.participant_count,
+            "backfire_victim_id": event.backfire_victim_id,
+            "backfire_victim_name": event.backfire_victim_name,
+        }
+
+    async def _append_roast_event(self, event: RoastEvent, *, date_str: str) -> None:
         await self._request(
             "POST",
             "/v1/events",
-            json_body={
-                "event_type": event.event_type,
-                "attacker_id": event.attacker_id,
-                "target_id": event.target_id,
-                "attacker_name": event.attacker_name,
-                "target_name": event.target_name,
-                "food": event.food,
-                "group_id": event.group_id,
-                "date_str": rollpig_date_str(),
-                "reservation_id": event.reservation_id,
-                "participant_ids": list(event.participant_ids),
-                "participant_names": list(event.participant_names),
-                "participant_count": event.participant_count,
-                "backfire_victim_id": event.backfire_victim_id,
-                "backfire_victim_name": event.backfire_victim_name,
-            },
+            json_body=self._roast_event_payload(event, date_str=date_str),
         )
+
+    async def append_roast_event(self, event: RoastEvent) -> None:
+        await self._append_roast_event(event, date_str=rollpig_date_str())
 
     async def list_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list[dict]:
         payload = await self._request(
@@ -528,13 +539,31 @@ class CloudStore(RollpigStore):
             return RoastReservation(**{**updated.__dict__, "claim_token": reservation.claim_token})
         return updated
 
-    async def complete_roast_reservation(self, reservation: RoastReservation) -> bool:
+    async def complete_roast_reservation(
+        self,
+        reservation: RoastReservation,
+        event: RoastEvent | None = None,
+    ) -> bool:
+        request_body = {
+            "reservation_id": reservation.reservation_id,
+            "claim_token": reservation.claim_token,
+        }
+        if event is not None:
+            request_body["event"] = self._roast_event_payload(
+                event,
+                date_str=reservation.date_str,
+            )
         payload = await self._reservation_request(
             "POST",
             "/v1/roast-reservations/complete",
-            json_body={"reservation_id": reservation.reservation_id, "claim_token": reservation.claim_token},
+            json_body=request_body,
         )
-        return bool(payload.get("ok"))
+        if not payload.get("ok"):
+            return False
+        if event is not None and not payload.get("event_recorded"):
+            # 旧 Cloud 会忽略新增 event 字段；保持兼容时退回旧的独立事件接口。
+            await self._append_roast_event(event, date_str=reservation.date_str)
+        return True
 
     async def release_roast_reservation(self, reservation: RoastReservation) -> bool:
         payload = await self._reservation_request(

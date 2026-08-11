@@ -221,14 +221,14 @@ async def _release_after_delivery_failure(reservation: RoastReservation, *, reas
     return False
 
 
-async def _complete_after_send(reservation: RoastReservation) -> bool:
-    """消息成功后短暂重试幂等 complete；此阶段绝不能再 release 已发送结果。"""
+async def _complete_after_send(reservation: RoastReservation, event: RoastEvent) -> bool:
+    """消息成功后幂等完成预约与事件；此阶段绝不能再 release 已发送结果。"""
 
     for attempt, delay in enumerate((0.0, 0.25, 0.75), start=1):
         if delay:
             await asyncio.sleep(delay)
         try:
-            if await store.complete_roast_reservation(reservation):
+            if await store.complete_roast_reservation(reservation, event):
                 return True
             logger.error(
                 "rollpig 预约消息已发送但完成状态被拒绝: "
@@ -451,7 +451,8 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> ReservationDeliver
 
         # 从这里开始 QQ 消息已经成功发送。即使 Cloud complete 暂时失败，也不能再把
         # sending 放回 ready，否则下一次机会式检查会把同一条结果重复发进群。
-        if not await _complete_after_send(reservation):
+        event = _build_reservation_event(reservation, outcome)
+        if not await _complete_after_send(reservation, event):
             logger.error(
                 "rollpig 预约消息已发送但完成状态仍未确认，保留 sending 等待人工核查: "
                 f"reservation={reservation.reservation_id} bot={delivery_bot_id}"
@@ -459,15 +460,6 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> ReservationDeliver
             continue
         completed += 1
         _clear_reservation_backoff(reservation.reservation_id)
-        try:
-            await store.append_roast_event(_build_reservation_event(reservation, outcome))
-        except Exception as event_error:
-            # 消息已经发出且预约已完成，事件只是日报扩展数据；不能因为统计写入失败
-            # 把预约重新放回 ready，否则下次会向群里重复投递同一场结果。
-            logger.warning(
-                "rollpig 预约事件记录失败，预约保持 completed: "
-                f"reservation={reservation.reservation_id} error={event_error}"
-            )
     return ReservationDeliveryResult(completed=completed, has_owned=claimed.has_owned)
 
 

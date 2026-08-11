@@ -169,7 +169,11 @@ class RollpigStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def complete_roast_reservation(self, reservation: RoastReservation) -> bool:
+    async def complete_roast_reservation(
+        self,
+        reservation: RoastReservation,
+        event: RoastEvent | None = None,
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod

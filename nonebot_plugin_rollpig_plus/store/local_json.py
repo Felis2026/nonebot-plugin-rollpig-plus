@@ -165,10 +165,15 @@ class LocalJsonStore(RollpigStore):
             reservation.claim_token,
         )
 
-    async def complete_roast_reservation(self, reservation: RoastReservation) -> bool:
+    async def complete_roast_reservation(
+        self,
+        reservation: RoastReservation,
+        event: RoastEvent | None = None,
+    ) -> bool:
         return await self.manager.complete_roast_reservation(
             reservation.reservation_id,
             reservation.claim_token,
+            event,
         )
 
     async def release_roast_reservation(self, reservation: RoastReservation) -> bool:

@@ -8,6 +8,7 @@ from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
 from .store import store
+from .store.cloud import CloudReservationUnsupportedError
 
 
 DELIVERY_CHECK_INTERVAL_SECONDS = 60.0
@@ -36,6 +37,11 @@ async def restore_owned_reservations(delivery_bot_id: str) -> None:
         else:
             _owned_bot_ids.discard(bot_id)
         _retryable_bot_ids.discard(bot_id)
+    except CloudReservationUnsupportedError:
+        # 旧 Cloud 没有预约接口；这是稳定的不支持状态，不能当瞬时故障永久轮询。
+        _owned_bot_ids.discard(bot_id)
+        _retryable_bot_ids.discard(bot_id)
+        logger.info(f"rollpig 当前 Cloud 不支持预约 owner 恢复，已停止轮询: bot={bot_id}")
     except Exception as error:
         _retryable_bot_ids.add(bot_id)
         logger.warning(f"rollpig 恢复预约 owner 状态失败: bot={bot_id} error={error}")
@@ -62,6 +68,10 @@ async def _deliver_if_due(bot_id: str) -> None:
             _owned_bot_ids.add(bot_id)
         else:
             _owned_bot_ids.discard(bot_id)
+    except CloudReservationUnsupportedError:
+        _owned_bot_ids.discard(bot_id)
+        _retryable_bot_ids.discard(bot_id)
+        logger.info(f"rollpig 当前 Cloud 不支持预约领取，已停止轮询: bot={bot_id}")
     except Exception as error:
         # 保留未知状态，让下一次指令或低频轮询继续尝试。
         _retryable_bot_ids.add(bot_id)

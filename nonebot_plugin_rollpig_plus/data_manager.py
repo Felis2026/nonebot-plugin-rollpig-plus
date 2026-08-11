@@ -17,6 +17,7 @@ from .store.models import (
     DailyRollResult,
     DrawState,
     PigProgress,
+    RoastEvent,
     RoastReservation,
     RoastReservationClaimResult,
     RoastReservationParticipant,
@@ -284,6 +285,26 @@ class PigDataManager:
             target_pig_id=str(raw.get("target_pig_id") or ""),
             outcome_snapshot=dict(snapshot) if isinstance(snapshot, dict) else None,
             claim_token=str(raw.get("claim_token") or ""),
+        )
+
+    def _bind_reservation_event_locked(self, raw: dict, event: RoastEvent) -> RoastEvent:
+        """用预约快照覆盖事件身份字段，避免客户端把日报写到错误群或角色名下。"""
+
+        reservation = self._reservation_from_raw(raw)
+        return RoastEvent(
+            event_type=event.event_type,
+            attacker_id=reservation.owner_id,
+            target_id=reservation.target_id,
+            attacker_name=reservation.owner_name,
+            target_name=reservation.target_name,
+            food=event.food,
+            group_id=reservation.group_id,
+            reservation_id=reservation.reservation_id,
+            participant_ids=tuple(item.user_id for item in reservation.participants),
+            participant_names=tuple(item.display_name for item in reservation.participants),
+            participant_count=reservation.participant_count,
+            backfire_victim_id=event.backfire_victim_id,
+            backfire_victim_name=event.backfire_victim_name,
         )
 
     def _find_reservation_locked(self, reservation_id: str) -> Optional[dict]:
@@ -841,7 +862,14 @@ class PigDataManager:
                 await self._atomic_save()
             return self._reservation_from_raw(raw)
 
-    async def complete_roast_reservation(self, reservation_id: str, claim_token: str) -> bool:
+    async def complete_roast_reservation(
+        self,
+        reservation_id: str,
+        claim_token: str,
+        event: Optional[RoastEvent] = None,
+    ) -> bool:
+        """原子完成预约，并把对应日报事件与状态写入同一次 JSON 保存。"""
+
         async with self._lock:
             raw = self._find_reservation_locked(reservation_id)
             if (
@@ -850,11 +878,19 @@ class PigDataManager:
                 or raw.get("status") not in {"sending", "completed"}
             ):
                 return False
-            if raw.get("status") == "completed":
-                return True
-            raw["status"] = "completed"
-            raw["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            await self._atomic_save()
+            changed = False
+            if raw.get("status") != "completed":
+                raw["status"] = "completed"
+                raw["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                changed = True
+            if event is not None:
+                bound_event = self._bind_reservation_event_locked(raw, event)
+                changed = self._append_roast_event_locked(
+                    bound_event,
+                    date_str=str(raw.get("date_str") or rollpig_date_str()),
+                ) or changed
+            if changed:
+                await self._atomic_save()
             return True
 
     async def release_roast_reservation(self, reservation_id: str, claim_token: str) -> bool:
@@ -1068,7 +1104,36 @@ class PigDataManager:
             self.data.setdefault("force_usage", {})[user_id] = today
             await self._atomic_save()
 
-    # ---- 烤群友事件记录（用于每日总结） ----
+    # ================================ 烤群友事件记录 ================================ #
+    # 预约完成和日报事件必须共用同一次原子保存；普通即时事件仍复用同一序列化入口。
+
+    def _append_roast_event_locked(self, event: RoastEvent, *, date_str: str) -> bool:
+        """在持有数据锁时追加事件；预约事件跨日期按 reservation_id 幂等。"""
+
+        events = self.data.setdefault("daily_events", {})
+        if event.reservation_id:
+            for existing_events in events.values():
+                if any(
+                    isinstance(item, dict) and item.get("reservation_id") == event.reservation_id
+                    for item in existing_events
+                ):
+                    return False
+        events.setdefault(date_str, []).append({
+            "type": event.event_type,
+            "attacker": event.attacker_id,
+            "target": event.target_id,
+            "attacker_name": event.attacker_name,
+            "target_name": event.target_name,
+            "food": event.food,
+            "group_id": event.group_id,
+            "reservation_id": event.reservation_id,
+            "participant_ids": list(event.participant_ids),
+            "participant_names": list(event.participant_names),
+            "participant_count": max(0, int(event.participant_count or 0)),
+            "backfire_victim_id": str(event.backfire_victim_id or ""),
+            "backfire_victim_name": str(event.backfire_victim_name or ""),
+        })
+        return True
 
     async def log_roast_event(self, event_type: str, attacker_id: str, target_id: str,
                                attacker_name: str = "", target_name: str = "",
@@ -1081,25 +1146,26 @@ class PigDataManager:
         event_type: "success" / "escape" / "backfire" / "bot_backfire" / "self_roast"
         """
         async with self._lock:
-            today = rollpig_date_str()
-            events = self.data.setdefault("daily_events", {})
-            day_events = events.setdefault(today, [])
-            day_events.append({
-                "type": event_type,
-                "attacker": attacker_id,
-                "target": target_id,
-                "attacker_name": attacker_name,
-                "target_name": target_name,
-                "food": food,
-                "group_id": group_id,
-                "reservation_id": reservation_id,
-                "participant_ids": list(participant_ids or []),
-                "participant_names": list(participant_names or []),
-                "participant_count": max(0, int(participant_count or 0)),
-                "backfire_victim_id": str(backfire_victim_id or ""),
-                "backfire_victim_name": str(backfire_victim_name or ""),
-            })
-            await self._atomic_save()
+            changed = self._append_roast_event_locked(
+                RoastEvent(
+                    event_type=event_type,
+                    attacker_id=attacker_id,
+                    target_id=target_id,
+                    attacker_name=attacker_name,
+                    target_name=target_name,
+                    food=food,
+                    group_id=group_id,
+                    reservation_id=reservation_id,
+                    participant_ids=tuple(participant_ids or ()),
+                    participant_names=tuple(participant_names or ()),
+                    participant_count=participant_count,
+                    backfire_victim_id=backfire_victim_id,
+                    backfire_victim_name=backfire_victim_name,
+                ),
+                date_str=rollpig_date_str(),
+            )
+            if changed:
+                await self._atomic_save()
 
     def get_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list:
         """获取指定日期（默认今天）的所有烤群友事件。"""
