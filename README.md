@@ -14,7 +14,7 @@
   </p>
 </div>
 
-> 本项目最初基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig) 修改，当前作为拓展分支继续开发。
+> 本项目基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig)，是 RollPig 面向进阶玩法的功能扩展版本。
 
 ## 🧭 和原项目怎么选
 
@@ -23,7 +23,7 @@
 | 原作插件 | 想要更轻量、更接近最初玩法，只需要本地“今日小猪 / 随机小猪 / 找猪”等基础功能。 |
 | rollpig-plus | 想要图片版小猪图鉴、EX Lv. 成长、多 Bot 状态同步、AI 烤猪、烤群友与日报等增强功能。 |
 
-rollpig-plus 的目标是作为独立维护的增强分支继续演进：保留原作的核心趣味，拓展部分玩法，同时把资源、图鉴、云端同步和稳定性做得更工程化。原rollpig本体依然能与本项目一样获取到每月更新（也许）的最新小猪。
+RollPig Plus 保留原作的核心趣味，并持续扩展烤猪、图鉴、成长、云端同步与稳定性能力。原版 RollPig 可独立使用公有资源包，依然能与本项目一样获取到每月更新（也许）的最新小猪。
 
 迁移时建议把原作插件替换为 rollpig-plus，不要在同一个 Bot 进程里同时加载两者；两者的基础指令和 `rollpig_*` 配置键高度重合，同时加载会造成命令响应和配置读取混杂。
 
@@ -68,11 +68,16 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `昨日小猪` | 查看昨天抽到的小猪。 |
 | `今日烤猪` | 把今天的小猪做成美食；AI 烤猪需额外开启并配置 Key。 |
 | `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪。 |
+| `随机烤猪` | 从当前群已有记录中随机选择目标进行烤群友。 |
+| `加急生火 @目标` | 使用加急模式烤群友；仍受特殊形态与权限规则限制。 |
 | `我的猪圈` | 查看已解锁数量、收藏率、最高 EX Lv.、本命猪等摘要。 |
 | `小猪图鉴 [页码]` | 生成图片版小猪图鉴。 |
 | `本周小猪` | 生成本周猪猪总结长图。 |
 | `小猪日报 状态` | 查看本群每日总结推送状态。 |
 | `小猪日报 开启` / `小猪日报 关闭` | 群主/管理员控制本群每日总结推送；SUPERUSER可追加群号控制其他群。 |
+| `同步小猪资源` | SUPERUSER 手动同步公有资源、官方 GIF 和已配置 Overlay。 |
+
+预约烤猪不是单独指令：使用 `烤群友 @目标` 时，如果目标当天尚未抽猪，系统会自动建立预约，目标完成抽猪后再结算。
 
 ### 抽取与成长
 
@@ -103,7 +108,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 - 本地存储启用，数据写入插件自己的 localstore 数据目录。
 - AI 烤猪关闭；未配置 Key 时自动使用本地文案模板。
 - 公有小猪资源同步开启；同步失败会回退旧缓存或内置资源。
-- 官方 GIF 动态小猪 overlay 会随云端资源同步固定启用；PJsk、用户自建包等其它私有 overlay 需要手动追加。
+- 官方 GIF 动态小猪 overlay 会随云端资源同步固定启用；PJSK、用户自建包等其它私有 overlay 需要手动追加。
 - 图片版小猪图鉴开启，默认 PNG 输出。
 - 每日总结定时任务默认关闭，可通过群内命令或配置主动开启。
 
@@ -118,7 +123,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 - JSON 配置文件：放非敏感、稳定参数。默认读取 Bot 运行目录下的 `rollpig_config.json`，也会读取 `config/rollpig.json`。
 - `.env`：放 Token / Key / 私密覆盖项；如需自定义 JSON 路径，只在 `.env` 写 `ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json`。
 
-下面用 `jsonc` 展示注释方便阅读；多数示例值按插件默认值填写。官方 GIF overlay 不需要配置，PJsk 与本地包示例用于展示如何追加更多私有资源。实际 `rollpig_config.json` 必须是合法 JSON，可直接参考仓库内的 `rollpig_config.example.json`。
+下面用 `jsonc` 展示注释方便阅读；多数示例值按插件默认值填写。官方 GIF overlay 不需要配置，PJSK 与本地包示例用于展示如何追加更多私有资源。实际 `rollpig_config.json` 必须是合法 JSON，可直接参考仓库内的 `rollpig_config.example.json`。
 
 ```jsonc
 {
@@ -148,7 +153,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
     "rollpig_roast_library_manifest_url": "https://pig.felislab.cc/resources/rollpig-roasts/manifest.json", // 共享烤猪文案；"" / null 可关闭
     "rollpig_private_resource_manifests": [       // 推荐写法：多个私有 overlay 按顺序叠加
       {
-        "name": "pjsk",                         // 可选：追加 PJsk 私有包，不需要可删除这一项
+        "name": "pjsk",                         // 可选：追加 PJSK 私有包，不需要可删除这一项
         "manifest_url": "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
       },
       {
