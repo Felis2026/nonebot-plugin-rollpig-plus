@@ -15,6 +15,7 @@ from ..roast_flow import (
     pick_food_pig,
     pick_member_target_block_text,
     pick_random_target_block_text,
+    pick_reservation_prepare_text,
     pick_self_roast_block_text,
 )
 from ..roll_flow import (
@@ -23,7 +24,10 @@ from ..roll_flow import (
 from ..runtime import resolve_roast_charge_max, resolve_roast_cooldown_seconds
 from ..resource_manager import get_pig_by_id
 from ..helpers import finish_roast_outcome, send_rendered_pig
+from ..reservation_delivery import register_owned_reservation
+from ..reservation_flow import deliver_newly_ready_reservations
 from ..store import store
+from ..store.cloud import CloudReservationUnsupportedError
 from ..store.models import RoastEvent
 from ..texts import (
     AUTO_ROLL_ROAST_TEXTS,
@@ -31,6 +35,9 @@ from ..texts import (
     PROTECTION_BREAK_TEXTS,
     RANDOM_ROAST_INTRO_TEXTS,
     ROAST_BOT_TEXTS,
+    UNROLLED_FORCE_ROAST_BACKFIRE_TEXTS,
+    UNROLLED_ROAST_BACKFIRE_TEXTS,
+    UNROLLED_ROAST_WARNING_TEXTS,
 )
 from ..helpers import guard_group_enabled, guard_store_errors
 from ..helpers import (
@@ -40,6 +47,75 @@ from ..helpers import (
     get_group_roll_candidates,
     resolve_roast_target,
 )
+
+
+# ================================ 未抽猪攻击者限制 ================================ #
+
+
+def _register_preparation_owner(preparation, current_bot_id: str) -> None:
+    """只要返回的已有预约仍归当前 Bot 负责，就恢复本地 owner 轮询状态。"""
+
+    reservation = preparation.reservation
+    if reservation and reservation.delivery_bot_id == str(current_bot_id):
+        register_owned_reservation(str(current_bot_id))
+
+
+def _classify_roast_target(attacker_id: str, target_id: str, bot_id: str) -> str:
+    """先区分用法错误、自身与 Bot；只有 member 才进入未抽猪处罚流程。"""
+
+    if not target_id:
+        return "missing"
+    if target_id == attacker_id:
+        return "self"
+    if target_id == bot_id:
+        return "bot"
+    return "member"
+
+
+async def _finish_unrolled_attacker_attempt(matcher, event: GroupMessageEvent, attacker_name: str, force_mode):
+    """记录未抽猪先烤次数；首次警告，第二次起临时熟食反噬且不创建今日猪。"""
+
+    try:
+        attempt = await store.record_unrolled_roast_attempt(str(event.user_id))
+    except CloudReservationUnsupportedError:
+        # 新插件连接旧 Cloud 时没有持久化计数能力，保守降级为警告，不允许进入正常烧烤。
+        await matcher.finish(MessageSegment.reply(event.message_id) + random.choice(UNROLLED_ROAST_WARNING_TEXTS))
+        return
+
+    if attempt.count <= 1:
+        await matcher.finish(MessageSegment.reply(event.message_id) + random.choice(UNROLLED_ROAST_WARNING_TEXTS))
+        return
+
+    try:
+        food_pig = pick_food_pig().copy()
+    except RoastFoodMissingError as error:
+        await matcher.finish(str(error))
+        return
+    pool = UNROLLED_FORCE_ROAST_BACKFIRE_TEXTS if force_mode in {"normal", "super"} else UNROLLED_ROAST_BACKFIRE_TEXTS
+    food_pig["analysis"] = random.choice(pool).format(attacker=attacker_name, food=food_pig.get("name", "熟食"))
+    await send_rendered_pig(matcher, event, food_pig, cache_final_card=False)
+
+
+async def _load_attacker_pig_or_finish(
+    matcher,
+    event: GroupMessageEvent,
+    attacker_name: str,
+    force_mode,
+):
+    """区分真正未抽猪与本机资源落后，避免把资源故障计成违规。"""
+
+    attacker_pig_id = await store.get_daily_roll(str(event.user_id))
+    if not attacker_pig_id:
+        await _finish_unrolled_attacker_attempt(matcher, event, attacker_name, force_mode)
+        return None
+    attacker_pig = get_pig_by_id(attacker_pig_id)
+    if not attacker_pig:
+        await matcher.finish(
+            MessageSegment.reply(event.message_id)
+            + "你的今日小猪记录存在，但本机资源暂时缺失，请稍后再试。"
+        )
+        return None
+    return attacker_pig
 
 
 # 5. 今日烤猪
@@ -64,6 +140,11 @@ async def _(event: Event):
 
     block_text = pick_self_roast_block_text(original_pig)
     if block_text:
+        if resolution.was_auto_created:
+            await cmd_roast.send(MessageSegment.reply(event.message_id) + block_text)
+            await deliver_newly_ready_reservations(str(event.self_id))
+            await cmd_roast.finish()
+            return
         await cmd_roast.finish(MessageSegment.reply(event.message_id) + block_text)
         return
 
@@ -91,6 +172,11 @@ async def _(event: Event):
         roasted_pig_data,
         extra_text=auto_roll_hint,
         cache_final_card=False,
+        after_send=(
+            (lambda: deliver_newly_ready_reservations(str(event.self_id)))
+            if resolution.was_auto_created
+            else None
+        ),
     )
 
 
@@ -107,11 +193,6 @@ async def _(bot: Bot, event: GroupMessageEvent):
     attacker_name = event.sender.card or event.sender.nickname
     group_id = str(event.group_id)
     force_mode = detect_force_roast_mode(event.get_plaintext(), attacker_id)
-    attacker_pig = get_pig_by_id(await store.get_daily_roll(attacker_id))
-
-    if attacker_pig:
-        await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
-
     if force_mode == "super_denied":
         await cmd_roast_member.finish(
             MessageSegment.reply(event.message_id) + "口令【强行点火】仅 superuser 可用。"
@@ -121,17 +202,18 @@ async def _(bot: Bot, event: GroupMessageEvent):
     target = await resolve_roast_target(bot, event)
     target_id = target.target_id
     target_name = target.target_name
+    target_kind = _classify_roast_target(attacker_id, target_id, str(event.self_id))
 
-    if not target_id:
+    if target_kind == "missing":
         await cmd_roast_member.finish("请 At 或回复你要烤的群友！")
         return
 
-    if target_id == attacker_id:
+    if target_kind == "self":
         await cmd_roast_member.finish("对自己好一点，别自焚。请发送「今日烤猪」。")
         return
 
     # 检测目标是否是 Bot 自身 → 特殊反噬，不消耗 CD，纯文本回复
-    if target_id == str(event.self_id):
+    if target_kind == "bot":
         try:
             food_name = pick_food_pig()["name"]
         except RoastFoodMissingError:
@@ -151,25 +233,105 @@ async def _(bot: Bot, event: GroupMessageEvent):
         )
         await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + bot_text)
         return
-    # 读取目标形态（后门模式也不绕过此检查）
-    target_pig = get_pig_by_id(await store.get_daily_roll(target_id))
-    if not target_pig:
-        await cmd_roast_member.finish(
-            MessageSegment.reply(event.message_id) + f"【{target_name}】今天还没抽猪，没法下嘴！"
+
+    # 只有解析出真实可烤的群友后才记录“未抽猪先烤”。用法错误、自烤和 Bot
+    # 特殊互动都不应消耗违规次数，更不能触发第二次反噬。
+    attacker_pig = await _load_attacker_pig_or_finish(
+        cmd_roast_member,
+        event,
+        attacker_name,
+        force_mode,
+    )
+    if not attacker_pig:
+        return
+    await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
+
+    # ================================ 目标状态与预约准备 ================================ #
+    # Cloud 由 prepare 在同一事务中消费资源并创建预约；目标已抽猪时只返回 pig_id，
+    # 后续继续沿用现有即时烧烤的扣次与判定逻辑。
+    preparation = None
+    try:
+        preparation = await store.prepare_roast_reservation(
+            attacker_id=attacker_id,
+            attacker_name=attacker_name,
+            attacker_pig_id=attacker_pig["id"],
+            target_id=target_id,
+            target_name=target_name,
+            group_id=group_id,
+            delivery_bot_id=str(event.self_id),
+            force_mode=force_mode,
+            cooldown_seconds=resolve_roast_cooldown_seconds(),
+            max_charges=resolve_roast_charge_max(),
         )
+    except CloudReservationUnsupportedError:
+        target_pig_id = await store.get_daily_roll(target_id)
+        if not target_pig_id:
+            await cmd_roast_member.finish(
+                MessageSegment.reply(event.message_id) + f"【{target_name}】今天还没抽猪，没法下嘴！"
+            )
+            return
+        target_pig = get_pig_by_id(target_pig_id)
+        if not target_pig:
+            await cmd_roast_member.finish(
+                MessageSegment.reply(event.message_id) + "目标的小猪记录存在，但本机资源暂时缺失，请稍后再试。"
+            )
+            return
+        if await store.is_protected(group_id, target_id):
+            if force_mode in {"normal", "super"}:
+                break_text = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name)
+                await cmd_roast_member.send(MessageSegment.reply(event.message_id) + break_text)
+            else:
+                await cmd_roast_member.finish(
+                    MessageSegment.reply(event.message_id)
+                    + random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+                )
+                return
+    else:
+        # Cloud 已创建预约但响应丢失时，重试会返回 already_joined。只按
+        # reservation_created 注册会漏掉这个当前 Bot 仍然负责的预约。
+        _register_preparation_owner(preparation, str(event.self_id))
+        if preparation.status != "target_ready":
+            if preparation.status == "protected":
+                await cmd_roast_member.finish(
+                    MessageSegment.reply(event.message_id)
+                    + random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+                )
+                return
+            if preparation.status == "cooldown_denied" and preparation.cooldown:
+                await cmd_roast_member.finish(
+                    MessageSegment.reply(event.message_id)
+                    + format_cooldown_message(preparation.cooldown.remaining_seconds)
+                )
+                return
+            if preparation.status == "force_denied":
+                await cmd_roast_member.finish(
+                    MessageSegment.reply(event.message_id) + pick_force_limit_text(attacker_name, target_name)
+                )
+                return
+            prefix = ""
+            if preparation.protection_broken:
+                prefix = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name) + "\n"
+            await cmd_roast_member.finish(
+                MessageSegment.reply(event.message_id)
+                + prefix
+                + pick_reservation_prepare_text(
+                    preparation,
+                    attacker_name=attacker_name,
+                    target_name=target_name,
+                )
+            )
+            return
+        target_pig = get_pig_by_id(preparation.target_pig_id)
+
+    if preparation is not None and preparation.protection_broken:
+        break_text = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name)
+        logger.info(f"[烤群友] 保护被突破 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})")
+        await cmd_roast_member.send(MessageSegment.reply(event.message_id) + break_text)
+
+    if not target_pig:
+        await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + "目标的小猪资源缺失，暂时无法开火。")
         return
     await store.mark_group_roll_seen(target_id, target_pig["id"], group_id)
-
-    # 保护检查：被烤最多的用户次日受保护（后门可突破）
-    if await store.is_protected(group_id, target_id):
-        if force_mode in {"normal", "super"}:
-            break_text = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name)
-            logger.info(f"[烤群友] 保护被突破 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})")
-            await cmd_roast_member.send(MessageSegment.reply(event.message_id) + break_text)
-        else:
-            prot_text = random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
-            await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + prot_text)
-            return
 
     block_text = pick_member_target_block_text(target_name, target_pig)
     if block_text:
@@ -231,6 +393,29 @@ async def _(bot: Bot, event: GroupMessageEvent):
     )
 
 
+# ================================ 随机烤目标预检 ================================ #
+
+
+async def _load_random_roast_context_or_finish(matcher, bot: Bot, event: GroupMessageEvent, attacker_name: str):
+    """先确认群内存在可选目标，再检查攻击者并记录未抽猪违规。"""
+
+    attacker_id = str(event.user_id)
+    bot_id = str(event.self_id)
+    candidates = await get_group_roll_candidates(bot, event.group_id, {attacker_id, bot_id})
+    if not candidates:
+        await matcher.finish(
+            MessageSegment.reply(event.message_id) + "今天还没有别人抽猪，没有可以烤的目标！"
+        )
+        return None, []
+    attacker_pig = await _load_attacker_pig_or_finish(
+        matcher,
+        event,
+        attacker_name,
+        None,
+    )
+    return attacker_pig, candidates
+
+
 # 5.6 随机烤群友
 cmd_random_roast = on_command("随机烤群友", aliases={"随机烤猪", "抽个群友烤了"}, block=True)
 
@@ -241,19 +426,16 @@ async def _(bot: Bot, event: GroupMessageEvent):
     attacker_id = str(event.user_id)
     attacker_name = event.sender.card or event.sender.nickname
     group_id = str(event.group_id)
-    attacker_pig = get_pig_by_id(await store.get_daily_roll(attacker_id))
+    attacker_pig, candidates = await _load_random_roast_context_or_finish(
+        cmd_random_roast,
+        bot,
+        event,
+        attacker_name,
+    )
 
-    if attacker_pig:
-        await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
-
-    bot_id = str(event.self_id)
-    candidates = await get_group_roll_candidates(bot, event.group_id, {attacker_id, bot_id})
-
-    if not candidates:
-        await cmd_random_roast.finish(
-            MessageSegment.reply(event.message_id) + "今天还没有别人抽猪，没有可以烤的目标！"
-        )
+    if not attacker_pig:
         return
+    await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
 
     target_id = random.choice(candidates)
 

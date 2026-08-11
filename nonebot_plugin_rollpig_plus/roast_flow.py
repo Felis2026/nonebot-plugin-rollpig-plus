@@ -32,7 +32,12 @@ from .texts import (
     TODAY_ROAST_FOOD_BLOCK_TEXTS,
     TODAY_ROAST_HUMAN_BLOCK_TEXTS,
     TODAY_ROAST_SOLD_BLOCK_TEXTS,
+    ROAST_RESERVATION_CREATED_TEXTS,
+    ROAST_RESERVATION_DUPLICATE_TEXTS,
+    ROAST_RESERVATION_FULL_TEXTS,
+    ROAST_RESERVATION_JOINED_TEXTS,
 )
+from .store.models import RoastReservationPrepareResult
 
 
 @dataclass(frozen=True)
@@ -44,10 +49,42 @@ class RoastOutcome:
     plain_text: str = ""
     extra_text: str = ""
     food_name: str = ""
+    backfire_victim_id: str = ""
+    backfire_victim_name: str = ""
 
 
 class RoastFoodMissingError(RuntimeError):
     """熟食资源缺失时抛出；由命令层转换成用户可读提示。"""
+
+
+def pick_reservation_prepare_text(
+    result: RoastReservationPrepareResult,
+    *,
+    attacker_name: str,
+    target_name: str,
+) -> str:
+    """把预约准备状态转换为用户可见文案，handler 不直接拼业务文本。"""
+
+    reservation = result.reservation
+    if result.status == "reservation_created":
+        return random.choice(ROAST_RESERVATION_CREATED_TEXTS).format(owner=attacker_name, target=target_name)
+    if result.status == "reservation_joined":
+        return random.choice(ROAST_RESERVATION_JOINED_TEXTS).format(
+            participant=attacker_name,
+            target=target_name,
+            count=reservation.participant_count if reservation else 0,
+        )
+    if result.status == "already_joined":
+        return random.choice(ROAST_RESERVATION_DUPLICATE_TEXTS).format(
+            target=target_name,
+            count=reservation.participant_count if reservation else 0,
+        )
+    if result.status == "reservation_full":
+        return random.choice(ROAST_RESERVATION_FULL_TEXTS).format(
+            target=target_name,
+            count=reservation.participant_count if reservation else 0,
+        )
+    return "预约烤猪暂时没有响应，请稍后再试。"
 
 
 # ================================ 烤猪形态规则 ================================ #

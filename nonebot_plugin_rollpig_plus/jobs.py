@@ -40,6 +40,9 @@ async def shutdown_rollpig_runtime() -> None:
         with suppress(asyncio.CancelledError):
             await task
     background_resource_sync_tasks.clear()
+    from .reservation_delivery import shutdown_reservation_delivery_tasks
+
+    await shutdown_reservation_delivery_tasks()
     await pighub_service.shutdown()
     await shutdown_card_renderer()
     await shutdown_catalog_renderer()
@@ -63,6 +66,13 @@ async def run_background_resource_sync(source: str) -> None:
     try:
         message = await sync_rollpig_resources(force=False)
         logger.info(f"[小猪资源同步] {source}: {message}")
+        # 同步成功（包括确认资源已经最新）后，提前解除资源缺失暂缓并立即检查 Owner。
+        # 延迟导入避免 jobs 与预约投递模块在插件初始化期间形成环。
+        from .reservation_delivery import schedule_all_owned_deliveries
+        from .reservation_flow import clear_resource_reservation_backoffs
+
+        if clear_resource_reservation_backoffs():
+            schedule_all_owned_deliveries(force=True)
     except Exception as error:
         logger.warning(f"[小猪资源同步] {source} 失败，继续使用当前资源: {error}")
 

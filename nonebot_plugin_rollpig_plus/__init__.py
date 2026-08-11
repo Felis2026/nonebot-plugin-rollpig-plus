@@ -10,6 +10,7 @@ require("nonebot_plugin_apscheduler")
 # 本地模块（在 require() 之后 import）
 # 导入 jobs 即注册定时任务与生命周期回调；这些 import 不能移动到 require() 之前。
 from . import jobs as _rollpig_jobs  # noqa: E402, F401
+from . import reservation_delivery as _reservation_delivery  # noqa: E402, F401
 from .config import Config  # noqa: E402
 
 __plugin_meta__ = PluginMetadata(
@@ -25,10 +26,8 @@ __plugin_meta__ = PluginMetadata(
     明日小猪 - 预测明天的猪猪运势
     昨日小猪 - 查看昨天抽到了什么
     今日烤猪 - 把今天的猪做成美食
-    烤群友 - 把群友做成烤猪（目标需已抽猪）
-    烤群友 + 加急生火 - 每日一次强制成功（目标仍需已抽猪）
-    加急生火 + @目标 / 回复目标 - 直达触发一次普通后门烧烤
-    烤群友 + 强行点火 - superuser 专属，无限强制成功
+    烤群友 - 用魔法烤箱把群友做成美味的烤猪
+    加急生火 - 每日一次的强制成功烤猪
     
     📊 统计指令：
     我的猪圈 - 查看解锁进度

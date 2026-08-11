@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from nonebot import get_driver
 from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, MessageSegment
@@ -13,6 +13,7 @@ from nonebot.log import logger as nonebot_logger
 from .card_renderer import render_pig_card_image
 from .resource_manager import pig_resource_manager
 from .runtime import is_group_rollpig_enabled, rollpig_date_str
+from .reservation_delivery import schedule_opportunistic_delivery
 from .store import store
 from .store.cloud import CloudStoreError
 from .store.models import RoastEvent
@@ -141,6 +142,13 @@ def guard_group_enabled(matcher):
             if group_id and not is_group_rollpig_enabled(group_id):
                 logger.debug(f"rollpig 群功能未启用，跳过处理: group={group_id}")
                 await matcher.finish()
+            if event is not None:
+                # 有效群指令可以提前解除该群的本地关群退避；私聊仍作为普通
+                # Owner 检查机会，但不会影响任何群级暂缓。
+                schedule_opportunistic_delivery(
+                    str(getattr(event, "self_id", "")),
+                    active_group_id=group_id,
+                )
 
             return await func(*args, **kwargs)
 
@@ -193,6 +201,7 @@ async def send_rendered_pig(
     *,
     cache_final_card: bool = True,
     ex_level: int = 0,
+    after_send: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """渲染并发送卡片；固定卡缓存成品，烤猪动态文案只复用 GIF 源帧。"""
 
@@ -276,7 +285,15 @@ async def send_rendered_pig(
         f"requested_ex={appearance.requested_level} applied_ex={appearance.applied_level} "
         f"variant_fallback={variant_fallback}"
     )
-    await matcher.finish(msg)
+    if after_send is None:
+        await matcher.finish(msg)
+        return
+
+    # 首次抽猪需要严格保证“先展示自己的今日卡，再发送预约结算”。使用 send 而非
+    # finish 后执行回调，避免 matcher 结束异常让预约永远没有机会投递。
+    await matcher.send(msg)
+    await after_send()
+    await matcher.finish()
 
 
 async def finish_roast_outcome(

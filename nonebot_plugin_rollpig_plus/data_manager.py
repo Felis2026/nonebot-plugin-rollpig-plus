@@ -3,6 +3,7 @@ import asyncio
 import datetime
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -10,10 +11,53 @@ from nonebot.log import logger
 import nonebot_plugin_localstore as store
 
 from .runtime import rollpig_date_str, rollpig_today, resolve_roast_cooldown_seconds
-from .store.models import CatalogSnapshot, CooldownConsumeResult, DailyRollResult, DrawState, PigProgress
+from .store.models import (
+    CatalogSnapshot,
+    CooldownConsumeResult,
+    DailyRollResult,
+    DrawState,
+    PigProgress,
+    RoastEvent,
+    RoastReservation,
+    RoastReservationClaimResult,
+    RoastReservationParticipant,
+    RoastReservationPrepareResult,
+    UnrolledRoastAttemptResult,
+)
 
 ROAST_COOLDOWN_SECONDS = resolve_roast_cooldown_seconds()
 DEFAULT_ROAST_CHARGE_MAX = 2
+ROAST_RESERVATION_MAX_PARTICIPANTS = 12
+ROAST_RESERVATION_CLAIM_TIMEOUT_SECONDS = 5 * 60
+ROAST_RESERVATION_CROSS_DAY_GRACE_SECONDS = 10 * 60
+
+
+# ================================ 预约跨日重试 ================================ #
+
+
+def _matches_reservation_claim_date(raw: dict, target_date: str, now: datetime.datetime) -> bool:
+    """匹配当日预约，并为刚在零点后释放的昨日发送前任务保留短暂重试窗口。"""
+
+    reservation_date = str(raw.get("date_str") or "")
+    if reservation_date == target_date:
+        return True
+    if raw.get("status") not in {"ready", "processing", "prepared"}:
+        return False
+    released_at_raw = raw.get("released_at")
+    if not isinstance(released_at_raw, str):
+        return False
+    try:
+        reservation_day = datetime.date.fromisoformat(reservation_date)
+        target_day = datetime.date.fromisoformat(target_date)
+        released_at = datetime.datetime.fromisoformat(released_at_raw)
+    except ValueError:
+        return False
+    if reservation_day != target_day - datetime.timedelta(days=1):
+        return False
+    if released_at.tzinfo is None:
+        released_at = released_at.replace(tzinfo=datetime.timezone.utc)
+    elapsed = (now - released_at).total_seconds()
+    return 0 <= elapsed <= ROAST_RESERVATION_CROSS_DAY_GRACE_SECONDS
 
 
 def _normalize_charge_settings(cooldown_seconds: Optional[int], max_charges: Optional[int]) -> tuple[int, int]:
@@ -75,6 +119,8 @@ class PigDataManager:
     - usage      : {user_id: {last_roast_ts, roast_charges, roast_charge_updated_ts}} ← 普通烤群友充能
     - force_usage: {user_id: "YYYY-MM-DD"}    ← 后门口令每日计数
     - daily_events: {date: [event, ...]}      ← 群内烧烤事件（用于日报）
+    - unrolled_roast_attempts: {date: {user_id: count}} ← 未抽猪先烤的每日违规次数
+    - roast_reservations: {reservation_id: reservation} ← 延迟到目标抽猪后结算的群预约
 
     写操作通过 asyncio.Lock 串行化，文件使用原子替换（.tmp → rename）防止 JSON 损坏。
     """
@@ -99,6 +145,8 @@ class PigDataManager:
             "force_usage": {},
             "daily_events": {},
             "protected": {},
+            "unrolled_roast_attempts": {},
+            "roast_reservations": {},
         }
 
     def _load(self) -> dict:
@@ -144,6 +192,8 @@ class PigDataManager:
             "usage",
             "force_usage",
             "daily_events",
+            "unrolled_roast_attempts",
+            "roast_reservations",
         ):
             if not isinstance(data.get(key), dict):
                 data[key] = {}
@@ -214,12 +264,146 @@ class PigDataManager:
             if normalized_protected != protected:
                 data["protected"] = normalized_protected
                 migrated = True
+
+        # ================================ 预约投递状态迁移 ================================ #
+        # 旧版本可能在 QQ 消息成功后、completed 落盘前遗留 processing + outcome。
+        # 这类记录是否已经发送无法可靠判断，必须按“可能已发送”处理，禁止超时重领。
+        for reservation in data.get("roast_reservations", {}).values():
+            if (
+                isinstance(reservation, dict)
+                and reservation.get("status") == "processing"
+                and isinstance(reservation.get("outcome_snapshot"), dict)
+            ):
+                reservation["status"] = "sending"
+                migrated = True
         if migrated:
             logger.info("pig_data.json 数据结构已自动迁移/补全，开始落盘...")
             if persist:
                 self.data = data
                 self._sync_save()  # 迁移后立即落盘，防止重启丢失
         return data
+
+    # ================================ 预约烤猪序列化 ================================ #
+
+    def _reservation_from_raw(self, raw: dict) -> RoastReservation:
+        """把持久化字典恢复成只读领域对象；坏参与者记录会被忽略。"""
+
+        participants = tuple(
+            RoastReservationParticipant(
+                user_id=str(item.get("user_id") or ""),
+                display_name=str(item.get("display_name") or ""),
+                pig_id=str(item.get("pig_id") or ""),
+            )
+            for item in raw.get("participants", [])
+            if isinstance(item, dict) and item.get("user_id")
+        )
+        snapshot = raw.get("outcome_snapshot")
+        return RoastReservation(
+            reservation_id=str(raw.get("reservation_id") or ""),
+            date_str=str(raw.get("date_str") or ""),
+            group_id=str(raw.get("group_id") or ""),
+            target_id=str(raw.get("target_id") or ""),
+            target_name=str(raw.get("target_name") or ""),
+            owner_id=str(raw.get("owner_id") or ""),
+            owner_name=str(raw.get("owner_name") or ""),
+            owner_pig_id=str(raw.get("owner_pig_id") or ""),
+            participants=participants,
+            delivery_bot_id=str(raw.get("delivery_bot_id") or ""),
+            force_mode=raw.get("force_mode"),
+            status=str(raw.get("status") or "pending"),
+            target_pig_id=str(raw.get("target_pig_id") or ""),
+            outcome_snapshot=dict(snapshot) if isinstance(snapshot, dict) else None,
+            claim_token=str(raw.get("claim_token") or ""),
+        )
+
+    def _bind_reservation_event_locked(self, raw: dict, event: RoastEvent) -> RoastEvent:
+        """用预约快照覆盖事件身份字段，避免客户端把日报写到错误群或角色名下。"""
+
+        reservation = self._reservation_from_raw(raw)
+        return RoastEvent(
+            event_type=event.event_type,
+            attacker_id=reservation.owner_id,
+            target_id=reservation.target_id,
+            attacker_name=reservation.owner_name,
+            target_name=reservation.target_name,
+            food=event.food,
+            group_id=reservation.group_id,
+            reservation_id=reservation.reservation_id,
+            participant_ids=tuple(item.user_id for item in reservation.participants),
+            participant_names=tuple(item.display_name for item in reservation.participants),
+            participant_count=reservation.participant_count,
+            backfire_victim_id=event.backfire_victim_id,
+            backfire_victim_name=event.backfire_victim_name,
+        )
+
+    def _find_reservation_locked(self, reservation_id: str) -> Optional[dict]:
+        raw = self.data.setdefault("roast_reservations", {}).get(str(reservation_id))
+        return raw if isinstance(raw, dict) else None
+
+    def _find_pending_reservation_locked(self, date_str: str, group_id: str, target_id: str) -> Optional[dict]:
+        for raw in self.data.setdefault("roast_reservations", {}).values():
+            if not isinstance(raw, dict):
+                continue
+            if (
+                raw.get("date_str") == date_str
+                and raw.get("group_id") == group_id
+                and raw.get("target_id") == target_id
+                and raw.get("status") == "pending"
+            ):
+                return raw
+        return None
+
+    def _consume_roast_usage_locked(
+        self,
+        user_id: str,
+        *,
+        now: float,
+        cooldown_seconds: Optional[int],
+        max_charges: Optional[int],
+    ) -> CooldownConsumeResult:
+        """在预约事务已有锁的情况下消费普通充能，避免二次加锁。"""
+
+        cooldown, charge_max = _normalize_charge_settings(cooldown_seconds, max_charges)
+        usage = self.data.setdefault("usage", {})
+        raw_state = usage.get(user_id, 0)
+        if isinstance(raw_state, dict):
+            charges = _safe_int(raw_state.get("roast_charges"), 0)
+            updated_ts = float(raw_state.get("roast_charge_updated_ts") or now)
+        else:
+            charges, updated_ts = _legacy_roast_state(float(raw_state or 0), now, cooldown, charge_max)
+        charges, updated_ts = _recover_roast_charges(charges, updated_ts, now, cooldown, charge_max)
+        if charges <= 0:
+            remaining = _next_charge_seconds(charges, updated_ts, now, cooldown, charge_max)
+            usage[user_id] = {
+                "last_roast_ts": float(raw_state or 0) if not isinstance(raw_state, dict) else raw_state.get("last_roast_ts"),
+                "roast_charges": charges,
+                "roast_charge_updated_ts": updated_ts,
+            }
+            return CooldownConsumeResult(False, remaining, 0, charge_max, remaining)
+
+        was_full = charges >= charge_max
+        charges -= 1
+        if was_full:
+            updated_ts = now
+        usage[user_id] = {
+            "last_roast_ts": now,
+            "roast_charges": charges,
+            "roast_charge_updated_ts": updated_ts,
+        }
+        return CooldownConsumeResult(
+            True,
+            0,
+            charges,
+            charge_max,
+            _next_charge_seconds(charges, updated_ts, now, cooldown, charge_max),
+        )
+
+    def _consume_force_usage_locked(self, user_id: str, date_str: str) -> bool:
+        usage = self.data.setdefault("force_usage", {})
+        if usage.get(user_id) == date_str:
+            return False
+        usage[user_id] = date_str
+        return True
 
     # ---- 原子写 ----
 
@@ -456,8 +640,307 @@ class PigDataManager:
             self._record_group_roll(target_date, group_id, user_id, proposed_pig_id)
             result = self._apply_created_roll_progress_locked(user_id, proposed_pig_id)
 
+            # 预约只在 DailyRoll 首次创建的同一临界区内转为 ready；重复查看不会二次激活。
+            for reservation in self.data.setdefault("roast_reservations", {}).values():
+                if not isinstance(reservation, dict):
+                    continue
+                if (
+                    reservation.get("date_str") == target_date
+                    and reservation.get("target_id") == user_id
+                    and reservation.get("status") == "pending"
+                ):
+                    reservation["status"] = "ready"
+                    reservation["target_pig_id"] = proposed_pig_id
+                    reservation["ready_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
             await self._atomic_save()
             return result
+
+    # ================================ 预约烤猪业务 ================================ #
+
+    async def record_unrolled_roast_attempt(
+        self, user_id: str, date_str: Optional[str] = None
+    ) -> UnrolledRoastAttemptResult:
+        """持久化未抽猪先烤次数；日期是天然分区，第二天自动从 1 重新开始。"""
+
+        target_date = date_str or rollpig_date_str()
+        async with self._lock:
+            day_attempts = self.data.setdefault("unrolled_roast_attempts", {}).setdefault(target_date, {})
+            count = max(0, _safe_int(day_attempts.get(user_id), 0)) + 1
+            day_attempts[user_id] = count
+            await self._atomic_save()
+        return UnrolledRoastAttemptResult(target_date, user_id, count)
+
+    async def prepare_roast_reservation(
+        self,
+        *,
+        attacker_id: str,
+        attacker_name: str,
+        attacker_pig_id: str,
+        target_id: str,
+        target_name: str,
+        group_id: str,
+        delivery_bot_id: str,
+        force_mode: Optional[str] = None,
+        date_str: Optional[str] = None,
+        cooldown_seconds: Optional[int] = None,
+        max_charges: Optional[int] = None,
+    ) -> RoastReservationPrepareResult:
+        """原子完成目标检查、免费加入或扣资源创建预约。"""
+
+        target_date = date_str or rollpig_date_str()
+        attacker_id = str(attacker_id)
+        target_id = str(target_id)
+        async with self._lock:
+            target_pig_id = self.data.setdefault("history", {}).get(target_date, {}).get(target_id)
+            existing = self._find_pending_reservation_locked(target_date, str(group_id), target_id)
+            if existing is not None:
+                participants = existing.setdefault("participants", [])
+                if any(str(item.get("user_id")) == attacker_id for item in participants if isinstance(item, dict)):
+                    return RoastReservationPrepareResult("already_joined", self._reservation_from_raw(existing))
+                if len(participants) >= ROAST_RESERVATION_MAX_PARTICIPANTS:
+                    return RoastReservationPrepareResult("reservation_full", self._reservation_from_raw(existing))
+                participants.append({
+                    "user_id": attacker_id,
+                    "display_name": str(attacker_name),
+                    "pig_id": str(attacker_pig_id),
+                })
+                await self._atomic_save()
+                return RoastReservationPrepareResult("reservation_joined", self._reservation_from_raw(existing))
+
+            protected_users = (
+                self.data.setdefault("protected", {})
+                .get(target_date, {})
+                .get(str(group_id), [])
+            )
+            is_protected = target_id in {str(user_id) for user_id in protected_users}
+            protection_broken = is_protected and force_mode in {"normal", "super"}
+            if is_protected and not protection_broken:
+                return RoastReservationPrepareResult("protected")
+            if target_pig_id:
+                return RoastReservationPrepareResult(
+                    "target_ready",
+                    target_pig_id=str(target_pig_id),
+                    protection_broken=protection_broken,
+                )
+
+            cooldown_result: Optional[CooldownConsumeResult] = None
+            if force_mode == "normal":
+                if not self._consume_force_usage_locked(attacker_id, target_date):
+                    return RoastReservationPrepareResult("force_denied")
+            elif force_mode != "super":
+                cooldown_result = self._consume_roast_usage_locked(
+                    attacker_id,
+                    now=time.time(),
+                    cooldown_seconds=cooldown_seconds,
+                    max_charges=max_charges,
+                )
+                if not cooldown_result.allowed:
+                    return RoastReservationPrepareResult("cooldown_denied", cooldown=cooldown_result)
+
+            reservation_id = uuid.uuid4().hex
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            raw = {
+                "reservation_id": reservation_id,
+                "date_str": target_date,
+                "group_id": str(group_id),
+                "target_id": target_id,
+                "target_name": str(target_name),
+                "owner_id": attacker_id,
+                "owner_name": str(attacker_name),
+                "owner_pig_id": str(attacker_pig_id),
+                "participants": [{
+                    "user_id": attacker_id,
+                    "display_name": str(attacker_name),
+                    "pig_id": str(attacker_pig_id),
+                }],
+                "delivery_bot_id": str(delivery_bot_id),
+                "force_mode": force_mode,
+                "status": "pending",
+                "target_pig_id": "",
+                "created_at": now_iso,
+                "outcome_snapshot": None,
+            }
+            self.data.setdefault("roast_reservations", {})[reservation_id] = raw
+            await self._atomic_save()
+            return RoastReservationPrepareResult(
+                "reservation_created",
+                self._reservation_from_raw(raw),
+                cooldown_result,
+                protection_broken=protection_broken,
+            )
+
+    async def claim_roast_reservations(
+        self,
+        delivery_bot_id: str,
+        date_str: Optional[str] = None,
+        excluded_reservation_ids: Optional[set[str]] = None,
+    ) -> RoastReservationClaimResult:
+        """领取当前 Bot 当天可投递的预约；只回收仍可安全重试的发送前租约。"""
+
+        target_date = date_str or rollpig_date_str()
+        excluded_ids = set(excluded_reservation_ids or ())
+        claimed: list[RoastReservation] = []
+        async with self._lock:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            reservations = self.data.setdefault("roast_reservations", {})
+            for reservation_id, raw in reservations.items():
+                if not isinstance(raw, dict):
+                    continue
+                claimed_at = raw.get("claimed_at")
+                stale_presend = False
+                # processing 负责生成结果，prepared 表示结果已固化但还在渲染消息；两者
+                # 都没有调用外部发送接口，可以依赖租约恢复。sending 绝不能自动重领。
+                if raw.get("status") in {"processing", "prepared"}:
+                    if not isinstance(claimed_at, str):
+                        stale_presend = True
+                    else:
+                        try:
+                            claimed_time = datetime.datetime.fromisoformat(claimed_at)
+                            if claimed_time.tzinfo is None:
+                                claimed_time = claimed_time.replace(tzinfo=datetime.timezone.utc)
+                            stale_presend = (
+                                now - claimed_time
+                            ).total_seconds() >= ROAST_RESERVATION_CLAIM_TIMEOUT_SECONDS
+                        except ValueError:
+                            stale_presend = True
+                if (
+                    _matches_reservation_claim_date(raw, target_date, now)
+                    and raw.get("delivery_bot_id") == str(delivery_bot_id)
+                    and reservation_id not in excluded_ids
+                    and (raw.get("status") == "ready" or stale_presend)
+                ):
+                    # 固定快照仍需先渲染成最终消息，因此重领只能进入 prepared；真正
+                    # 调用 OneBot 发送前由独立事务推进到 sending。
+                    raw["status"] = (
+                        "prepared" if isinstance(raw.get("outcome_snapshot"), dict) else "processing"
+                    )
+                    raw["claim_token"] = uuid.uuid4().hex
+                    raw["claimed_at"] = now.isoformat()
+                    claimed.append(self._reservation_from_raw(raw))
+            if claimed:
+                await self._atomic_save()
+            has_owned = any(
+                isinstance(raw, dict)
+                and _matches_reservation_claim_date(raw, target_date, now)
+                and raw.get("delivery_bot_id") == str(delivery_bot_id)
+                and raw.get("status") in {"pending", "ready", "processing", "prepared"}
+                for raw in reservations.values()
+            )
+        return RoastReservationClaimResult(tuple(claimed), has_owned=has_owned)
+
+    def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
+        target_date = date_str or rollpig_date_str()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return any(
+            isinstance(raw, dict)
+            and _matches_reservation_claim_date(raw, target_date, now)
+            and raw.get("delivery_bot_id") == str(delivery_bot_id)
+            and raw.get("status") in {"pending", "ready", "processing", "prepared"}
+            for raw in self.data.setdefault("roast_reservations", {}).values()
+        )
+
+    async def save_roast_reservation_outcome(
+        self,
+        reservation_id: str,
+        claim_token: str,
+        outcome_snapshot: dict,
+    ) -> Optional[RoastReservation]:
+        """原子固化结果并进入可恢复的 prepared；此时尚未调用外部发送接口。"""
+
+        async with self._lock:
+            raw = self._find_reservation_locked(reservation_id)
+            if (
+                raw is None
+                or raw.get("status") not in {"processing", "prepared", "sending", "completed"}
+                or raw.get("claim_token") != claim_token
+            ):
+                return None
+            changed = False
+            if not isinstance(raw.get("outcome_snapshot"), dict):
+                if raw.get("status") != "processing":
+                    return None
+                raw["outcome_snapshot"] = dict(outcome_snapshot)
+                changed = True
+            elif raw.get("outcome_snapshot") != outcome_snapshot:
+                return None
+            if raw.get("status") == "processing":
+                raw["status"] = "prepared"
+                changed = True
+            if changed:
+                await self._atomic_save()
+            return self._reservation_from_raw(raw)
+
+    async def mark_roast_reservation_sending(
+        self,
+        reservation_id: str,
+        claim_token: str,
+    ) -> Optional[RoastReservation]:
+        """最终消息准备完成后进入不可自动重领的 sending。"""
+
+        async with self._lock:
+            raw = self._find_reservation_locked(reservation_id)
+            if (
+                raw is None
+                or raw.get("claim_token") != claim_token
+                or raw.get("status") not in {"prepared", "sending", "completed"}
+                or not isinstance(raw.get("outcome_snapshot"), dict)
+            ):
+                return None
+            if raw.get("status") == "prepared":
+                raw["status"] = "sending"
+                await self._atomic_save()
+            return self._reservation_from_raw(raw)
+
+    async def complete_roast_reservation(
+        self,
+        reservation_id: str,
+        claim_token: str,
+        event: Optional[RoastEvent] = None,
+    ) -> bool:
+        """原子完成预约，并把对应日报事件与状态写入同一次 JSON 保存。"""
+
+        async with self._lock:
+            raw = self._find_reservation_locked(reservation_id)
+            if (
+                raw is None
+                or raw.get("claim_token") != claim_token
+                or raw.get("status") not in {"sending", "completed"}
+            ):
+                return False
+            changed = False
+            if raw.get("status") != "completed":
+                raw["status"] = "completed"
+                raw["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                changed = True
+            if event is not None:
+                bound_event = self._bind_reservation_event_locked(raw, event)
+                changed = self._append_roast_event_locked(
+                    bound_event,
+                    date_str=str(raw.get("date_str") or rollpig_date_str()),
+                ) or changed
+            if changed:
+                await self._atomic_save()
+            return True
+
+    async def release_roast_reservation(self, reservation_id: str, claim_token: str) -> bool:
+        """发送开始前失败时放回 ready；已确定 outcome 会原样保留。"""
+
+        async with self._lock:
+            raw = self._find_reservation_locked(reservation_id)
+            if (
+                raw is None
+                or raw.get("status") not in {"processing", "prepared"}
+                or raw.get("claim_token") != claim_token
+            ):
+                return False
+            raw["status"] = "ready"
+            # 保留释放时间，使零点前领取、零点后失败的发送前任务仍能在短暂窗口内重领。
+            raw["released_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            raw.pop("claimed_at", None)
+            raw.pop("claim_token", None)
+            await self._atomic_save()
+            return True
 
     async def mark_group_roll_seen(
         self,
@@ -486,6 +969,7 @@ class PigDataManager:
         """清理超过 days_to_keep 天的历史记录（不影响图鉴数据）。"""
         async with self._lock:
             today = rollpig_today()
+            now = datetime.datetime.now(datetime.timezone.utc)
             history_dates_to_del = [
                 d for d in self.data["history"]
                 if _is_valid_date(d)  # 必须先过滤非法日期键，再做计算（防止 ValueError）
@@ -503,7 +987,36 @@ class PigDataManager:
             for d in group_dates_to_del:
                 del group_rolls[d]
 
-            if history_dates_to_del or group_dates_to_del:
+            # completed 已由事件记录承接，其他预约跨日后也不再有效；每日清理直接
+            # 移除这些终态/过期记录，避免结果快照让 JSON 与滚动备份无限增长。
+            reservations = self.data.get("roast_reservations", {})
+            reservation_ids_to_del = [
+                reservation_id
+                for reservation_id, raw in reservations.items()
+                if isinstance(raw, dict)
+                and (
+                    raw.get("status") == "completed"
+                    or (
+                        _is_valid_date(str(raw.get("date_str") or ""))
+                        and datetime.date.fromisoformat(str(raw["date_str"])) < today
+                        and not _matches_reservation_claim_date(raw, today.isoformat(), now)
+                    )
+                )
+            ]
+            for reservation_id in reservation_ids_to_del:
+                del reservations[reservation_id]
+
+            # 未抽猪违规次数只在当日判定中使用，跨日后直接清理，避免日期分区无限增长。
+            unrolled_attempts = self.data.get("unrolled_roast_attempts", {})
+            attempt_dates_to_del = [
+                date_str
+                for date_str in unrolled_attempts
+                if _is_valid_date(date_str) and datetime.date.fromisoformat(date_str) < today
+            ]
+            for date_str in attempt_dates_to_del:
+                del unrolled_attempts[date_str]
+
+            if history_dates_to_del or group_dates_to_del or reservation_ids_to_del or attempt_dates_to_del:
                 await self._atomic_save()
 
     # ---- 烤群友 普通模式充能 ----
@@ -625,29 +1138,68 @@ class PigDataManager:
             self.data.setdefault("force_usage", {})[user_id] = today
             await self._atomic_save()
 
-    # ---- 烤群友事件记录（用于每日总结） ----
+    # ================================ 烤群友事件记录 ================================ #
+    # 预约完成和日报事件必须共用同一次原子保存；普通即时事件仍复用同一序列化入口。
+
+    def _append_roast_event_locked(self, event: RoastEvent, *, date_str: str) -> bool:
+        """在持有数据锁时追加事件；预约事件跨日期按 reservation_id 幂等。"""
+
+        events = self.data.setdefault("daily_events", {})
+        if event.reservation_id:
+            for existing_events in events.values():
+                if any(
+                    isinstance(item, dict) and item.get("reservation_id") == event.reservation_id
+                    for item in existing_events
+                ):
+                    return False
+        events.setdefault(date_str, []).append({
+            "type": event.event_type,
+            "attacker": event.attacker_id,
+            "target": event.target_id,
+            "attacker_name": event.attacker_name,
+            "target_name": event.target_name,
+            "food": event.food,
+            "group_id": event.group_id,
+            "reservation_id": event.reservation_id,
+            "participant_ids": list(event.participant_ids),
+            "participant_names": list(event.participant_names),
+            "participant_count": max(0, int(event.participant_count or 0)),
+            "backfire_victim_id": str(event.backfire_victim_id or ""),
+            "backfire_victim_name": str(event.backfire_victim_name or ""),
+        })
+        return True
 
     async def log_roast_event(self, event_type: str, attacker_id: str, target_id: str,
                                attacker_name: str = "", target_name: str = "",
-                               food: str = "", group_id: str = ""):
+                               food: str = "", group_id: str = "",
+                               reservation_id: str = "", participant_ids: Optional[list[str]] = None,
+                               participant_names: Optional[list[str]] = None, participant_count: int = 0,
+                               backfire_victim_id: str = "", backfire_victim_name: str = ""):
         """
         记录一次烤群友事件。
         event_type: "success" / "escape" / "backfire" / "bot_backfire" / "self_roast"
         """
         async with self._lock:
-            today = rollpig_date_str()
-            events = self.data.setdefault("daily_events", {})
-            day_events = events.setdefault(today, [])
-            day_events.append({
-                "type": event_type,
-                "attacker": attacker_id,
-                "target": target_id,
-                "attacker_name": attacker_name,
-                "target_name": target_name,
-                "food": food,
-                "group_id": group_id,
-            })
-            await self._atomic_save()
+            changed = self._append_roast_event_locked(
+                RoastEvent(
+                    event_type=event_type,
+                    attacker_id=attacker_id,
+                    target_id=target_id,
+                    attacker_name=attacker_name,
+                    target_name=target_name,
+                    food=food,
+                    group_id=group_id,
+                    reservation_id=reservation_id,
+                    participant_ids=tuple(participant_ids or ()),
+                    participant_names=tuple(participant_names or ()),
+                    participant_count=participant_count,
+                    backfire_victim_id=backfire_victim_id,
+                    backfire_victim_name=backfire_victim_name,
+                ),
+                date_str=rollpig_date_str(),
+            )
+            if changed:
+                await self._atomic_save()
 
     def get_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list:
         """获取指定日期（默认今天）的所有烤群友事件。"""
