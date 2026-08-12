@@ -428,6 +428,54 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         reconcile.assert_not_awaited()
         mocked_store.fail_group_roast_refill.assert_not_called()
 
+    async def test_message_bind_retries_transient_failures_with_same_identity(self):
+        bound = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="admin",
+            initiator_name="管理员",
+            delivery_bot_id="bot",
+            message_id="message-1",
+        )
+        with (
+            patch.object(refill_handler, "store") as mocked_store,
+            patch.object(refill_handler.asyncio, "sleep", new_callable=AsyncMock) as sleep,
+        ):
+            mocked_store.bind_group_roast_refill_message = AsyncMock(
+                side_effect=[TimeoutError("timed out"), TimeoutError("timed out"), bound]
+            )
+            result = await refill_handler._bind_refill_message_with_retry(
+                "request",
+                "message-1",
+            )
+
+        self.assertEqual(result, bound)
+        self.assertEqual(mocked_store.bind_group_roast_refill_message.await_count, 3)
+        for call in mocked_store.bind_group_roast_refill_message.await_args_list:
+            self.assertEqual(call.args, ("request", "message-1"))
+        self.assertEqual(
+            [call.args[0] for call in sleep.await_args_list],
+            list(refill_handler.ROAST_REFILL_BIND_RETRY_DELAYS),
+        )
+
+    async def test_message_bind_retry_exhaustion_returns_failure_for_cleanup(self):
+        with (
+            patch.object(refill_handler, "store") as mocked_store,
+            patch.object(refill_handler.asyncio, "sleep", new_callable=AsyncMock) as sleep,
+        ):
+            mocked_store.bind_group_roast_refill_message = AsyncMock(
+                side_effect=TimeoutError("timed out")
+            )
+            result = await refill_handler._bind_refill_message_with_retry(
+                "request",
+                "message-1",
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(mocked_store.bind_group_roast_refill_message.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+
     def test_prepare_snapshot_must_match_current_group_members(self):
         request = GroupRoastRefillRequest(
             request_id="request",

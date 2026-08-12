@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 
 from nonebot import get_bot, on_command, on_notice
@@ -41,6 +42,10 @@ cmd_roast_refill = on_command(
 )
 roast_refill_notice = on_notice(block=False, priority=5)
 
+# 同一 request_id + message_id 在 Local 与 Cloud 均可幂等重放。
+# 两次短等待覆盖瞬时网络抖动，同时避免把命令处理拖成长任务。
+ROAST_REFILL_BIND_RETRY_DELAYS = (0.25, 0.75)
+
 
 def _can_start_refill(event: GroupMessageEvent) -> bool:
     """只有本群群主、管理员或 NoneBot superuser 可以主持补货投票。"""
@@ -57,6 +62,33 @@ async def _fail_unusable_request(request_id: str, message_id: str, reason: str) 
         await store.fail_group_roast_refill(request_id, message_id, reason)
     except Exception as error:
         logger.warning(f"rollpig 烤箱补货失败状态写入异常: request={request_id} error={error}")
+
+
+async def _bind_refill_message_with_retry(
+    request_id: str,
+    message_id: str,
+) -> GroupRoastRefillRequest | None:
+    """有限重试消息绑定，处理 Cloud 已提交但响应丢失及短暂断网。"""
+
+    total_attempts = len(ROAST_REFILL_BIND_RETRY_DELAYS) + 1
+    for attempt in range(total_attempts):
+        try:
+            return await store.bind_group_roast_refill_message(request_id, message_id)
+        except Exception as error:
+            if attempt >= len(ROAST_REFILL_BIND_RETRY_DELAYS):
+                logger.error(
+                    f"rollpig 烤箱补货消息绑定重试耗尽: "
+                    f"request={request_id} message={message_id} error={error}"
+                )
+                return None
+            delay = ROAST_REFILL_BIND_RETRY_DELAYS[attempt]
+            logger.warning(
+                f"rollpig 烤箱补货消息绑定临时失败，准备重试: "
+                f"request={request_id} message={message_id} "
+                f"attempt={attempt + 1}/{total_attempts} error={error}"
+            )
+            await asyncio.sleep(delay)
+    return None
 
 
 async def _handle_post_send_probe_error(
@@ -268,7 +300,7 @@ async def _(bot: Bot, event: Event):
         await _fail_unusable_request(request.request_id, "", "message_id_missing")
         await cmd_roast_refill.finish(MessageSegment.reply(event.message_id) + pick_refill_unsupported_text())
         return
-    bound = await store.bind_group_roast_refill_message(request.request_id, message_id)
+    bound = await _bind_refill_message_with_retry(request.request_id, message_id)
     if bound is None:
         await _fail_unusable_request(request.request_id, message_id, "bind_failed")
         await cmd_roast_refill.finish(MessageSegment.reply(event.message_id) + "投票消息状态绑定失败，本轮申请已停止。")
