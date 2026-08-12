@@ -9,9 +9,9 @@ from typing import Any
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.log import logger
 
-from .runtime import resolve_roast_charge_max
+from .runtime import ROLLPIG_TIMEZONE, resolve_roast_charge_max
 from .store import store
-from .store.models import GroupRoastRefillRequest
+from .store.models import GroupRoastRefillCompleteResult, GroupRoastRefillRequest
 from .texts import (
     ROAST_REFILL_CREATED_TEXTS,
     ROAST_REFILL_EXISTING_TEXTS,
@@ -141,6 +141,57 @@ async def fetch_refill_group_members(bot: Bot, group_id: str) -> set[str]:
     }
 
 
+# ================================ 跨日查找与成员资格 ================================ #
+
+def _refill_lookup_dates(reference_ts: float | None = None) -> tuple[str, str]:
+    """返回事件所处业务日及前一日；十分钟投票最多只可能跨过一个零点。"""
+
+    try:
+        reference = (
+            datetime.datetime.now(ROLLPIG_TIMEZONE)
+            if reference_ts is None
+            else datetime.datetime.fromtimestamp(float(reference_ts), tz=ROLLPIG_TIMEZONE)
+        )
+    except (TypeError, ValueError, OSError, OverflowError):
+        reference = datetime.datetime.now(ROLLPIG_TIMEZONE)
+    current = reference.date()
+    return current.isoformat(), (current - datetime.timedelta(days=1)).isoformat()
+
+
+async def find_group_roast_refill(
+    group_id: str,
+    *,
+    message_id: str = "",
+    reference_ts: float | None = None,
+) -> GroupRoastRefillRequest | None:
+    """查找当前或跨零点的上一业务日投票，可按消息 ID 精确匹配。"""
+
+    normalized_message_id = str(message_id or "")
+    for date_str in _refill_lookup_dates(reference_ts):
+        request = await store.get_group_roast_refill(str(group_id), date_str=date_str)
+        if request is None:
+            continue
+        if not normalized_message_id or request.message_id == normalized_message_id:
+            return request
+    return None
+
+
+async def get_refill_eligible_users(
+    bot: Bot,
+    group_id: str,
+    date_str: str,
+) -> tuple[set[str], set[str]]:
+    """返回登记日活及其中仍在本群的真人账号；Bot 永远不参与门槛。"""
+
+    group_member_ids, active_user_ids = await asyncio.gather(
+        fetch_refill_group_members(bot, group_id),
+        store.get_group_active_user_ids(group_id, date_str),
+    )
+    normalized_active = {str(user_id) for user_id in active_user_ids if user_id}
+    eligible_user_ids = (normalized_active & group_member_ids) - {str(bot.self_id)}
+    return normalized_active, eligible_user_ids
+
+
 # ================================ 文案与票数 ================================ #
 
 def format_refill_created(request: GroupRoastRefillRequest, max_charges: int) -> str:
@@ -172,19 +223,7 @@ def _remaining_minutes(request: GroupRoastRefillRequest) -> int:
     return max(1, int((remaining + 59) // 60)) if remaining > 0 else 0
 
 
-async def get_valid_refill_voters(bot: Bot, request: GroupRoastRefillRequest) -> tuple[set[str], set[str]]:
-    raw_voters, group_member_ids, active_user_ids = await asyncio.gather(
-        fetch_refill_reactors(bot, request.message_id),
-        fetch_refill_group_members(bot, request.group_id),
-        store.get_group_active_user_ids(request.group_id, request.date_str),
-    )
-    valid_voters = (raw_voters & group_member_ids & active_user_ids) - {str(bot.self_id)}
-    return raw_voters, valid_voters
-
-
-async def format_existing_refill(bot: Bot, request: GroupRoastRefillRequest) -> str:
-    _, valid_voters = await get_valid_refill_voters(bot, request)
-    current = len(valid_voters)
+def format_existing_refill(request: GroupRoastRefillRequest, current: int) -> str:
     return random.choice(ROAST_REFILL_EXISTING_TEXTS).format(
         current=current,
         required=request.required_votes,
@@ -229,6 +268,53 @@ def is_refill_notice(event: Any) -> bool:
     )
 
 
+async def reconcile_refill_request(
+    bot: Bot,
+    request: GroupRoastRefillRequest,
+    *,
+    fast_below_threshold: bool = False,
+) -> GroupRoastRefillCompleteResult:
+    """重放一次验票与结算；供 Notice 和命令恢复路径共同调用。"""
+
+    if not request.message_id:
+        # prepare 与消息发送/绑定之间存在很短的并发窗口。旁路请求只能等待，
+        # 绝不能把另一个管理员正在创建的共享申请标记为失败。
+        return GroupRoastRefillCompleteResult(False, "unbound", request)
+
+    raw_voters = await fetch_refill_reactors(bot, request.message_id)
+    if fast_below_threshold and len(raw_voters - {str(bot.self_id)}) < request.required_votes:
+        return GroupRoastRefillCompleteResult(False, "pending", request)
+
+    active_user_ids, eligible_user_ids = await get_refill_eligible_users(
+        bot,
+        request.group_id,
+        request.date_str,
+    )
+    valid_voter_ids = raw_voters & eligible_user_ids
+    excluded_user_ids = (active_user_ids - eligible_user_ids) | {str(bot.self_id)}
+    max_charges = resolve_roast_charge_max()
+    result = await store.complete_group_roast_refill(
+        request_id=request.request_id,
+        message_id=request.message_id,
+        voter_ids=sorted(valid_voter_ids),
+        # Cloud/本地 Store 会再次按日活求交集；这里额外排除已退群用户，
+        # 保证他们既不计票，也不会得到全局烧烤次数补充。
+        excluded_user_ids=sorted(excluded_user_ids),
+        max_charges=max_charges,
+    )
+    if result.completed and result.request is not None:
+        await bot.send_group_msg(
+            group_id=int(result.request.group_id),
+            message=format_refill_success(
+                result.request,
+                votes=len(result.valid_voter_ids),
+                benefited=len(result.benefited_user_ids),
+                max_charges=max_charges,
+            ),
+        )
+    return result
+
+
 async def process_refill_notice(bot: Bot, event: Any) -> None:
     """Notice 只唤醒校验；最终名单、资格与一次性状态迁移都重新从后端确认。"""
 
@@ -239,7 +325,11 @@ async def process_refill_notice(bot: Bot, event: Any) -> None:
     if not group_id or not message_id:
         return
 
-    request = await store.get_group_roast_refill(group_id)
+    request = await find_group_roast_refill(
+        group_id,
+        message_id=message_id,
+        reference_ts=getattr(event, "time", None),
+    )
     if (
         request is None
         or request.message_id != message_id
@@ -247,34 +337,9 @@ async def process_refill_notice(bot: Bot, event: Any) -> None:
     ):
         return
     try:
-        raw_voters = await fetch_refill_reactors(bot, message_id)
-        # reaction 原始人数尚未达到门槛时必然无法通过，跳过昂贵的完整群成员列表读取。
-        if len(raw_voters - {str(bot.self_id)}) < request.required_votes:
-            return
-        group_member_ids = await fetch_refill_group_members(bot, group_id)
+        # reaction 原始人数尚未达到门槛时必然无法通过，跳过昂贵的群成员与日活读取。
+        await reconcile_refill_request(bot, request, fast_below_threshold=True)
     except RoastRefillReactionError as error:
         logger.warning(f"rollpig 烤箱补货验票失败: request={request.request_id} error={error}")
         if error.message_missing:
             await store.fail_group_roast_refill(request.request_id, message_id, "message_missing")
-        return
-
-    max_charges = resolve_roast_charge_max()
-    result = await store.complete_group_roast_refill(
-        request_id=request.request_id,
-        message_id=message_id,
-        # Store 会在原子事务内再次与最新日活求交集；这里先剔除已不在群内的 reaction 用户。
-        voter_ids=sorted(raw_voters & group_member_ids),
-        excluded_user_ids=[str(bot.self_id)],
-        max_charges=max_charges,
-    )
-    if not result.completed or result.request is None:
-        return
-    await bot.send_group_msg(
-        group_id=int(result.request.group_id),
-        message=format_refill_success(
-            result.request,
-            votes=len(result.valid_voter_ids),
-            benefited=len(result.benefited_user_ids),
-            max_charges=max_charges,
-        ),
-    )

@@ -654,20 +654,26 @@ class CloudStore(RollpigStore):
         initiator_id: str,
         initiator_name: str,
         delivery_bot_id: str,
+        eligible_user_ids: Optional[list[str]] = None,
         date_str: Optional[str] = None,
         now_ts: Optional[float] = None,
     ) -> GroupRoastRefillPrepareResult:
+        json_body = {
+            "group_id": group_id,
+            "initiator_id": initiator_id,
+            "initiator_name": initiator_name,
+            "delivery_bot_id": delivery_bot_id,
+            "date_str": date_str or rollpig_date_str(),
+            "now_ts": now_ts,
+        }
+        if eligible_user_ids is not None:
+            # 新 Cloud 会据此冻结群成员交集；旧 Cloud 默认忽略未知字段，调用方
+            # 仍会校验响应快照，绝不静默接受未过滤门槛。
+            json_body["eligible_user_ids"] = eligible_user_ids
         payload = await self._refill_request(
             "POST",
             "/v1/group-roast-refills/prepare",
-            json_body={
-                "group_id": group_id,
-                "initiator_id": initiator_id,
-                "initiator_name": initiator_name,
-                "delivery_bot_id": delivery_bot_id,
-                "date_str": date_str or rollpig_date_str(),
-                "now_ts": now_ts,
-            },
+            json_body=json_body,
         )
         return GroupRoastRefillPrepareResult(
             status=str(payload.get("status") or "error"),

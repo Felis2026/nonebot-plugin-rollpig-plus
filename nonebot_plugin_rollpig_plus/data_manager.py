@@ -1093,17 +1093,18 @@ class PigDataManager:
         initiator_id: str,
         initiator_name: str,
         delivery_bot_id: str,
+        eligible_user_ids: Optional[list[str]] = None,
         date_str: Optional[str] = None,
         now_ts: Optional[float] = None,
     ) -> GroupRoastRefillPrepareResult:
-        """冻结门槛并原子创建申请；同群同日仅允许一场 voting。"""
+        """冻结门槛并原子创建申请；同群跨日也只允许一场未过期投票。"""
 
         target_date = date_str or rollpig_date_str()
         now = datetime.datetime.fromtimestamp(float(now_ts or time.time()), tz=datetime.timezone.utc)
         async with self._lock:
             changed = False
             for raw in self.data.setdefault("roast_refill_requests", {}).values():
-                if not isinstance(raw, dict) or raw.get("date_str") != target_date or raw.get("group_id") != str(group_id):
+                if not isinstance(raw, dict) or raw.get("group_id") != str(group_id):
                     continue
                 changed = self._expire_refill_locked(raw, now) or changed
                 if raw.get("status") == "voting":
@@ -1111,7 +1112,13 @@ class PigDataManager:
                         await self._atomic_save()
                     return GroupRoastRefillPrepareResult("existing", self._refill_from_raw(raw))
 
-            active_user_ids = tuple(sorted(self._group_active_users_locked(target_date, str(group_id))))
+            active_user_set = self._group_active_users_locked(target_date, str(group_id))
+            if eligible_user_ids is not None:
+                # 群成员名单来自 OneBot 的实时查询；本地日活只能在这个边界内参与
+                # 门槛计算，避免已退群或被错误登记的账号抬高票数。
+                eligible = {str(user_id) for user_id in eligible_user_ids if user_id}
+                active_user_set &= eligible
+            active_user_ids = tuple(sorted(active_user_set))
             if len(active_user_ids) < 3:
                 if changed:
                     await self._atomic_save()

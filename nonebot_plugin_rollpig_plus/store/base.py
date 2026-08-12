@@ -210,6 +210,7 @@ class RollpigStore(ABC):
         initiator_id: str,
         initiator_name: str,
         delivery_bot_id: str,
+        eligible_user_ids: Optional[list[str]] = None,
         date_str: Optional[str] = None,
         now_ts: Optional[float] = None,
     ) -> GroupRoastRefillPrepareResult:
