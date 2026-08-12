@@ -59,6 +59,36 @@ async def _fail_unusable_request(request_id: str, message_id: str, reason: str) 
         logger.warning(f"rollpig 烤箱补货失败状态写入异常: request={request_id} error={error}")
 
 
+async def _handle_post_send_probe_error(
+    bot: Bot,
+    request: GroupRoastRefillRequest,
+    error: RoastRefillReactionError,
+) -> bool:
+    """处理发消息后的能力探测异常；返回是否必须终止当前投票。"""
+
+    if not error.message_missing and not error.capability_unsupported:
+        # 网络抖动和临时 OneBot 异常不能证明接口不可用。保留 voting，后续 Notice
+        # 或再次执行命令会重新验票，避免一场已经发出的投票被永久作废。
+        logger.warning(
+            f"rollpig 烤箱补货发起后验票临时失败，申请保持有效: "
+            f"request={request.request_id} error={error}"
+        )
+        return False
+
+    reason = "message_missing" if error.message_missing else "reaction_unsupported"
+    await _fail_unusable_request(request.request_id, request.message_id, reason)
+    if error.message_missing:
+        text = "补货投票消息已经失效，本轮申请已停止，请重新发起。"
+    else:
+        text = pick_refill_unsupported_text()
+    logger.warning(
+        f"rollpig 烤箱补货投票无法继续: "
+        f"request={request.request_id} reason={reason} error={error}"
+    )
+    await bot.send_group_msg(group_id=int(request.group_id), message=text)
+    return True
+
+
 def _preparation_matches_members(
     preparation: GroupRoastRefillPrepareResult,
     eligible_user_ids: set[str],
@@ -250,10 +280,8 @@ async def _(bot: Bot, event: Event):
         await fetch_refill_reactors(bot, message_id)
         await fetch_refill_group_members(bot, str(event.group_id))
     except RoastRefillReactionError as error:
-        await _fail_unusable_request(request.request_id, message_id, "reaction_unsupported")
-        logger.warning(f"rollpig 烤箱补货 reaction 能力不可用: request={request.request_id} error={error}")
-        await bot.send_group_msg(group_id=event.group_id, message=pick_refill_unsupported_text())
-        return
+        if await _handle_post_send_probe_error(bot, bound, error):
+            return
     if not reaction_added:
         await bot.send_group_msg(group_id=event.group_id, message=pick_refill_reaction_hint())
 

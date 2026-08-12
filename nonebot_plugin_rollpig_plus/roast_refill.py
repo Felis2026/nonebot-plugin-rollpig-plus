@@ -29,9 +29,51 @@ ROAST_REFILL_IMAGE_PATH = Path(__file__).parent / "resource" / "refill.png"
 
 
 class RoastRefillReactionError(RuntimeError):
-    def __init__(self, message: str, *, message_missing: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        message_missing: bool = False,
+        capability_unsupported: bool = False,
+    ):
         super().__init__(message)
         self.message_missing = message_missing
+        self.capability_unsupported = capability_unsupported
+
+
+def _reaction_error_flags(message: str) -> tuple[bool, bool]:
+    """区分投票消息失效、协议明确不支持与可重试的瞬时错误。"""
+
+    lowered = str(message).lower()
+    message_missing = any(
+        token in lowered
+        for token in (
+            "消息不存在",
+            "msg not found",
+            "message not found",
+            "message does not exist",
+        )
+    )
+    capability_unsupported = any(
+        token in lowered
+        for token in (
+            "unsupported api",
+            "unsupported",
+            "api not found",
+            "unknown api",
+            "unknown action",
+            "action not found",
+            "not supported",
+            "not implemented",
+            "接口不存在",
+            "动作不存在",
+            "不支持",
+            "不支持该接口",
+            "不支持此接口",
+            "未实现该接口",
+        )
+    )
+    return message_missing, capability_unsupported
 
 
 def extract_message_id(send_result: Any) -> str:
@@ -88,16 +130,24 @@ async def fetch_refill_reactors(bot: Bot, message_id: str) -> set[str]:
                 cookie=cookie,
             )
         except Exception as error:
-            lowered = str(error).lower()
-            missing = any(token in lowered for token in ("消息不存在", "msg not found", "message not found", "404"))
-            raise RoastRefillReactionError(str(error), message_missing=missing) from error
+            error_message = str(error)
+            missing, unsupported = _reaction_error_flags(error_message)
+            raise RoastRefillReactionError(
+                error_message,
+                message_missing=missing,
+                capability_unsupported=unsupported,
+            ) from error
 
         payload = _reaction_payload(response)
         result_code = payload.get("result")
         if result_code not in {None, 0, "0"}:
             error_message = str(payload.get("errMsg") or payload.get("message") or result_code)
-            missing = any(token in error_message.lower() for token in ("消息不存在", "msg not found", "message not found"))
-            raise RoastRefillReactionError(error_message, message_missing=missing)
+            missing, unsupported = _reaction_error_flags(error_message)
+            raise RoastRefillReactionError(
+                error_message,
+                message_missing=missing,
+                capability_unsupported=unsupported,
+            )
         likes = payload.get("emojiLikesList", [])
         if not isinstance(likes, list):
             raise RoastRefillReactionError("fetch_emoji_like 缺少 emojiLikesList")
