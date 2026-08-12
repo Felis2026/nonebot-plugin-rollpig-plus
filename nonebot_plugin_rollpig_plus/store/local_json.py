@@ -8,6 +8,9 @@ from .models import (
     CooldownConsumeResult,
     DailyRollResult,
     DrawState,
+    GroupRoastRefillCompleteResult,
+    GroupRoastRefillPrepareResult,
+    GroupRoastRefillRequest,
     RoastEvent,
     RoastReservation,
     RoastReservationClaimResult,
@@ -180,4 +183,66 @@ class LocalJsonStore(RollpigStore):
         return await self.manager.release_roast_reservation(
             reservation.reservation_id,
             reservation.claim_token,
+        )
+
+    # ================================ 烤箱补货 ================================ #
+
+    async def mark_group_active_users(
+        self,
+        group_id: str,
+        user_ids: list[str],
+        date_str: Optional[str] = None,
+    ) -> None:
+        await self.manager.mark_group_active_users(group_id, user_ids, date_str=date_str)
+
+    async def get_group_active_user_ids(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+    ) -> set[str]:
+        return self.manager.get_group_active_user_ids(group_id, date_str=date_str)
+
+    async def prepare_group_roast_refill(self, **kwargs) -> GroupRoastRefillPrepareResult:
+        return await self.manager.prepare_group_roast_refill(**kwargs)
+
+    async def bind_group_roast_refill_message(
+        self,
+        request_id: str,
+        message_id: str,
+    ) -> Optional[GroupRoastRefillRequest]:
+        return await self.manager.bind_group_roast_refill_message(request_id, message_id)
+
+    async def get_group_roast_refill(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> Optional[GroupRoastRefillRequest]:
+        return await self.manager.get_group_roast_refill(group_id, date_str=date_str, now_ts=now_ts)
+
+    async def fail_group_roast_refill(
+        self,
+        request_id: str,
+        message_id: str,
+        reason: str,
+    ) -> bool:
+        return await self.manager.fail_group_roast_refill(request_id, message_id, reason)
+
+    async def complete_group_roast_refill(
+        self,
+        *,
+        request_id: str,
+        message_id: str,
+        voter_ids: list[str],
+        excluded_user_ids: list[str],
+        max_charges: int = 2,
+        now_ts: Optional[float] = None,
+    ) -> GroupRoastRefillCompleteResult:
+        return await self.manager.complete_group_roast_refill(
+            request_id=request_id,
+            message_id=message_id,
+            voter_ids=voter_ids,
+            excluded_user_ids=excluded_user_ids,
+            max_charges=max_charges,
+            now_ts=now_ts,
         )

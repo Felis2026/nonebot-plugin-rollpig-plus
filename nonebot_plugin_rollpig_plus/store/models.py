@@ -5,12 +5,23 @@ from typing import Any, Optional
 
 
 MAX_EXPERT_LEVEL = 5
+ROAST_REFILL_RATIOS = (25, 35, 45, 55, 65)
 
 
 def expert_level_from_copies(copies: int) -> int:
     """根据累计抽取次数计算 EX Lv.；异常或旧数据统一钳制到 0～5。"""
 
     return min(max(int(copies or 0) - 1, 0), MAX_EXPERT_LEVEL)
+
+
+def roast_refill_threshold(active_count: int, success_count: int) -> tuple[int, int]:
+    """返回本轮比例与向上取整票数；成功次数超过四次后固定使用 65%。"""
+
+    normalized_active = max(0, int(active_count or 0))
+    normalized_success = max(0, int(success_count or 0))
+    ratio = ROAST_REFILL_RATIOS[min(normalized_success, len(ROAST_REFILL_RATIOS) - 1)]
+    required_votes = max(2, (normalized_active * ratio + 99) // 100)
+    return ratio, required_votes
 
 
 @dataclass(frozen=True)
@@ -140,3 +151,40 @@ class RoastReservationPrepareResult:
 class RoastReservationClaimResult:
     reservations: tuple[RoastReservation, ...] = ()
     has_owned: bool = False
+
+
+@dataclass(frozen=True)
+class GroupRoastRefillRequest:
+    request_id: str
+    date_str: str
+    group_id: str
+    initiator_id: str
+    initiator_name: str
+    delivery_bot_id: str
+    message_id: str = ""
+    active_count_snapshot: int = 0
+    required_ratio: int = 25
+    required_votes: int = 2
+    success_count_before: int = 0
+    status: str = "voting"
+    created_at: str = ""
+    expires_at: str = ""
+    completed_at: str = ""
+    benefited_user_ids: tuple[str, ...] = ()
+    failure_reason: str = ""
+
+
+@dataclass(frozen=True)
+class GroupRoastRefillPrepareResult:
+    status: str
+    request: Optional[GroupRoastRefillRequest] = None
+    active_user_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class GroupRoastRefillCompleteResult:
+    completed: bool
+    status: str
+    request: Optional[GroupRoastRefillRequest] = None
+    valid_voter_ids: tuple[str, ...] = ()
+    benefited_user_ids: tuple[str, ...] = ()

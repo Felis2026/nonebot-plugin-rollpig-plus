@@ -13,6 +13,9 @@ from .models import (
     CooldownConsumeResult,
     DailyRollResult,
     DrawState,
+    GroupRoastRefillCompleteResult,
+    GroupRoastRefillPrepareResult,
+    GroupRoastRefillRequest,
     PigProgress,
     RoastEvent,
     RoastReservation,
@@ -29,6 +32,10 @@ class CloudStoreError(RuntimeError):
 
 class CloudReservationUnsupportedError(CloudStoreError):
     """旧版 Cloud 没有预约接口时抛出，handler 可只降级预约场景。"""
+
+
+class CloudRoastRefillUnsupportedError(CloudStoreError):
+    """旧版 Cloud 没有补货接口时抛出，不影响其他 RollPig 功能。"""
 
 
 class CloudStore(RollpigStore):
@@ -99,7 +106,16 @@ class CloudStore(RollpigStore):
                 raise CloudReservationUnsupportedError(str(error)) from error
             raise
 
-    # ================================ 事件与预约完成 ================================ #
+    async def _refill_request(self, method: str, path: str, **kwargs):
+        """补货接口独立兼容降级，避免新插件连接旧 Cloud 时扩大故障面。"""
+
+        try:
+            return await self._request(method, path, **kwargs)
+        except CloudStoreError as error:
+            cause = error.__cause__
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in {404, 405}:
+                raise CloudRoastRefillUnsupportedError(str(error)) from error
+            raise
 
     @staticmethod
     def _parse_reservation(payload: dict | None) -> Optional[RoastReservation]:
@@ -130,6 +146,32 @@ class CloudStore(RollpigStore):
             target_pig_id=str(payload.get("target_pig_id") or ""),
             outcome_snapshot=(dict(payload["outcome_snapshot"]) if isinstance(payload.get("outcome_snapshot"), dict) else None),
             claim_token=str(payload.get("claim_token") or ""),
+        )
+
+    @staticmethod
+    def _parse_refill(payload: dict | None) -> Optional[GroupRoastRefillRequest]:
+        if not isinstance(payload, dict) or not payload.get("request_id"):
+            return None
+        return GroupRoastRefillRequest(
+            request_id=str(payload["request_id"]),
+            date_str=str(payload.get("date_str") or ""),
+            group_id=str(payload.get("group_id") or ""),
+            initiator_id=str(payload.get("initiator_id") or ""),
+            initiator_name=str(payload.get("initiator_name") or ""),
+            delivery_bot_id=str(payload.get("delivery_bot_id") or ""),
+            message_id=str(payload.get("message_id") or ""),
+            active_count_snapshot=int(payload.get("active_count_snapshot") or 0),
+            required_ratio=int(payload.get("required_ratio") or 25),
+            required_votes=int(payload.get("required_votes") or 2),
+            success_count_before=int(payload.get("success_count_before") or 0),
+            status=str(payload.get("status") or "voting"),
+            created_at=str(payload.get("created_at") or ""),
+            expires_at=str(payload.get("expires_at") or ""),
+            completed_at=str(payload.get("completed_at") or ""),
+            benefited_user_ids=tuple(sorted({
+                str(user_id) for user_id in payload.get("benefited_user_ids", []) if user_id
+            })),
+            failure_reason=str(payload.get("failure_reason") or ""),
         )
 
     async def get_daily_roll(self, user_id: str, date_str: Optional[str] = None) -> Optional[str]:
@@ -325,6 +367,8 @@ class CloudStore(RollpigStore):
             json_body={"user_id": user_id, "date_str": date_str or rollpig_date_str()},
         )
         return bool(payload.get("allowed"))
+
+    # ================================ 事件与预约完成 ================================ #
 
     @staticmethod
     def _roast_event_payload(event: RoastEvent, *, date_str: str) -> dict:
@@ -572,3 +616,139 @@ class CloudStore(RollpigStore):
             json_body={"reservation_id": reservation.reservation_id, "claim_token": reservation.claim_token},
         )
         return bool(payload.get("ok"))
+
+    # ================================ 烤箱补货 ================================ #
+
+    async def mark_group_active_users(
+        self,
+        group_id: str,
+        user_ids: list[str],
+        date_str: Optional[str] = None,
+    ) -> None:
+        await self._refill_request(
+            "POST",
+            "/v1/group-roast-refills/active-users/mark",
+            json_body={
+                "group_id": group_id,
+                "user_ids": user_ids,
+                "date_str": date_str or rollpig_date_str(),
+            },
+        )
+
+    async def get_group_active_user_ids(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+    ) -> set[str]:
+        payload = await self._refill_request(
+            "GET",
+            "/v1/group-roast-refills/active-users",
+            params={"group_id": group_id, "date_str": date_str or rollpig_date_str()},
+        )
+        return {str(user_id) for user_id in payload.get("user_ids", []) if user_id}
+
+    async def prepare_group_roast_refill(
+        self,
+        *,
+        group_id: str,
+        initiator_id: str,
+        initiator_name: str,
+        delivery_bot_id: str,
+        date_str: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> GroupRoastRefillPrepareResult:
+        payload = await self._refill_request(
+            "POST",
+            "/v1/group-roast-refills/prepare",
+            json_body={
+                "group_id": group_id,
+                "initiator_id": initiator_id,
+                "initiator_name": initiator_name,
+                "delivery_bot_id": delivery_bot_id,
+                "date_str": date_str or rollpig_date_str(),
+                "now_ts": now_ts,
+            },
+        )
+        return GroupRoastRefillPrepareResult(
+            status=str(payload.get("status") or "error"),
+            request=self._parse_refill(payload.get("request")),
+            active_user_ids=tuple(sorted({
+                str(user_id) for user_id in payload.get("active_user_ids", []) if user_id
+            })),
+        )
+
+    async def bind_group_roast_refill_message(
+        self,
+        request_id: str,
+        message_id: str,
+    ) -> Optional[GroupRoastRefillRequest]:
+        payload = await self._refill_request(
+            "POST",
+            "/v1/group-roast-refills/bind-message",
+            json_body={"request_id": request_id, "message_id": message_id},
+        )
+        return self._parse_refill(payload.get("request"))
+
+    async def get_group_roast_refill(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> Optional[GroupRoastRefillRequest]:
+        payload = await self._refill_request(
+            "GET",
+            "/v1/group-roast-refills/active",
+            params={
+                "group_id": group_id,
+                "date_str": date_str or rollpig_date_str(),
+                "now_ts": now_ts,
+            },
+        )
+        return self._parse_refill(payload.get("request"))
+
+    async def fail_group_roast_refill(
+        self,
+        request_id: str,
+        message_id: str,
+        reason: str,
+    ) -> bool:
+        payload = await self._refill_request(
+            "POST",
+            "/v1/group-roast-refills/fail",
+            json_body={"request_id": request_id, "message_id": message_id, "reason": reason},
+        )
+        return bool(payload.get("allowed"))
+
+    async def complete_group_roast_refill(
+        self,
+        *,
+        request_id: str,
+        message_id: str,
+        voter_ids: list[str],
+        excluded_user_ids: list[str],
+        max_charges: int = 2,
+        now_ts: Optional[float] = None,
+    ) -> GroupRoastRefillCompleteResult:
+        payload = await self._refill_request(
+            "POST",
+            "/v1/group-roast-refills/complete",
+            json_body={
+                "request_id": request_id,
+                "message_id": message_id,
+                "voter_ids": voter_ids,
+                "excluded_user_ids": excluded_user_ids,
+                "max_charges": max_charges,
+                "now_ts": now_ts,
+            },
+        )
+        return GroupRoastRefillCompleteResult(
+            completed=bool(payload.get("completed")),
+            status=str(payload.get("status") or "error"),
+            request=self._parse_refill(payload.get("request")),
+            valid_voter_ids=tuple(sorted({
+                str(user_id) for user_id in payload.get("valid_voter_ids", []) if user_id
+            })),
+            benefited_user_ids=tuple(sorted({
+                str(user_id) for user_id in payload.get("benefited_user_ids", []) if user_id
+            })),
+        )

@@ -28,6 +28,7 @@ __plugin_meta__ = PluginMetadata(
     今日烤猪 - 把今天的猪做成美食
     烤群友 - 用魔法烤箱把群友做成美味的烤猪
     加急生火 - 每日一次的强制成功烤猪
+    烤箱补货 - 管理员发起续标识投票，为本群活跃玩家恢复普通烧烤次数
     
     📊 统计指令：
     我的猪圈 - 查看解锁进度
@@ -45,5 +46,6 @@ __plugin_meta__ = PluginMetadata(
 # handlers 的导入顺序就是 matcher 注册顺序。
 from .handlers import roll as _roll_handlers  # noqa: E402, F401
 from .handlers import roast as _roast_handlers  # noqa: E402, F401
+from .handlers import refill as _refill_handlers  # noqa: E402, F401
 from .handlers import collection as _collection_handlers  # noqa: E402, F401
 from .handlers import control as _control_handlers  # noqa: E402, F401
