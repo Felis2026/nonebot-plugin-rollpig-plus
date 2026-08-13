@@ -41,6 +41,7 @@ from ..texts import (
 )
 from ..helpers import guard_group_enabled, guard_store_errors
 from ..helpers import (
+    GroupMemberLookupError,
     get_event_group_id,
     get_event_user_name,
     get_group_member_display_name,
@@ -234,6 +235,14 @@ async def _(bot: Bot, event: GroupMessageEvent):
         await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + bot_text)
         return
 
+    if not target.is_group_member:
+        # 被 @ 的 QQ 号可能从未在群内，回复对象也可能已经退群。未确认当前成员
+        # 身份前不能把对方登记为本群日活，更不能让其影响补货门槛。
+        await cmd_roast_member.finish(
+            MessageSegment.reply(event.message_id) + "暂时无法确认对方仍在本群，请核对成员后再试。"
+        )
+        return
+
     # 只有解析出真实可烤的群友后才记录“未抽猪先烤”。用法错误、自烤和 Bot
     # 特殊互动都不应消耗违规次数，更不能触发第二次反噬。
     attacker_pig = await _load_attacker_pig_or_finish(
@@ -401,7 +410,13 @@ async def _load_random_roast_context_or_finish(matcher, bot: Bot, event: GroupMe
 
     attacker_id = str(event.user_id)
     bot_id = str(event.self_id)
-    candidates = await get_group_roll_candidates(bot, event.group_id, {attacker_id, bot_id})
+    try:
+        candidates = await get_group_roll_candidates(bot, event.group_id, {attacker_id, bot_id})
+    except GroupMemberLookupError:
+        await matcher.finish(
+            MessageSegment.reply(event.message_id) + "暂时无法读取当前群成员，随机烤猪没有执行。"
+        )
+        return None, []
     if not candidates:
         await matcher.finish(
             MessageSegment.reply(event.message_id) + "今天还没有别人抽猪，没有可以烤的目标！"

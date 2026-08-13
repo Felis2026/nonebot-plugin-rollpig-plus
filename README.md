@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
-    <img src="https://img.shields.io/badge/Version-0.11.0-ff69b4" alt="Version 0.11.0">
+    <img src="https://img.shields.io/badge/Version-0.11.1-ff69b4" alt="Version 0.11.1">
   </p>
 </div>
 
@@ -46,7 +46,7 @@ nb plugin install nonebot-plugin-rollpig-plus
 如需固定到指定版本：
 
 ```bash
-pip install nonebot-plugin-rollpig-plus==0.11.0
+pip install nonebot-plugin-rollpig-plus==0.11.1
 ```
 
 手动安装后，请确认 NoneBot 已加载插件模块：
@@ -70,6 +70,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪。 |
 | `随机烤猪` | 从当前群已有记录中随机选择目标进行烤群友。 |
 | `加急生火 @目标` | 使用加急模式烤群友；仍受特殊形态与权限规则限制。 |
+| `烤箱补货` | 群主、管理员或 SUPERUSER 发起 10 分钟投票，为本群今日活跃玩家恢复普通烧烤次数。 |
 | `我的猪圈` | 查看已解锁数量、收藏率、最高 EX Lv.、本命猪等摘要。 |
 | `小猪图鉴 [页码]` | 生成图片版小猪图鉴。 |
 | `本周小猪` | 生成本周猪猪总结长图。 |
@@ -93,6 +94,8 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 - 普通烤群友默认最多储存 2 次，每 8 小时恢复 1 次。
 - 发起者需要已抽取自己的当日小猪。
 - 目标尚未抽猪时会建立当前群的预约烤猪：第一位用户成为主厨并消耗一次普通充能，后续最多 11 位群友可以免费添柴。
+- `烤箱补货` 达标后会把成功时本群全部今日活跃玩家的普通烧烤次数恢复至配额上限。
+- 每群当天补货门槛以发起瞬间的活跃玩家数为固定分母，依次按 25% / 35% / 45% / 55% 计算，并分别封顶为 8 / 12 / 16 / 20 票；票数向上取整且至少 2 票，第四次后不再提高，失败不增加门槛。
 
 ### 每日总结控制
 
@@ -262,6 +265,7 @@ nonebot_plugin_rollpig_plus/
 ├─ roast_manager.py         # AI 烤猪、共享文案同步与来源索引
 ├─ roll_flow.py             # 抽猪业务规则
 ├─ roast_flow.py            # 烤群友业务规则
+├─ roast_refill.py          # 烤箱补货规则、NapCat reaction 与验票结算
 ├─ reservation_flow.py      # 预约烤猪结算、结果快照与投递
 ├─ reservation_delivery.py  # 跨 Bot Owner 恢复、机会式检查与低频轮询
 ├─ runtime.py               # 宿主适配 / 群开关 / 运行时工具
@@ -280,11 +284,20 @@ nonebot_plugin_rollpig_plus/
 
 ## 📋 最近更新
 
+### v0.11.1 烤箱补货
+
+- 群主、管理员或 SUPERUSER 可发起 10 分钟投票；至少需要 3 名本群当日活跃玩家。
+- 达标后把成功时本群全部今日活跃玩家的全局普通烧烤次数恢复至配额上限，并从成功时刻重新计算自然恢复。
+- 门槛以发起瞬间的活跃人数为固定分母，按当天成功次数使用 25% / 35% / 45% / 55%，对应最多 8 / 12 / 16 / 20 票；第四次后保持不变。
+- Cloud 模式需先升级 RollPig Cloud 至 0.4.0+，再升级 Plus；Cloud 0.4.0 仍兼容旧版 Plus 的既有接口。
+
 ### v0.11.0 预约烤猪
 
 - 自己未抽猪时不再能烤群友
 - 目标未抽猪时建立群内预约烤猪；主厨消耗资源，其他群友免费加入，单场最多 12 人。
-- Local 与 Cloud 后端均完整支持预约；新插件连接旧 Cloud 时只把预约场景降级为原有“目标未抽猪”提示。
+- 负责该预约的 Owner Bot 会在启动恢复后每 60 秒最多执行一次轻量领取；普通 RollPig 指令、资源同步完成和群功能重新可用时也会提前唤醒。
+- 本地缺少资源或目标群关闭时会暂缓该预约，避免每分钟重复领取和刷日志；Cloud 状态不因此新增阻塞类型。
+- Local 与 Cloud 后端均完整支持预约；新插件连接旧 Cloud 时只把预约场景降级为原有「目标未抽猪」提示。
 
 ### v0.10.0 共享文案与 EX 成长差分
 

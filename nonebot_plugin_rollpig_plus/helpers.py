@@ -53,6 +53,11 @@ class RoastTarget:
 
     target_id: str | None
     target_name: str
+    is_group_member: bool = False
+
+
+class GroupMemberLookupError(RuntimeError):
+    """当前群成员名单无法可靠读取。"""
 
 
 async def resolve_roast_target(bot: Bot, event: GroupMessageEvent) -> RoastTarget:
@@ -60,6 +65,7 @@ async def resolve_roast_target(bot: Bot, event: GroupMessageEvent) -> RoastTarge
 
     target_id: str | None = None
     target_name = "群友"
+    is_group_member = False
 
     if event.reply:
         target_id = str(event.reply.sender.user_id)
@@ -79,10 +85,15 @@ async def resolve_roast_target(bot: Bot, event: GroupMessageEvent) -> RoastTarge
         try:
             member_info = await bot.get_group_member_info(group_id=event.group_id, user_id=int(target_id))
             target_name = member_info.get("card") or member_info.get("nickname") or target_name
+            is_group_member = True
         except Exception as error:
             logger.debug(f"获取群成员信息失败: group={event.group_id} user={target_id} error={error}")
 
-    return RoastTarget(target_id=target_id, target_name=target_name)
+    return RoastTarget(
+        target_id=target_id,
+        target_name=target_name,
+        is_group_member=is_group_member,
+    )
 
 
 async def get_group_member_display_name(bot: Bot, group_id: int, user_id: str, default: str = "群友") -> str:
@@ -96,23 +107,25 @@ async def get_group_member_display_name(bot: Bot, group_id: int, user_id: str, d
 
 
 async def get_group_roll_candidates(bot: Bot, group_id: int, exclude_ids: set[str]) -> list[str]:
-    """优先按当前群成员范围筛候选；接口异常时回退到群内已登记过的今日形态。"""
+    """按当前群成员范围筛候选；名单不可用时拒绝使用可能已过期的群记录。"""
 
     today = rollpig_date_str()
     today_rolls = await store.get_daily_rolls(today)
 
     try:
-        members = await bot.call_api("get_group_member_list", group_id=group_id)
+        response = await bot.call_api("get_group_member_list", group_id=group_id)
+        members = response.get("data") if isinstance(response, dict) else response
+        if not isinstance(members, list):
+            raise ValueError("get_group_member_list 返回格式无效")
         member_ids = {
             str(member.get("user_id"))
             for member in members
-            if member.get("user_id") is not None
+            if isinstance(member, dict) and member.get("user_id") is not None
         }
         return [uid for uid in today_rolls if uid in member_ids and uid not in exclude_ids]
     except Exception as error:
         logger.debug(f"获取群成员列表失败: group={group_id} error={error}")
-        group_rolls = await store.get_group_rolls(str(group_id), today)
-        return [uid for uid in group_rolls if uid not in exclude_ids]
+        raise GroupMemberLookupError(str(error)) from error
 
 
 # ================================ 命令守卫 ================================ #

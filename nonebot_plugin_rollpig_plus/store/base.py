@@ -8,6 +8,9 @@ from .models import (
     CooldownConsumeResult,
     DailyRollResult,
     DrawState,
+    GroupRoastRefillCompleteResult,
+    GroupRoastRefillPrepareResult,
+    GroupRoastRefillRequest,
     RoastEvent,
     RoastReservation,
     RoastReservationClaimResult,
@@ -178,4 +181,76 @@ class RollpigStore(ABC):
 
     @abstractmethod
     async def release_roast_reservation(self, reservation: RoastReservation) -> bool:
+        raise NotImplementedError
+
+    # ================================ 烤箱补货 ================================ #
+
+    @abstractmethod
+    async def mark_group_active_users(
+        self,
+        group_id: str,
+        user_ids: list[str],
+        date_str: Optional[str] = None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_group_active_user_ids(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+    ) -> set[str]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def prepare_group_roast_refill(
+        self,
+        *,
+        group_id: str,
+        initiator_id: str,
+        initiator_name: str,
+        delivery_bot_id: str,
+        eligible_user_ids: Optional[list[str]] = None,
+        date_str: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> GroupRoastRefillPrepareResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def bind_group_roast_refill_message(
+        self,
+        request_id: str,
+        message_id: str,
+    ) -> Optional[GroupRoastRefillRequest]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_group_roast_refill(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> Optional[GroupRoastRefillRequest]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def fail_group_roast_refill(
+        self,
+        request_id: str,
+        message_id: str,
+        reason: str,
+    ) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def complete_group_roast_refill(
+        self,
+        *,
+        request_id: str,
+        message_id: str,
+        voter_ids: list[str],
+        excluded_user_ids: list[str],
+        max_charges: int = 2,
+        now_ts: Optional[float] = None,
+    ) -> GroupRoastRefillCompleteResult:
         raise NotImplementedError

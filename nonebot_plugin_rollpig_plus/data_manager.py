@@ -16,6 +16,9 @@ from .store.models import (
     CooldownConsumeResult,
     DailyRollResult,
     DrawState,
+    GroupRoastRefillCompleteResult,
+    GroupRoastRefillPrepareResult,
+    GroupRoastRefillRequest,
     PigProgress,
     RoastEvent,
     RoastReservation,
@@ -23,6 +26,7 @@ from .store.models import (
     RoastReservationParticipant,
     RoastReservationPrepareResult,
     UnrolledRoastAttemptResult,
+    roast_refill_threshold,
 )
 
 ROAST_COOLDOWN_SECONDS = resolve_roast_cooldown_seconds()
@@ -30,6 +34,7 @@ DEFAULT_ROAST_CHARGE_MAX = 2
 ROAST_RESERVATION_MAX_PARTICIPANTS = 12
 ROAST_RESERVATION_CLAIM_TIMEOUT_SECONDS = 5 * 60
 ROAST_RESERVATION_CROSS_DAY_GRACE_SECONDS = 10 * 60
+ROAST_REFILL_TTL_SECONDS = 10 * 60
 
 
 # ================================ 预约跨日重试 ================================ #
@@ -121,6 +126,8 @@ class PigDataManager:
     - daily_events: {date: [event, ...]}      ← 群内烧烤事件（用于日报）
     - unrolled_roast_attempts: {date: {user_id: count}} ← 未抽猪先烤的每日违规次数
     - roast_reservations: {reservation_id: reservation} ← 延迟到目标抽猪后结算的群预约
+    - group_daily_active_users: {date: {group_id: [user_id, ...]}} ← 群日活玩家
+    - roast_refill_requests: {request_id: request} ← 烤箱补货投票及结果
 
     写操作通过 asyncio.Lock 串行化，文件使用原子替换（.tmp → rename）防止 JSON 损坏。
     """
@@ -147,6 +154,8 @@ class PigDataManager:
             "protected": {},
             "unrolled_roast_attempts": {},
             "roast_reservations": {},
+            "group_daily_active_users": {},
+            "roast_refill_requests": {},
         }
 
     def _load(self) -> dict:
@@ -194,6 +203,8 @@ class PigDataManager:
             "daily_events",
             "unrolled_roast_attempts",
             "roast_reservations",
+            "group_daily_active_users",
+            "roast_refill_requests",
         ):
             if not isinstance(data.get(key), dict):
                 data[key] = {}
@@ -265,6 +276,58 @@ class PigDataManager:
                 data["protected"] = normalized_protected
                 migrated = True
 
+        # ================================ 群日活回填 ================================ #
+        # 升级当天不能要求老用户重新触发一次命令；从已有群抽猪、烧烤事件和预约记录补齐日活集合。
+        active_map = data.setdefault("group_daily_active_users", {})
+        normalized_active: dict[str, dict[str, set[str]]] = {}
+        for date_str, group_map in active_map.items():
+            if not isinstance(group_map, dict):
+                continue
+            for group_id, user_ids in group_map.items():
+                if isinstance(user_ids, list):
+                    normalized_active.setdefault(str(date_str), {}).setdefault(str(group_id), set()).update(
+                        str(user_id) for user_id in user_ids if user_id
+                    )
+        for date_str, group_map in data.get("group_rolls", {}).items():
+            if not isinstance(group_map, dict):
+                continue
+            for group_id, rolls in group_map.items():
+                if isinstance(rolls, dict):
+                    normalized_active.setdefault(str(date_str), {}).setdefault(str(group_id), set()).update(
+                        str(user_id) for user_id in rolls if user_id
+                    )
+        for date_str, events in data.get("daily_events", {}).items():
+            if not isinstance(events, list):
+                continue
+            for event in events:
+                if not isinstance(event, dict) or not event.get("group_id"):
+                    continue
+                participant_ids = event.get("participant_ids")
+                if not isinstance(participant_ids, list):
+                    participant_ids = []
+                users = [event.get("attacker"), *participant_ids]
+                if event.get("type") != "bot_backfire":
+                    users.append(event.get("target"))
+                normalized_active.setdefault(str(date_str), {}).setdefault(str(event["group_id"]), set()).update(
+                    str(user_id) for user_id in users if user_id
+                )
+        for reservation in data.get("roast_reservations", {}).values():
+            if not isinstance(reservation, dict) or not reservation.get("date_str") or not reservation.get("group_id"):
+                continue
+            participant_ids = [
+                item.get("user_id") for item in reservation.get("participants", []) if isinstance(item, dict)
+            ]
+            normalized_active.setdefault(str(reservation["date_str"]), {}).setdefault(
+                str(reservation["group_id"]), set()
+            ).update(str(user_id) for user_id in participant_ids if user_id)
+        serialized_active = {
+            date_str: {group_id: sorted(user_ids) for group_id, user_ids in group_map.items()}
+            for date_str, group_map in normalized_active.items()
+        }
+        if serialized_active != active_map:
+            data["group_daily_active_users"] = serialized_active
+            migrated = True
+
         # ================================ 预约投递状态迁移 ================================ #
         # 旧版本可能在 QQ 消息成功后、completed 落盘前遗留 processing + outcome。
         # 这类记录是否已经发送无法可靠判断，必须按“可能已发送”处理，禁止超时重领。
@@ -282,6 +345,71 @@ class PigDataManager:
                 self.data = data
                 self._sync_save()  # 迁移后立即落盘，防止重启丢失
         return data
+
+    # ================================ 烤箱补货序列化 ================================ #
+
+    def _refill_from_raw(self, raw: dict) -> GroupRoastRefillRequest:
+        """把补货申请恢复为只读领域对象，集合字段统一去重排序。"""
+
+        benefited = tuple(sorted({str(user_id) for user_id in raw.get("benefited_user_ids", []) if user_id}))
+        return GroupRoastRefillRequest(
+            request_id=str(raw.get("request_id") or ""),
+            date_str=str(raw.get("date_str") or ""),
+            group_id=str(raw.get("group_id") or ""),
+            initiator_id=str(raw.get("initiator_id") or ""),
+            initiator_name=str(raw.get("initiator_name") or ""),
+            delivery_bot_id=str(raw.get("delivery_bot_id") or ""),
+            message_id=str(raw.get("message_id") or ""),
+            active_count_snapshot=max(0, _safe_int(raw.get("active_count_snapshot"), 0)),
+            required_ratio=max(0, _safe_int(raw.get("required_ratio"), 25)),
+            required_votes=max(2, _safe_int(raw.get("required_votes"), 2)),
+            success_count_before=max(0, _safe_int(raw.get("success_count_before"), 0)),
+            status=str(raw.get("status") or "voting"),
+            created_at=str(raw.get("created_at") or ""),
+            expires_at=str(raw.get("expires_at") or ""),
+            completed_at=str(raw.get("completed_at") or ""),
+            benefited_user_ids=benefited,
+            failure_reason=str(raw.get("failure_reason") or ""),
+        )
+
+    def _find_refill_locked(self, request_id: str) -> Optional[dict]:
+        raw = self.data.setdefault("roast_refill_requests", {}).get(str(request_id))
+        return raw if isinstance(raw, dict) else None
+
+    def _expire_refill_locked(self, raw: dict, now: datetime.datetime) -> bool:
+        """懒过期 voting 申请；失败和成功记录保持不可逆。"""
+
+        if raw.get("status") != "voting":
+            return False
+        try:
+            expires_at = datetime.datetime.fromisoformat(str(raw.get("expires_at") or ""))
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            expires_at = now
+        if expires_at > now:
+            return False
+        raw["status"] = "expired"
+        raw["failure_reason"] = "expired"
+        return True
+
+    def _group_active_users_locked(self, date_str: str, group_id: str) -> set[str]:
+        day_map = self.data.setdefault("group_daily_active_users", {}).setdefault(date_str, {})
+        raw_users = day_map.setdefault(str(group_id), [])
+        if not isinstance(raw_users, list):
+            raw_users = []
+            day_map[str(group_id)] = raw_users
+        return {str(user_id) for user_id in raw_users if user_id}
+
+    def _mark_group_active_users_locked(self, date_str: str, group_id: str, user_ids: list[str]) -> bool:
+        if not group_id:
+            return False
+        current = self._group_active_users_locked(date_str, group_id)
+        updated = current | {str(user_id) for user_id in user_ids if user_id}
+        if updated == current:
+            return False
+        self.data["group_daily_active_users"][date_str][str(group_id)] = sorted(updated)
+        return True
 
     # ================================ 预约烤猪序列化 ================================ #
 
@@ -479,14 +607,16 @@ class PigDataManager:
         target_date = date_str or rollpig_date_str()
         return dict(self.data.get("history", {}).get(target_date, {}))
 
-    def _record_group_roll(self, date_str: str, group_id: str, user_id: str, pig_id: str):
+    def _record_group_roll(self, date_str: str, group_id: str, user_id: str, pig_id: str) -> bool:
         """在群维度登记今日已出现的猪形态，用于群内日报与随机烤群友。"""
         if not group_id:
-            return
+            return False
         group_rolls = self.data.setdefault("group_rolls", {})
         day_rolls = group_rolls.setdefault(date_str, {})
         group_roll_map = day_rolls.setdefault(group_id, {})
+        changed = group_roll_map.get(user_id) != pig_id
         group_roll_map[user_id] = pig_id
+        return self._mark_group_active_users_locked(date_str, group_id, [user_id]) or changed
 
     # ================================ P1A抽猪成长状态 ================================ #
     # 本地模式没有数据库事务，因此所有写入都必须在调用方持有 self._lock 时完成。
@@ -624,14 +754,7 @@ class PigDataManager:
 
             if existing_pig_id:
                 if group_id:
-                    before = (
-                        self.data.get("group_rolls", {})
-                        .get(target_date, {})
-                        .get(group_id, {})
-                        .get(user_id)
-                    )
-                    self._record_group_roll(target_date, group_id, user_id, existing_pig_id)
-                    dirty = before != existing_pig_id
+                    dirty = self._record_group_roll(target_date, group_id, user_id, existing_pig_id)
                 if dirty:
                     await self._atomic_save()
                 return self._build_existing_roll_result_locked(user_id, existing_pig_id)
@@ -705,6 +828,7 @@ class PigDataManager:
                     "display_name": str(attacker_name),
                     "pig_id": str(attacker_pig_id),
                 })
+                self._mark_group_active_users_locked(target_date, str(group_id), [attacker_id])
                 await self._atomic_save()
                 return RoastReservationPrepareResult("reservation_joined", self._reservation_from_raw(existing))
 
@@ -762,6 +886,7 @@ class PigDataManager:
                 "outcome_snapshot": None,
             }
             self.data.setdefault("roast_reservations", {})[reservation_id] = raw
+            self._mark_group_active_users_locked(target_date, str(group_id), [attacker_id])
             await self._atomic_save()
             return RoastReservationPrepareResult(
                 "reservation_created",
@@ -942,6 +1067,227 @@ class PigDataManager:
             await self._atomic_save()
             return True
 
+    # ================================ 烤箱补货事务 ================================ #
+
+    async def mark_group_active_users(
+        self,
+        group_id: str,
+        user_ids: list[str],
+        date_str: Optional[str] = None,
+    ) -> None:
+        """幂等登记群日活玩家；空群或空用户列表不会触发写盘。"""
+
+        target_date = date_str or rollpig_date_str()
+        async with self._lock:
+            if self._mark_group_active_users_locked(target_date, str(group_id), user_ids):
+                await self._atomic_save()
+
+    def get_group_active_user_ids(self, group_id: str, date_str: Optional[str] = None) -> set[str]:
+        target_date = date_str or rollpig_date_str()
+        return set(self._group_active_users_locked(target_date, str(group_id)))
+
+    async def prepare_group_roast_refill(
+        self,
+        *,
+        group_id: str,
+        initiator_id: str,
+        initiator_name: str,
+        delivery_bot_id: str,
+        eligible_user_ids: Optional[list[str]] = None,
+        date_str: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> GroupRoastRefillPrepareResult:
+        """冻结门槛并原子创建申请；同群跨日也只允许一场未过期投票。"""
+
+        target_date = date_str or rollpig_date_str()
+        now = datetime.datetime.fromtimestamp(float(now_ts or time.time()), tz=datetime.timezone.utc)
+        async with self._lock:
+            changed = False
+            for raw in self.data.setdefault("roast_refill_requests", {}).values():
+                if not isinstance(raw, dict) or raw.get("group_id") != str(group_id):
+                    continue
+                changed = self._expire_refill_locked(raw, now) or changed
+                if raw.get("status") == "voting":
+                    if changed:
+                        await self._atomic_save()
+                    return GroupRoastRefillPrepareResult("existing", self._refill_from_raw(raw))
+
+            active_user_set = self._group_active_users_locked(target_date, str(group_id))
+            if eligible_user_ids is not None:
+                # 群成员名单来自 OneBot 的实时查询；本地日活只能在这个边界内参与
+                # 门槛计算，避免已退群或被错误登记的账号抬高票数。
+                eligible = {str(user_id) for user_id in eligible_user_ids if user_id}
+                active_user_set &= eligible
+            active_user_ids = tuple(sorted(active_user_set))
+            if len(active_user_ids) < 3:
+                if changed:
+                    await self._atomic_save()
+                return GroupRoastRefillPrepareResult("insufficient_active", active_user_ids=active_user_ids)
+
+            success_count = sum(
+                1
+                for raw in self.data.setdefault("roast_refill_requests", {}).values()
+                if isinstance(raw, dict)
+                and raw.get("date_str") == target_date
+                and raw.get("group_id") == str(group_id)
+                and raw.get("status") == "succeeded"
+            )
+            ratio, required_votes = roast_refill_threshold(len(active_user_ids), success_count)
+            request_id = uuid.uuid4().hex
+            raw = {
+                "request_id": request_id,
+                "date_str": target_date,
+                "group_id": str(group_id),
+                "initiator_id": str(initiator_id),
+                "initiator_name": str(initiator_name),
+                "delivery_bot_id": str(delivery_bot_id),
+                "message_id": "",
+                "active_count_snapshot": len(active_user_ids),
+                "required_ratio": ratio,
+                "required_votes": required_votes,
+                "success_count_before": success_count,
+                "status": "voting",
+                "created_at": now.isoformat(),
+                "expires_at": (now + datetime.timedelta(seconds=ROAST_REFILL_TTL_SECONDS)).isoformat(),
+                "completed_at": "",
+                "benefited_user_ids": [],
+                "failure_reason": "",
+            }
+            self.data["roast_refill_requests"][request_id] = raw
+            await self._atomic_save()
+            return GroupRoastRefillPrepareResult("created", self._refill_from_raw(raw), active_user_ids)
+
+    async def bind_group_roast_refill_message(
+        self,
+        request_id: str,
+        message_id: str,
+        now_ts: Optional[float] = None,
+    ) -> Optional[GroupRoastRefillRequest]:
+        normalized_message_id = str(message_id or "")
+        if not normalized_message_id:
+            return None
+        now_value = time.time() if now_ts is None else float(now_ts)
+        now = datetime.datetime.fromtimestamp(now_value, tz=datetime.timezone.utc)
+        async with self._lock:
+            raw = self._find_refill_locked(request_id)
+            if raw is None:
+                return None
+            # 发送投票消息可能跨过 TTL；过期判定与绑定必须在同一把锁内完成，
+            # 否则会向群里留下一个永远不可能成功的投票入口。
+            if self._expire_refill_locked(raw, now):
+                await self._atomic_save()
+                return None
+            if raw.get("status") != "voting":
+                return None
+            current_message_id = str(raw.get("message_id") or "")
+            if current_message_id and current_message_id != normalized_message_id:
+                return None
+            raw["message_id"] = normalized_message_id
+            await self._atomic_save()
+            return self._refill_from_raw(raw)
+
+    async def get_group_roast_refill(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> Optional[GroupRoastRefillRequest]:
+        target_date = date_str or rollpig_date_str()
+        now = datetime.datetime.fromtimestamp(float(now_ts or time.time()), tz=datetime.timezone.utc)
+        async with self._lock:
+            for raw in self.data.setdefault("roast_refill_requests", {}).values():
+                if not isinstance(raw, dict) or raw.get("date_str") != target_date or raw.get("group_id") != str(group_id):
+                    continue
+                if self._expire_refill_locked(raw, now):
+                    await self._atomic_save()
+                if raw.get("status") == "voting":
+                    return self._refill_from_raw(raw)
+            return None
+
+    async def fail_group_roast_refill(
+        self,
+        request_id: str,
+        message_id: str,
+        reason: str,
+    ) -> bool:
+        async with self._lock:
+            raw = self._find_refill_locked(request_id)
+            if raw is None or raw.get("status") != "voting":
+                return False
+            if message_id and str(raw.get("message_id") or "") not in {"", str(message_id)}:
+                return False
+            raw["status"] = "failed"
+            raw["failure_reason"] = str(reason)
+            await self._atomic_save()
+            return True
+
+    async def complete_group_roast_refill(
+        self,
+        *,
+        request_id: str,
+        message_id: str,
+        voter_ids: list[str],
+        excluded_user_ids: list[str],
+        max_charges: int = DEFAULT_ROAST_CHARGE_MAX,
+        now_ts: Optional[float] = None,
+    ) -> GroupRoastRefillCompleteResult:
+        """在同一把锁内验票、批量满格并完成状态迁移，确保成功只发生一次。"""
+
+        now_value = time.time() if now_ts is None else float(now_ts)
+        now = datetime.datetime.fromtimestamp(now_value, tz=datetime.timezone.utc)
+        _, charge_max = _normalize_charge_settings(ROAST_COOLDOWN_SECONDS, max_charges)
+        async with self._lock:
+            raw = self._find_refill_locked(request_id)
+            if raw is None:
+                return GroupRoastRefillCompleteResult(False, "missing")
+            if raw.get("status") != "voting":
+                return GroupRoastRefillCompleteResult(False, str(raw.get("status") or "invalid"), self._refill_from_raw(raw))
+            stored_message_id = str(raw.get("message_id") or "")
+            submitted_message_id = str(message_id or "")
+            if (
+                not stored_message_id
+                or not submitted_message_id
+                or stored_message_id != submitted_message_id
+            ):
+                return GroupRoastRefillCompleteResult(False, "message_mismatch", self._refill_from_raw(raw))
+            if self._expire_refill_locked(raw, now):
+                await self._atomic_save()
+                return GroupRoastRefillCompleteResult(False, "expired", self._refill_from_raw(raw))
+
+            active_user_ids = self._group_active_users_locked(str(raw.get("date_str")), str(raw.get("group_id")))
+            excluded = {str(user_id) for user_id in excluded_user_ids if user_id}
+            valid_voters = tuple(sorted(({str(user_id) for user_id in voter_ids if user_id} & active_user_ids) - excluded))
+            if len(valid_voters) < max(2, _safe_int(raw.get("required_votes"), 2)):
+                return GroupRoastRefillCompleteResult(
+                    False,
+                    "pending",
+                    self._refill_from_raw(raw),
+                    valid_voter_ids=valid_voters,
+                )
+
+            benefited = tuple(sorted(active_user_ids - excluded))
+            usage = self.data.setdefault("usage", {})
+            for user_id in benefited:
+                previous = usage.get(user_id)
+                last_roast_ts = previous.get("last_roast_ts") if isinstance(previous, dict) else None
+                usage[user_id] = {
+                    "last_roast_ts": last_roast_ts,
+                    "roast_charges": charge_max,
+                    "roast_charge_updated_ts": now_value,
+                }
+            raw["status"] = "succeeded"
+            raw["completed_at"] = now.isoformat()
+            raw["benefited_user_ids"] = list(benefited)
+            await self._atomic_save()
+            request = self._refill_from_raw(raw)
+            return GroupRoastRefillCompleteResult(
+                True,
+                "succeeded",
+                request,
+                valid_voter_ids=valid_voters,
+                benefited_user_ids=benefited,
+            )
+
     async def mark_group_roll_seen(
         self,
         user_id: str,
@@ -987,6 +1333,26 @@ class PigDataManager:
             for d in group_dates_to_del:
                 del group_rolls[d]
 
+            active_users = self.data.get("group_daily_active_users", {})
+            active_dates_to_del = [
+                d for d in active_users
+                if _is_valid_date(d)
+                and (today - datetime.date.fromisoformat(d)).days > days_to_keep
+            ]
+            for d in active_dates_to_del:
+                del active_users[d]
+
+            refill_requests = self.data.get("roast_refill_requests", {})
+            refill_ids_to_del = [
+                request_id
+                for request_id, raw in refill_requests.items()
+                if isinstance(raw, dict)
+                and _is_valid_date(str(raw.get("date_str") or ""))
+                and (today - datetime.date.fromisoformat(str(raw["date_str"]))).days > days_to_keep
+            ]
+            for request_id in refill_ids_to_del:
+                del refill_requests[request_id]
+
             # completed 已由事件记录承接，其他预约跨日后也不再有效；每日清理直接
             # 移除这些终态/过期记录，避免结果快照让 JSON 与滚动备份无限增长。
             reservations = self.data.get("roast_reservations", {})
@@ -1016,7 +1382,14 @@ class PigDataManager:
             for date_str in attempt_dates_to_del:
                 del unrolled_attempts[date_str]
 
-            if history_dates_to_del or group_dates_to_del or reservation_ids_to_del or attempt_dates_to_del:
+            if (
+                history_dates_to_del
+                or group_dates_to_del
+                or active_dates_to_del
+                or refill_ids_to_del
+                or reservation_ids_to_del
+                or attempt_dates_to_del
+            ):
                 await self._atomic_save()
 
     # ---- 烤群友 普通模式充能 ----
@@ -1167,6 +1540,15 @@ class PigDataManager:
             "backfire_victim_id": str(event.backfire_victim_id or ""),
             "backfire_victim_name": str(event.backfire_victim_name or ""),
         })
+        if event.group_id:
+            active_user_ids = [event.attacker_id, *event.participant_ids]
+            if event.event_type != "bot_backfire":
+                active_user_ids.append(event.target_id)
+            self._mark_group_active_users_locked(
+                date_str,
+                str(event.group_id),
+                active_user_ids,
+            )
         return True
 
     async def log_roast_event(self, event_type: str, attacker_id: str, target_id: str,

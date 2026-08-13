@@ -21,6 +21,7 @@ if get_plugin("nonebot_plugin_rollpig_plus") is None:
         raise RuntimeError("failed to load nonebot_plugin_rollpig_plus for tests")
 
 from nonebot_plugin_rollpig_plus import data_manager as data_manager_module
+from nonebot_plugin_rollpig_plus import helpers
 from nonebot_plugin_rollpig_plus import reservation_delivery
 from nonebot_plugin_rollpig_plus import reservation_flow
 from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
@@ -219,6 +220,31 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(candidates)
         matcher.finish.assert_awaited_once()
         load_attacker.assert_not_awaited()
+
+    async def test_mentioned_target_requires_current_group_membership(self):
+        event = SimpleNamespace(
+            reply=None,
+            message=[SimpleNamespace(type="at", data={"qq": "999"})],
+            to_me=False,
+            self_id=456,
+            group_id=789,
+        )
+        bot = SimpleNamespace(
+            get_group_member_info=AsyncMock(side_effect=RuntimeError("member not found"))
+        )
+
+        target = await helpers.resolve_roast_target(bot, event)
+
+        self.assertEqual(target.target_id, "999")
+        self.assertFalse(target.is_group_member)
+
+    async def test_random_candidates_do_not_fall_back_to_departed_group_records(self):
+        bot = SimpleNamespace(call_api=AsyncMock(side_effect=RuntimeError("temporary failure")))
+        with (
+            patch.object(helpers.store, "get_daily_rolls", new_callable=AsyncMock, return_value={"left": "pig"}),
+            self.assertRaises(helpers.GroupMemberLookupError),
+        ):
+            await helpers.get_group_roll_candidates(bot, 100, set())
 
     async def test_daily_roll_activates_once_and_outcome_survives_release(self):
         created = await self._prepare()
