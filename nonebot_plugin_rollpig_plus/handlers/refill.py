@@ -31,7 +31,12 @@ from ..roast_refill import (
 from ..runtime import resolve_roast_charge_max, rollpig_date_str
 from ..store import store
 from ..store.cloud import CloudRoastRefillUnsupportedError
-from ..store.models import GroupRoastRefillPrepareResult, GroupRoastRefillRequest, roast_refill_threshold
+from ..store.models import (
+    GroupRoastRefillPrepareResult,
+    GroupRoastRefillRequest,
+    legacy_roast_refill_threshold,
+    roast_refill_threshold,
+)
 from ..texts import ROAST_REFILL_INSUFFICIENT_ACTIVE_TEXTS, ROAST_REFILL_PERMISSION_DENIED_TEXTS
 
 
@@ -130,14 +135,16 @@ def _preparation_matches_members(
     request = preparation.request
     if request is None:
         return False
-    ratio, required_votes = roast_refill_threshold(
-        len(eligible_user_ids),
-        request.success_count_before,
-    )
+    active_count = len(eligible_user_ids)
+    expected_thresholds = {
+        roast_refill_threshold(active_count, request.success_count_before),
+        # 新 Plus 连接旧 Cloud 时仍接受旧门槛；升级 Cloud 后，新申请会自动
+        # 使用 capped-v1。两种情况都继续以 Cloud 创建时保存的票数为准。
+        legacy_roast_refill_threshold(active_count, request.success_count_before),
+    }
     if (
-        request.active_count_snapshot != len(eligible_user_ids)
-        or request.required_ratio != ratio
-        or request.required_votes != required_votes
+        request.active_count_snapshot != active_count
+        or (request.required_ratio, request.required_votes) not in expected_thresholds
     ):
         return False
     returned_active = {str(user_id) for user_id in preparation.active_user_ids if user_id}

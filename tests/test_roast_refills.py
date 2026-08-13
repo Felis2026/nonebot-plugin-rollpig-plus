@@ -24,7 +24,11 @@ from nonebot_plugin_rollpig_plus import data_manager as data_manager_module
 from nonebot_plugin_rollpig_plus import roast_refill
 from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
 from nonebot_plugin_rollpig_plus.handlers import refill as refill_handler
-from nonebot_plugin_rollpig_plus.store.models import roast_refill_threshold
+from nonebot_plugin_rollpig_plus.store.models import (
+    ROAST_REFILL_THRESHOLD_POLICY,
+    legacy_roast_refill_threshold,
+    roast_refill_threshold,
+)
 from nonebot_plugin_rollpig_plus.store.cloud import CloudRoastRefillUnsupportedError, CloudStore, CloudStoreError
 from nonebot_plugin_rollpig_plus.store.models import (
     GroupRoastRefillCompleteResult,
@@ -60,12 +64,15 @@ class LocalRoastRefillTests(unittest.IsolatedAsyncioTestCase):
             now_ts=now_ts,
         )
 
-    def test_threshold_matrix_uses_ceil_and_caps_at_sixty_five_percent(self):
+    def test_threshold_matrix_uses_ceil_and_per_round_vote_caps(self):
         expected = {
             3: [2, 2, 2, 2, 2],
-            5: [2, 2, 3, 3, 4],
-            10: [3, 4, 5, 6, 7],
-            20: [5, 7, 9, 11, 13],
+            5: [2, 2, 3, 3, 3],
+            10: [3, 4, 5, 6, 6],
+            20: [5, 7, 9, 11, 11],
+            30: [8, 11, 14, 17, 17],
+            50: [8, 12, 16, 20, 20],
+            100: [8, 12, 16, 20, 20],
         }
         for active_count, votes in expected.items():
             with self.subTest(active_count=active_count):
@@ -73,7 +80,11 @@ class LocalRoastRefillTests(unittest.IsolatedAsyncioTestCase):
                     [roast_refill_threshold(active_count, success)[1] for success in range(5)],
                     votes,
                 )
-        self.assertEqual(roast_refill_threshold(20, 99), (65, 13))
+        self.assertEqual(roast_refill_threshold(100, 99), (55, 20))
+
+    def test_legacy_threshold_remains_available_for_cloud_rollout(self):
+        self.assertEqual(legacy_roast_refill_threshold(100, 0), (25, 25))
+        self.assertEqual(legacy_roast_refill_threshold(100, 99), (65, 65))
 
     async def test_prepare_freezes_threshold_and_allows_only_one_voting_request(self):
         await self._mark("100", "a", "b")
@@ -502,6 +513,28 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(refill_handler._preparation_matches_members(valid, {"a", "b", "c"}))
         self.assertFalse(refill_handler._preparation_matches_members(stale, {"a", "b", "c"}))
 
+    def test_prepare_accepts_legacy_cloud_threshold_during_rollout(self):
+        eligible_user_ids = {f"pig-{index}" for index in range(40)}
+        legacy = GroupRoastRefillPrepareResult(
+            "created",
+            GroupRoastRefillRequest(
+                request_id="legacy-request",
+                date_str=DATE_STR,
+                group_id="100",
+                initiator_id="admin",
+                initiator_name="管理员",
+                delivery_bot_id="bot",
+                active_count_snapshot=40,
+                required_ratio=25,
+                required_votes=10,
+            ),
+            active_user_ids=tuple(sorted(eligible_user_ids)),
+        )
+
+        self.assertTrue(
+            refill_handler._preparation_matches_members(legacy, eligible_user_ids)
+        )
+
     async def test_notice_fetches_real_users_and_only_winner_sends_success(self):
         request = GroupRoastRefillRequest(
             request_id="request",
@@ -795,4 +828,8 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             request_kwargs["json_body"]["eligible_user_ids"],
             ["a", "b", "c"],
+        )
+        self.assertEqual(
+            request_kwargs["json_body"]["threshold_policy"],
+            ROAST_REFILL_THRESHOLD_POLICY,
         )

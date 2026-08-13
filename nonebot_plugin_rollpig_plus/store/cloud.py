@@ -22,6 +22,7 @@ from .models import (
     RoastReservationClaimResult,
     RoastReservationParticipant,
     RoastReservationPrepareResult,
+    ROAST_REFILL_THRESHOLD_POLICY,
     UnrolledRoastAttemptResult,
 )
 
@@ -665,6 +666,8 @@ class CloudStore(RollpigStore):
             "delivery_bot_id": delivery_bot_id,
             "date_str": date_str or rollpig_date_str(),
             "now_ts": now_ts,
+            # 新 Cloud 按该能力标识启用封顶门槛；旧 Cloud 会安全忽略未知字段。
+            "threshold_policy": ROAST_REFILL_THRESHOLD_POLICY,
         }
         if eligible_user_ids is not None:
             # 新 Cloud 会据此冻结群成员交集；旧 Cloud 默认忽略未知字段，调用方

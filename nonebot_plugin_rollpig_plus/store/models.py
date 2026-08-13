@@ -5,7 +5,9 @@ from typing import Any, Optional
 
 
 MAX_EXPERT_LEVEL = 5
-ROAST_REFILL_RATIOS = (25, 35, 45, 55, 65)
+ROAST_REFILL_THRESHOLD_POLICY = "capped-v1"
+ROAST_REFILL_THRESHOLD_STEPS = ((25, 8), (35, 12), (45, 16), (55, 20))
+LEGACY_ROAST_REFILL_RATIOS = (25, 35, 45, 55, 65)
 
 
 def expert_level_from_copies(copies: int) -> int:
@@ -15,13 +17,27 @@ def expert_level_from_copies(copies: int) -> int:
 
 
 def roast_refill_threshold(active_count: int, success_count: int) -> tuple[int, int]:
-    """返回本轮比例与向上取整票数；成功次数超过四次后固定使用 65%。"""
+    """返回本轮比例与票数；第四次起固定为 55%，且每档设有人数上限。"""
 
     normalized_active = max(0, int(active_count or 0))
     normalized_success = max(0, int(success_count or 0))
-    ratio = ROAST_REFILL_RATIOS[min(normalized_success, len(ROAST_REFILL_RATIOS) - 1)]
-    required_votes = max(2, (normalized_active * ratio + 99) // 100)
+    ratio, vote_cap = ROAST_REFILL_THRESHOLD_STEPS[
+        min(normalized_success, len(ROAST_REFILL_THRESHOLD_STEPS) - 1)
+    ]
+    proportional_votes = (normalized_active * ratio + 99) // 100
+    required_votes = max(2, min(proportional_votes, vote_cap))
     return ratio, required_votes
+
+
+def legacy_roast_refill_threshold(active_count: int, success_count: int) -> tuple[int, int]:
+    """计算旧 Cloud 的无人数上限门槛，供滚动升级期间校验响应。"""
+
+    normalized_active = max(0, int(active_count or 0))
+    normalized_success = max(0, int(success_count or 0))
+    ratio = LEGACY_ROAST_REFILL_RATIOS[
+        min(normalized_success, len(LEGACY_ROAST_REFILL_RATIOS) - 1)
+    ]
+    return ratio, max(2, (normalized_active * ratio + 99) // 100)
 
 
 @dataclass(frozen=True)
