@@ -9,7 +9,7 @@ from typing import Any
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.log import logger
 
-from .runtime import ROLLPIG_TIMEZONE, resolve_roast_charge_max
+from .runtime import ROLLPIG_TIMEZONE, is_group_rollpig_enabled, resolve_roast_charge_max
 from .store import store
 from .store.models import GroupRoastRefillCompleteResult, GroupRoastRefillRequest
 from .texts import (
@@ -326,6 +326,11 @@ async def reconcile_refill_request(
 ) -> GroupRoastRefillCompleteResult:
     """重放一次验票与结算；供 Notice 和命令恢复路径共同调用。"""
 
+    if not is_group_rollpig_enabled(request.group_id):
+        # Notice 不经过命令 matcher 的群开关守卫。关闭期间保留 voting，重新
+        # 开启后仍可由新 reaction 或命令恢复，不在后台擅自补充次数。
+        return GroupRoastRefillCompleteResult(False, "group_disabled", request)
+
     if not request.message_id:
         # prepare 与消息发送/绑定之间存在很短的并发窗口。旁路请求只能等待，
         # 绝不能把另一个管理员正在创建的共享申请标记为失败。
@@ -343,6 +348,9 @@ async def reconcile_refill_request(
     valid_voter_ids = raw_voters & eligible_user_ids
     excluded_user_ids = (active_user_ids - eligible_user_ids) | {str(bot.self_id)}
     max_charges = resolve_roast_charge_max()
+    # 群成员与 reaction 查询期间开关可能变化；在实际修改配额前再确认一次。
+    if not is_group_rollpig_enabled(request.group_id):
+        return GroupRoastRefillCompleteResult(False, "group_disabled", request)
     result = await store.complete_group_roast_refill(
         request_id=request.request_id,
         message_id=request.message_id,
@@ -352,7 +360,11 @@ async def reconcile_refill_request(
         excluded_user_ids=sorted(excluded_user_ids),
         max_charges=max_charges,
     )
-    if result.completed and result.request is not None:
+    if (
+        result.completed
+        and result.request is not None
+        and is_group_rollpig_enabled(result.request.group_id)
+    ):
         await bot.send_group_msg(
             group_id=int(result.request.group_id),
             message=format_refill_success(
@@ -391,5 +403,6 @@ async def process_refill_notice(bot: Bot, event: Any) -> None:
         await reconcile_refill_request(bot, request, fast_below_threshold=True)
     except RoastRefillReactionError as error:
         logger.warning(f"rollpig 烤箱补货验票失败: request={request.request_id} error={error}")
-        if error.message_missing:
-            await store.fail_group_roast_refill(request.request_id, message_id, "message_missing")
+        if error.message_missing or error.capability_unsupported:
+            reason = "message_missing" if error.message_missing else "reaction_unsupported"
+            await store.fail_group_roast_refill(request.request_id, message_id, reason)

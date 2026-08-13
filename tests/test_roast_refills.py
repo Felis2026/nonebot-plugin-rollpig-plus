@@ -682,6 +682,63 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("申请仍然有效", text)
         mocked_store.fail_group_roast_refill.assert_not_called()
 
+    async def test_unsupported_existing_poll_check_stops_request(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="admin",
+            initiator_name="管理员",
+            delivery_bot_id="bot",
+            message_id="message-1",
+        )
+        bot = SimpleNamespace(self_id="bot")
+        error = roast_refill.RoastRefillReactionError(
+            "unknown action: fetch_emoji_like",
+            capability_unsupported=True,
+        )
+        with (
+            patch.object(
+                refill_handler,
+                "reconcile_refill_request",
+                new_callable=AsyncMock,
+                side_effect=error,
+            ),
+            patch.object(refill_handler, "store") as mocked_store,
+        ):
+            mocked_store.fail_group_roast_refill = AsyncMock(return_value=True)
+            text = await refill_handler._describe_existing_refill(bot, request)
+
+        self.assertTrue(text)
+        mocked_store.fail_group_roast_refill.assert_awaited_once_with(
+            "request",
+            "message-1",
+            "reaction_unsupported",
+        )
+
+    async def test_post_bind_reconcile_settles_votes_missed_during_binding(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="admin",
+            initiator_name="管理员",
+            delivery_bot_id="bot",
+            message_id="message-1",
+        )
+        completed = GroupRoastRefillCompleteResult(True, "succeeded", request)
+        bot = SimpleNamespace()
+        with patch.object(
+            refill_handler,
+            "reconcile_refill_request",
+            new_callable=AsyncMock,
+            return_value=completed,
+        ) as reconcile:
+            terminal = await refill_handler._reconcile_after_bind(bot, request)
+
+        self.assertTrue(terminal)
+        reconcile.assert_awaited_once_with(bot, request)
+
     async def test_transient_post_send_probe_keeps_bound_request_voting(self):
         request = GroupRoastRefillRequest(
             request_id="request",
@@ -761,6 +818,82 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         bot.call_api.assert_awaited_once()
         self.assertEqual(bot.call_api.await_args.args[0], "fetch_emoji_like")
         mocked_store.complete_group_roast_refill.assert_not_called()
+
+    async def test_disabled_group_does_not_settle_refill_notice(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="admin",
+            initiator_name="管理员",
+            delivery_bot_id="bot",
+            message_id="message-1",
+            required_votes=2,
+        )
+        bot = SimpleNamespace(
+            self_id="bot",
+            call_api=AsyncMock(),
+            send_group_msg=AsyncMock(),
+        )
+        event = SimpleNamespace(
+            notice_type="group_msg_emoji_like",
+            group_id=100,
+            message_id="message-1",
+            likes=[{"emoji_id": "424", "count": 2}],
+        )
+        with (
+            patch.object(roast_refill, "store") as mocked_store,
+            patch.object(roast_refill, "is_group_rollpig_enabled", return_value=False),
+        ):
+            mocked_store.get_group_roast_refill = AsyncMock(return_value=request)
+            await roast_refill.process_refill_notice(bot, event)
+
+        bot.call_api.assert_not_awaited()
+        bot.send_group_msg.assert_not_awaited()
+        mocked_store.complete_group_roast_refill.assert_not_called()
+        mocked_store.fail_group_roast_refill.assert_not_called()
+
+    async def test_notice_stops_poll_when_reaction_api_is_unsupported(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="admin",
+            initiator_name="管理员",
+            delivery_bot_id="bot",
+            message_id="message-1",
+            required_votes=2,
+        )
+        bot = SimpleNamespace(self_id="bot", send_group_msg=AsyncMock())
+        event = SimpleNamespace(
+            notice_type="group_msg_emoji_like",
+            group_id=100,
+            message_id="message-1",
+            likes=[{"emoji_id": "424", "count": 2}],
+        )
+        error = roast_refill.RoastRefillReactionError(
+            "unknown action: fetch_emoji_like",
+            capability_unsupported=True,
+        )
+        with (
+            patch.object(roast_refill, "store") as mocked_store,
+            patch.object(
+                roast_refill,
+                "reconcile_refill_request",
+                new_callable=AsyncMock,
+                side_effect=error,
+            ),
+        ):
+            mocked_store.get_group_roast_refill = AsyncMock(return_value=request)
+            mocked_store.fail_group_roast_refill = AsyncMock(return_value=True)
+            await roast_refill.process_refill_notice(bot, event)
+
+        mocked_store.fail_group_roast_refill.assert_awaited_once_with(
+            "request",
+            "message-1",
+            "reaction_unsupported",
+        )
+        bot.send_group_msg.assert_not_awaited()
 
     async def test_notice_ignores_request_owned_by_another_bot(self):
         request = GroupRoastRefillRequest(

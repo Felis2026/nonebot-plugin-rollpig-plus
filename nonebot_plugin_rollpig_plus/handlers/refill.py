@@ -18,8 +18,6 @@ from ..roast_refill import (
     add_refill_reaction,
     build_refill_created_message,
     extract_message_id,
-    fetch_refill_group_members,
-    fetch_refill_reactors,
     find_group_roast_refill,
     format_existing_refill,
     get_refill_eligible_users,
@@ -126,6 +124,18 @@ async def _handle_post_send_probe_error(
     return True
 
 
+async def _reconcile_after_bind(bot: Bot, request: GroupRoastRefillRequest) -> bool:
+    """绑定消息后立即补验票；返回是否应停止后续 reaction 引导。"""
+
+    try:
+        result = await reconcile_refill_request(bot, request)
+    except RoastRefillReactionError as error:
+        return await _handle_post_send_probe_error(bot, request, error)
+    # 绑定重试期间可能已经收齐票；成功文案由统一结算函数发送。只有仍在
+    # pending 的申请需要继续 reaction 引导，其他状态均应在此停止。
+    return result.status != "pending"
+
+
 def _preparation_matches_members(
     preparation: GroupRoastRefillPrepareResult,
     eligible_user_ids: set[str],
@@ -170,9 +180,12 @@ async def _describe_existing_refill(
     try:
         result = await reconcile_refill_request(delivery_bot, request)
     except RoastRefillReactionError as error:
-        if error.message_missing:
-            await _fail_unusable_request(request.request_id, request.message_id, "message_missing")
-            return "原补货投票消息已经失效，本轮申请已停止，请重新发起。"
+        if error.message_missing or error.capability_unsupported:
+            reason = "message_missing" if error.message_missing else "reaction_unsupported"
+            await _fail_unusable_request(request.request_id, request.message_id, reason)
+            if error.message_missing:
+                return "原补货投票消息已经失效，本轮申请已停止，请重新发起。"
+            return pick_refill_unsupported_text()
         logger.warning(f"rollpig 烤箱补货恢复验票失败: request={request.request_id} error={error}")
         return "暂时没能读取当前票数，申请仍然有效，请稍后再试。"
 
@@ -182,6 +195,8 @@ async def _describe_existing_refill(
         return format_existing_refill(request, len(result.valid_voter_ids))
     if result.status == "unbound":
         return "补货申请正在生成，请稍后再查看票数。"
+    if result.status == "group_disabled":
+        return "本群 RollPig 当前已关闭，补货申请暂不结算。"
     if result.status == "succeeded":
         return "本轮烤箱补货已经完成。"
     if result.status in {"expired", "failed"}:
@@ -314,13 +329,10 @@ async def _(bot: Bot, event: Event):
         return
 
     reaction_added = await add_refill_reaction(bot, message_id)
-    try:
-        # 发起时主动探测 fetch 能力；无法核验名单时绝不退化为管理员直接重置。
-        await fetch_refill_reactors(bot, message_id)
-        await fetch_refill_group_members(bot, str(event.group_id))
-    except RoastRefillReactionError as error:
-        if await _handle_post_send_probe_error(bot, bound, error):
-            return
+    # 绑定重试期间的 reaction Notice 无法匹配未绑定申请；绑定成功后立即走
+    # 完整验票，既完成能力探测，也补结算这个窗口内已经到齐的票。
+    if await _reconcile_after_bind(bot, bound):
+        return
     if not reaction_added:
         await bot.send_group_msg(group_id=event.group_id, message=pick_refill_reaction_hint())
 
