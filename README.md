@@ -1,31 +1,29 @@
 <div align="center">
-  <img src="docs/assets/logo.jpeg" width="180" alt="rollpig-plus logo">
+  <img src="docs/assets/logo.jpeg" width="180" alt="RollPig Plus Logo">
 
-  <h1>🐖 rollpig-plus 🐖</h1>
+  <h1>🐖 RollPig Plus 🐖</h1>
 
-  <p><strong>“今天是什么小猪”的增强维护版</strong></p>
-  <p>支持云端资源同步、图片版小猪图鉴、EX Lv. 成长、AI 烤猪与多 Bot 状态同步。</p>
+  <p><strong>围绕「今日小猪」的 NoneBot 群聊收集、成长与互动插件</strong></p>
+  <p>每天抽一只属于你的小猪，慢慢养成属于自己的猪圈吧！也可以把群友烤了~</p>
 
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
     <img src="https://img.shields.io/badge/Version-0.11.1-ff69b4" alt="Version 0.11.1">
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
+  </p>
+
+  <p>
+    <a href="#-快速开始">快速开始</a> ·
+    <a href="#-主要功能">主要功能</a> ·
+    <a href="#️-常用指令">常用指令</a> ·
+    <a href="#️-配置">配置</a> ·
+    <a href="#-资源与扩展">资源与扩展</a>
   </p>
 </div>
 
-> 本项目基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig)，是 RollPig 面向进阶玩法的功能扩展版本。
-
-## 🧭 和原项目怎么选
-
-| 选择 | 更适合的情况 |
-| --- | --- |
-| 原作插件 | 想要更轻量、更接近最初玩法，只需要本地“今日小猪 / 随机小猪 / 找猪”等基础功能。 |
-| rollpig-plus | 想要图片版小猪图鉴、EX Lv. 成长、多 Bot 状态同步、AI 烤猪、烤群友与日报等增强功能。 |
-
-RollPig Plus 保留原作的核心趣味，并持续扩展烤猪、图鉴、成长、云端同步与稳定性能力。原版 RollPig 可独立使用公有资源包，依然能与本项目一样获取到每月更新（也许）的最新小猪。
-
-迁移时建议把原作插件替换为 rollpig-plus，不要在同一个 Bot 进程里同时加载两者；两者的基础指令和 `rollpig_*` 配置键高度重合，同时加载会造成命令响应和配置读取混杂。
+> RollPig Plus 最初基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig) 开发。  
+> 在保留「每天抽一只小猪」核心玩法的基础上，继续扩展了图鉴成长、EX Lv.、烤群友、日报、云端资源与多 Bot 同步等能力。
 
 ## ✨ 效果预览
 
@@ -33,87 +31,161 @@ RollPig Plus 保留原作的核心趣味，并持续扩展烤猪、图鉴、成�
 | --- | --- | --- |
 | <img src="docs/assets/preview-today.jpg" width="220" alt="今日小猪预览"> | <img src="docs/assets/preview-catalog.png" width="360" alt="小猪图鉴预览"> | <img src="docs/assets/preview-roast.jpg" width="220" alt="烤群友预览"> |
 
-## 📦 安装
+## 🐷 主要功能
 
-环境要求：Python `>=3.10`，NoneBot `>=2.4.0`。
+| 模块 | 能做什么 |
+| --- | --- |
+| **今日小猪** | 每天抽取一只固定小猪；支持昨日回顾、明日预测、随机小猪和 PigHub 找猪。 |
+| **猪圈成长** | 收藏小猪、查看图片图鉴；重复抽取会提升 EX Lv.，并逐步触发新猪保底。 |
+| **EX 差分** | 资源包可为同一只猪提供不同 EX 等级的立绘和文案，不新增图鉴 ID，也不破坏已有成长数据。 |
+| **烤猪互动** | 今日烤猪、烤群友、随机烤猪、加急生火、预约烤猪与烤箱补货。 |
+| **群聊总结** | 可以为指定群开启每日小猪数据总结。 |
+| **云端资源** | 公有小猪、GIF Overlay、EX 差分和共享烤猪文案可在线同步；失败时保留当前可用资源。 |
+| **多实例同步** | 默认单机本地运行；可接入 RollPig Cloud，实现多群、跨 Bot 同步成长与互动状态。 |
+| **可选 AI** | 不配置 AI 也能正常烤猪；开启后可使用 DeepSeek 生成更多文案，并与共享/本地文案共同使用。 |
 
-推荐使用 `nb-cli` 安装：
+RollPig Plus **不硬性要求接入 Cloud、 AI**。普通卡片与图鉴均使用 Pillow 渲染，默认配置即可运行基础功能。
+
+---
+
+## 🚀 快速开始
+
+环境要求：
+
+- Python `>= 3.10`
+- NoneBot `>= 2.4.0`
+- OneBot V11
+
+### 使用 nb-cli
 
 ```bash
 nb plugin install nonebot-plugin-rollpig-plus
 ```
 
-如需固定到指定版本：
+### 使用 pip
 
 ```bash
-pip install nonebot-plugin-rollpig-plus==0.11.1
+pip install -U nonebot-plugin-rollpig-plus
 ```
 
-手动安装后，请确认 NoneBot 已加载插件模块：
+如果你手动管理插件加载，请确认已加载：
 
 ```python
 nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 ```
 
-图片版图鉴已经完全改为纯 Pillow，插件不再依赖 HTML 模板、Playwright 或 Chromium。
+启动 Bot 后直接发送：
 
-## 🐷 指令一览
+```text
+今日小猪
+```
+
+即可开始。
+
+> [!IMPORTANT]
+> 如果你从原版 RollPig 迁移到 Plus，请**替换原插件，不要在同一个 Bot 进程中同时加载两者**。  
+> 两者的基础指令和 `rollpig_*` 配置项存在重合，同时加载会造成命令响应和配置读取混杂。
+
+---
+
+## 🎮 功能概览
+
+### 每日抽猪与猪圈
+
+每个用户每天只会生成一次正式抽取结果；当天重复查看不会改变。
+
+抽到新猪会加入自己的猪圈；重复抽到已解锁小猪时，会继续累计次数并提升 **EX Lv.**。
+达到对应等级后会自动使用新的差分图片或文案，如果发现仍没有变化，**那是还没做**，~~请狠狠催促赶工~~。
+
+
+连续重复时还会逐步提高后续抽中新猪的机会，避免长期卡在重复收藏。
+
+### 烤猪与烤群友
+
+`今日烤猪` 会把自己的今日小猪做成料理。
+
+`烤群友 @目标` 则是一套独立的群聊互动功能：发起者需要先抽取自己的今日小猪；目标已经抽猪时可以直接结算，目标还没抽猪时会自动建立**预约烤猪**。
+
+第一位发起预约的人会成为主厨，其他群友可以继续**免费**烤目标群友实现添柴；等目标完成今日抽猪后，再统一结算这场预约。
+
+### 群聊总结
+
+`本周小猪` 会生成个人一周总结长图。
+
+群主或管理员还可以通过 `小猪日报 开启` 为当前群开启每日总结；默认关闭，不会在安装后自动向群里推送。
+
+<details>
+<summary><strong>展开查看烤群友、预约与补货的详细规则</strong></summary>
+
+#### 烤群友
+
+- 常规结算概率：成功 `60%` / 逃脱 `30%` / 反噬 `10%`。
+- 普通烤群友默认最多储存 `2` 次。
+- 默认每 `8` 小时自然恢复 `1` 次。
+- 发起者必须已经抽取自己的当日小猪。
+- 特殊形态会参与烤猪保护和结果判断。
+
+#### 预约烤猪
+
+- 目标当天尚未抽猪时，`烤群友 @目标` 会自动建立预约。
+- 第一位参与者成为主厨，并消耗一次普通烧烤充能。
+- 后续最多 `11` 位群友可以免费加入，同一场最多 `12` 人。
+- 目标完成今日抽猪后，由负责该预约的 Bot 继续完成结算与投递。
+- Local 与 Cloud 后端均支持预约流程。
+
+#### 烤箱补货
+
+- 群主、管理员或 SUPERUSER 可以发起。
+- 投票持续 `10` 分钟。
+- 至少需要 `3` 名本群当日活跃用户。
+- 达标后，为成功时本群全部今日活跃用户恢复普通烧烤次数至配额上限。
+- 当天成功次数越多，门槛依次按活跃人数的 `25% / 35% / 45% / 55%` 计算。
+- 对应票数上限为 `8 / 12 / 16 / 20`，至少需要 `2` 票。
+- 第四次成功后门槛不再继续提高；失败不会增加下一次门槛。
+
+</details>
+
+---
+
+## ⌨️ 常用指令
 
 | 指令 | 说明 |
 | --- | --- |
-| `今日小猪` / `今天是什么小猪` | 抽取今天属于你的小猪。每个用户每天只会生成一次结果，重复查看不会改变。 |
+| `今日小猪` / `今天是什么小猪` | 抽取或查看今天的小猪。 |
+| `昨日小猪` | 查看昨天真实抽到的小猪。 |
+| `明日小猪` | 查看明日预测。 |
 | `随机小猪 [数量]` | 从 PigHub 随机获取猪猪图，最多 10 张。 |
-| `找猪 关键词` / `搜猪 关键词` | 从 PigHub 搜索猪猪图，例如 `找猪 玩偶`。 |
-| `明日小猪` | 预测明天的小猪运势。 |
-| `昨日小猪` | 查看昨天抽到的小猪。 |
-| `今日烤猪` | 把今天的小猪做成美食；AI 烤猪需额外开启并配置 Key。 |
-| `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪。 |
-| `随机烤猪` | 从当前群已有记录中随机选择目标进行烤群友。 |
-| `加急生火 @目标` | 使用加急模式烤群友；仍受特殊形态与权限规则限制。 |
-| `烤箱补货` | 群主、管理员或 SUPERUSER 发起 10 分钟投票，为本群今日活跃玩家恢复普通烧烤次数。 |
-| `我的猪圈` | 查看已解锁数量、收藏率、最高 EX Lv.、本命猪等摘要。 |
-| `小猪图鉴 [页码]` | 生成图片版小猪图鉴。 |
+| `找猪 关键词` / `搜猪 关键词` | 按关键词搜索 PigHub 猪猪图。 |
+| `我的猪圈` | 查看解锁数量、收藏率、最高 EX Lv.、本命猪等摘要。 |
+| `小猪图鉴 [页码]` | 生成图片版收藏图鉴。 |
 | `本周小猪` | 生成本周猪猪总结长图。 |
-| `小猪日报 状态` | 查看本群每日总结推送状态。 |
-| `小猪日报 开启` / `小猪日报 关闭` | 群主/管理员控制本群每日总结推送；SUPERUSER可追加群号控制其他群。 |
-| `同步小猪资源` | SUPERUSER 手动同步公有资源、官方 GIF 和已配置 Overlay。 |
+| `今日烤猪` | 把自己的今日小猪做成料理。 |
+| `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪；目标未抽猪时自动进入预约流程。 |
+| `随机烤猪` | 从当前群已有记录中随机选择目标烤。 |
+| `加急生火 @目标` | 使用加急模式烤群友。 |
+| `烤箱补货` | 管理员发起群体烧烤次数补货投票。 |
+| `小猪日报 状态` | 查看当前群日报状态。 |
+| `小猪日报 开启` / `小猪日报 关闭` | 群主或管理员控制当前群日报。 |
+| `同步小猪资源` | SUPERUSER 手动触发资源同步。 |
 
-预约烤猪不是单独指令：使用 `烤群友 @目标` 时，如果目标当天尚未抽猪，系统会自动建立预约，目标完成抽猪后再结算。
+---
 
-### 抽取与成长
+## ⚙️ 配置
 
-- 每个用户每天只能抽取一次，跨天后重新抽取。
-- 重复抽到已解锁小猪会提升专家等级（EX Lv.）。
-- 资源包为某只猪提供等级差分时，达到指定 EX Lv. 会自动解锁同一只猪的新立绘或文案；图片与两类文案可分别继承较低等级差分，已有成长数据会直接生效，无需重新抽取。
-- 连续重复时，后续抽到新猪的概率会逐步提高。
-- 特殊形态（人类、熟食、吃掉了、售罄等）会参与烤猪与保护逻辑判定。
+### 默认就能用
 
-### 烤群友规则
+RollPig Plus 自带完整默认值，**不写 `.env`、不创建 JSON 配置文件也能启动**。
 
-- 常规概率：成功 60% / 逃脱 30% / 反噬 10%。
-- 普通烤群友默认最多储存 2 次，每 8 小时恢复 1 次。
-- 发起者需要已抽取自己的当日小猪。
-- 目标尚未抽猪时会建立当前群的预约烤猪：第一位用户成为主厨并消耗一次普通充能，后续最多 11 位群友可以免费添柴。
-- `烤箱补货` 达标后会把成功时本群全部今日活跃玩家的普通烧烤次数恢复至配额上限。
-- 每群当天补货门槛以发起瞬间的活跃玩家数为固定分母，依次按 25% / 35% / 45% / 55% 计算，并分别封顶为 8 / 12 / 16 / 20 票；票数向上取整且至少 2 票，第四次后不再提高，失败不增加门槛。
+默认状态：
 
-### 每日总结控制
-
-- 每日总结默认关闭；群主/管理员可在群内发送 `小猪日报 开启` / `小猪日报 关闭` 控制本群。
-- SUPERUSER可跨群控制，例如 `小猪日报 开启 123456789`、`小猪日报 关闭 123456789`。
-
-## ⚙️ 配置方法
-
-插件内置完整默认值：**完全不写 `.env`、不写 JSON 也能启动并使用基础功能**。
-
-默认状态下：
-
-- 本地存储启用，数据写入插件自己的 localstore 数据目录。
-- AI 烤猪关闭；未配置 Key 时自动使用本地文案模板。
-- 公有小猪资源同步开启；同步失败会回退旧缓存或内置资源。
-- 官方 GIF 动态小猪 overlay 会随云端资源同步固定启用；PJSK、用户自建包等其它私有 overlay 需要手动追加。
-- 图片版小猪图鉴开启，默认 PNG 输出。
-- 每日总结定时任务默认关闭，可通过群内命令或配置主动开启。
+- 使用本地 JSON 存储；
+- AI 烤猪关闭；
+- 未配置 AI 时使用共享文案与本地模板；
+- 公有小猪资源同步开启；
+-  GIF 小猪 Overlay 随资源同步启用；
+- 图片版小猪图鉴开启；
+- 每日总结默认关闭；
+- Cloud 关闭。
 
 配置优先级：
 
@@ -121,199 +193,226 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 .env / NoneBot 配置 > JSON 配置文件 > 插件默认值
 ```
 
-推荐分工：
+完整可用配置示例见：
 
-- JSON 配置文件：放非敏感、稳定参数。默认读取 Bot 运行目录下的 `rollpig_config.json`，也会读取 `config/rollpig.json`。
-- `.env`：放 Token / Key / 私密覆盖项；如需自定义 JSON 路径，只在 `.env` 写 `ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json`。
+[`rollpig_config.example.json`](rollpig_config.example.json)
 
-下面用 `jsonc` 展示注释方便阅读；多数示例值按插件默认值填写。官方 GIF overlay 不需要配置，PJSK 与本地包示例用于展示如何追加更多私有资源。实际 `rollpig_config.json` 必须是合法 JSON，可直接参考仓库内的 `rollpig_config.example.json`。
+默认会尝试读取 Bot 运行目录下的：
 
-```jsonc
+```text
+rollpig_config.json
+```
+
+也兼容：
+
+```text
+config/rollpig.json
+```
+
+如果要指定其他位置：
+
+```properties
+ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json
+```
+
+### 开启 AI 烤猪
+
+只填 Key **不会自动开启 AI**，还需要显式启用：
+
+```properties
+ROLLPIG_AI_ENABLED=true
+ROLLPIG_DEEPSEEK_KEY=sk-xxxxxxxxxxxxxxxx
+```
+
+默认模型与其他 AI 参数可在 `rollpig_config.example.json` 中调整。AI 请求失败时会自动回退现有共享/本地文案，不影响基础功能。
+
+### 接入 RollPig Cloud
+
+默认 `local` 模式完全不需要 Cloud。
+
+需要多 Bot 共用状态时，可以改为：
+
+```json
 {
   "rollpig": {
-    // ================================ AI 烤猪 ================================ //
-    "rollpig_ai_enabled": false,               // 是否启用 AI 烤猪；只填 Key 不会自动开启
-    "rollpig_model": "deepseek-v4-flash",      // AI 模型名称，默认 DeepSeek V4 Flash 非思考模式
-    "rollpig_ai_timeout": 20.0,                // 单次 AI 文案生成超时时间（秒），超时自动回退本地模板
-    "rollpig_ai_concurrency": 4,               // AI 文案生成并发上限，避免多人同时烤猪时堆积请求
-    "rollpig_ai_max_tokens": 4096,             // AI 单次响应 token 上限，防止异常长输出
-    "rollpig_ai_output_max_chars": 240,        // AI 文案入库前最大字符数，避免过长文本撑爆消息
-    "rollpig_roast_cooldown_hours": 8,         // 普通烤群友每恢复 1 次所需小时数
-    "rollpig_roast_charge_max": 2,             // 普通烤群友最多可储存次数；加急/强制点火不消耗
-
-    // ================================ 存储与云端 ================================ //
-    "rollpig_storage_backend": "local",        // local=本地 JSON；cloud=rollpig-cloud 多 Bot 同步
-    "rollpig_cloud_api_url": null,             // cloud 模式的 rollpig-cloud 地址；默认不配置
-    "rollpig_cloud_timeout": 5.0,              // 请求 rollpig-cloud 的超时时间（秒）
-    "rollpig_cloud_strict_mode": true,         // true=云端异常直接失败；false=读接口可安全兜底
-
-    // ================================ 小猪资源包 ================================ //
-    "rollpig_resource_sync_enabled": true,     // 是否自动同步云端资源包；失败会回退旧缓存/内置资源
-    "rollpig_resource_manifest_url": "https://pig.felislab.cc/resources/rollpig/manifest.json", // 公有全量包
-    "rollpig_resource_sync_interval_hours": 24, // 自动检查资源更新的间隔小时数
-    "rollpig_resource_sync_timeout": 10.0,     // 下载 manifest / pig.json / 图片的超时时间（秒）
-    "rollpig_resource_max_file_size": 10485760, // 单文件下载大小上限，默认 10 MiB
-    "rollpig_roast_library_manifest_url": "https://pig.felislab.cc/resources/rollpig-roasts/manifest.json", // 共享烤猪文案；"" / null 可关闭
-    "rollpig_private_resource_manifests": [       // 推荐写法：多个私有 overlay 按顺序叠加
-      {
-        "name": "pjsk",                         // 可选：追加 PJSK 私有包，不需要可删除这一项
-        "manifest_url": "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
-      },
-      {
-        "name": "my-pack",                     // 可选：用户自建私有包也可以填本地 manifest 路径
-        "manifest_url": "D:/my-rollpig-pack/manifest.json"
-      }
-    ],
-    "rollpig_private_resource_manifest_url": "", // 旧版单私有包字段，仍兼容；新部署建议使用上方列表
-
-    // ================================ 定时日报 ================================ //
-    "rollpig_daily_summary_enabled": false,    // 未被命令/外部控制器覆盖的群是否默认启用每日总结；默认关闭
-
-    // ================================ 普通小猪卡片 ================================ //
-    "rollpig_card_font_path": null,            // Pillow 卡片字体路径；不填时标题和正文都使用内置 Source Han Sans SC Medium
-
-    // ================================ 图片版小猪图鉴 ================================ //
-    "rollpig_catalog_enabled": true,           // 是否启用“小猪图鉴”图片命令；不替代“我的猪圈”
-    "rollpig_catalog_render_concurrency": 2,   // 默认同时绘制 2 张；512MB 部署建议设为 1
-    "rollpig_catalog_cache_seconds": 300,      // 同一状态指纹的图鉴结果缓存秒数，不会额外刷新 copies
-    "rollpig_catalog_output_format": "png",   // 输出格式；默认 PNG
-    "rollpig_catalog_scale_factor": 2.0        // 2x 渲染，提升文字和徽章清晰度
+    "rollpig_storage_backend": "cloud",
+    "rollpig_cloud_api_url": "https://your-rollpig-cloud.example.com"
   }
 }
 ```
 
-建议留在 `.env` 的敏感项与路径覆盖：
+Token 建议放在 `.env`：
 
 ```properties
-# DeepSeek API Key；仅填写 Key 不会开启 AI，还需设置 ROLLPIG_AI_ENABLED=true
-ROLLPIG_DEEPSEEK_KEY=sk-xxxxxxxxxxxxxxxx
-
-# rollpig-cloud Bearer Token
 ROLLPIG_CLOUD_TOKEN=replace-with-token
-
-# 私有资源 Bearer Token；公开静态资源通常不需要
-ROLLPIG_PRIVATE_RESOURCE_TOKEN=replace-with-token
-
-# 可选：指定 JSON 配置文件位置
-ROLLPIG_CONFIG_FILE=/path/to/rollpig_config.json
 ```
 
-补充说明：
+Cloud 模式用于同步今日小猪、图鉴成长、烧烤充能等核心状态。关键写操作不会在异常时偷偷落回本地，避免多 Bot 产生数据分叉。
 
-- 未开启 AI 或未配置 Key 时，会使用已同步的共享文案或代码内置模板；共享文案同步失败不影响现有烤猪功能。
-- `rollpig_roast_library_manifest_url` 不写时使用官方地址；填写自建 manifest 可替换来源，显式设为 `""` 或 `null` 会关闭并移除纯共享文案。
-- 共享快照只下载到实例并合并进本地 `roast_library.json`，不会上传用户文案。升级前已有内容和本机 AI 新文案都标记为本地来源，云端只能撤回纯共享内容。
-- 每个“原始猪 × 熟食 × 场景”最多主动积累 5 条本地 AI 文案；共享文案不占这 5 条额度，AI 开启时两类文案等概率选池。
-- 未配置云端时，默认继续使用本地 `pig_data.json` 存储，不影响单 Bot 正常运行。
-- 云同步可自行部署 [rollpig-cloud](https://github.com/Felis2026/rollpig-cloud)，也可以联系维护者申请接入现有 API。
-- `ROLLPIG_STORAGE_BACKEND=cloud` 时，今日小猪、图鉴成长状态、普通烤群友充能、加急点火次数会在多 Bot 间同步。
-- `ROLLPIG_CLOUD_STRICT_MODE=false` 只允许读接口使用安全兜底；关键写接口不会偷偷回退本地，避免多 Bot 数据脑裂。
-- 用户私有资源 overlay 优先级高于官方 GIF、公有云端资源和插件内置资源；推荐用 `rollpig_private_resource_manifests` 配置多个用户私有包，旧的 `rollpig_private_resource_manifest_url` 仍兼容。
-- 自建本地私有包的目录结构、manifest 生成与配置方式见 [rollpig-resources 自建本地私有包指南](https://github.com/Felis2026/rollpig-resources/blob/main/docs/local-private-pack-guide.md)。
-- `rollpig_daily_summary_enabled=false` 是默认值，表示未单独设置的群默认不推日报；可用 `小猪日报 开启` 为单群开启，或设为 `true` 让未覆盖的群默认开启。
-- 普通卡片由 Pillow 渲染，默认使用内置 Source Han Sans SC Medium；如需微软雅黑、韩文覆盖更好的字体或其它字形风格，可自行提供字体并配置 `rollpig_card_font_path`。
-- SUPERUSER可发送 `同步小猪资源` / `刷新小猪图鉴` 手动触发资源同步。
-- 图片版图鉴每页固定展示 38 只小猪，不提供配置项，避免和当前底图安全区错位。
+### 添加额外 Overlay
 
-## 🐖 自定义小猪
+ GIF Overlay 无需手动配置。
 
-本体内置资源位于：
-
-```text
-nonebot_plugin_rollpig_plus/resource/
-```
-
-最小资源格式：
+例如要额外加载 PJSK 主题包：
 
 ```json
-[
-  {
-    "id": "pig",
-    "name": "猪",
-    "description": "普通小猪",
-    "analysis": "你性格温和，喜欢简单的生活，容易满足。"
+{
+  "rollpig": {
+    "rollpig_private_resource_manifests": [
+      {
+        "name": "pjsk",
+        "manifest_url": "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
+      }
+    ]
   }
-]
+}
 ```
 
-规则说明：
+也可以填写自己的本地或私有资源包。
 
-- `pig.json` 维护基础小猪信息。
-- `resource/image/<id>.png` 或 `resource/image/<id>.gif` 为对应图片，文件名需要和 `id` 一致；同 ID 同时存在时优先使用 GIF。
-- `pig_rules.json` 维护熟食、特殊形态等规则，避免污染上游兼容的 `pig.json` 基础格式。
-- 普通卡片使用内置 Source Han Sans SC Medium 渲染 CJK 文本，并使用 `pilmoji` 与内置 Google Noto Emoji 32px ZIP 离线渲染彩色 Emoji，不依赖运行时联网。
-- PNG 与 GIF 均会在普通卡片中统一渲染为 240×240 头像区域；建议资源原图也按 240×240 入库，避免缩放裁切产生偏移。
-- GIF 仅用于“今日小猪 / 烤猪 / 烤群友”等普通卡片动态展示；图片版图鉴固定取首帧缩略图，保持静态陈列。
-- GIF 资源建议透明背景、循环播放、无文字水印，帧数控制在 10～60 帧；较长动画会在完整周期内均匀收敛到最多 60 帧并保留总时长。解码工作量超过 1600 万像素帧、源帧超过 600、文件异常或实际为单帧时会退回静态 PNG。
-- 公有云端资源会缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/active/`。
-- 多私有 overlay 会分别缓存到 `data/localstore/nonebot_plugin_rollpig_plus/resources/private_overlays/<name>/active/`；旧单私有包字段仍沿用 `private_active/`，方便无损升级。
+<details>
+<summary><strong>展开查看常用高级配置</strong></summary>
 
-## 📁 项目结构
+| 配置项 | 默认值 | 作用 |
+| --- | --- | --- |
+| `rollpig_ai_enabled` | `false` | 是否开启 AI 烤猪。 |
+| `rollpig_model` | `deepseek-v4-flash` | AI 模型名称。 |
+| `rollpig_roast_cooldown_hours` | `8` | 普通烧烤恢复 1 次所需小时数。 |
+| `rollpig_roast_charge_max` | `2` | 普通烧烤最大储存次数。 |
+| `rollpig_storage_backend` | `local` | `local` / `cloud` 存储后端。 |
+| `rollpig_cloud_strict_mode` | `true` | Cloud 异常时保持关键写入严格一致。 |
+| `rollpig_resource_sync_enabled` | `true` | 是否自动同步公共资源。 |
+| `rollpig_resource_sync_interval_hours` | `24` | 自动检查资源更新间隔。 |
+| `rollpig_roast_library_manifest_url` | RollPig Resources | 共享烤猪文案源；设为 `""` / `null` 可关闭。 |
+| `rollpig_daily_summary_enabled` | `false` | 未单独设置的群是否默认启用日报。 |
+| `rollpig_catalog_enabled` | `true` | 是否启用图片版小猪图鉴。 |
+| `rollpig_catalog_render_concurrency` | `2` | 图鉴并发绘制数；低内存部署可设为 `1`。 |
 
-```text
-nonebot_plugin_rollpig_plus/
-├─ __init__.py              # 插件元数据与 handler 导入
-├─ card_renderer.py         # 今日小猪 / 烤猪 / 烤群友等普通卡片 Pillow 渲染
-├─ catalog_renderer.py      # 图鉴业务数据、结果缓存与并发编排
-├─ catalog_pillow_renderer.py # 图片版小猪图鉴纯 Pillow 绘制
-├─ config.py                # 配置模型与 JSON 配置合并
-├─ data_manager.py          # 本地 JSON 存储实现
-├─ helpers.py               # 命令共享工具与消息发送辅助
-├─ jobs.py                  # 定时任务与日报流程
-├─ pighub_service.py        # PigHub 搜索 / 随机图缓存与兜底
-├─ resource_manager.py      # 云端资源同步、多私有 overlay 与本地缓存加载
-├─ roast_manager.py         # AI 烤猪、共享文案同步与来源索引
-├─ roll_flow.py             # 抽猪业务规则
-├─ roast_flow.py            # 烤群友业务规则
-├─ roast_refill.py          # 烤箱补货规则、NapCat reaction 与验票结算
-├─ reservation_flow.py      # 预约烤猪结算、结果快照与投递
-├─ reservation_delivery.py  # 跨 Bot Owner 恢复、机会式检查与低频轮询
-├─ runtime.py               # 宿主适配 / 群开关 / 运行时工具
-├─ texts.py                 # 文案模板与特殊形态文本
-├─ handlers/                # NoneBot 指令注册与参数解析
-├─ store/                   # local / cloud 存储适配
-└─ resource/                # 内置小猪、字体、Emoji 与图鉴底图资源
-```
+更多参数和默认值以 [`rollpig_config.example.json`](rollpig_config.example.json) 及当前版本源码为准。
 
-## 🔗 相关项目
+</details>
 
-- 原作插件：[Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig)
-- 小猪资源包：[Felis2026/rollpig-resources](https://github.com/Felis2026/rollpig-resources)
-- 云端存储服务：[Felis2026/rollpig-cloud](https://github.com/Felis2026/rollpig-cloud)
-- PigHub（搜猪功能支持）：[pighub.top](https://pighub.top/)
+---
 
-## 📋 最近更新
+## 📦 资源与扩展
 
-### v0.11.1 烤箱补货
+RollPig Plus 的公共资源由独立仓库维护：
 
-- 群主、管理员或 SUPERUSER 可发起 10 分钟投票；至少需要 3 名本群当日活跃玩家。
-- 达标后把成功时本群全部今日活跃玩家的全局普通烧烤次数恢复至配额上限，并从成功时刻重新计算自然恢复。
-- 门槛以发起瞬间的活跃人数为固定分母，按当天成功次数使用 25% / 35% / 45% / 55%，对应最多 8 / 12 / 16 / 20 票；第四次后保持不变。
-- Cloud 模式需先升级 RollPig Cloud 至 0.4.0+，再升级 Plus；Cloud 0.4.0 仍兼容旧版 Plus 的既有接口。
+**[Felis2026/rollpig-resources](https://github.com/Felis2026/rollpig-resources)**
 
-### v0.11.0 预约烤猪
+默认情况下，插件会自动读取和缓存：
 
-- 自己未抽猪时不再能烤群友
-- 目标未抽猪时建立群内预约烤猪；主厨消耗资源，其他群友免费加入，单场最多 12 人。
-- 负责该预约的 Owner Bot 会在启动恢复后每 60 秒最多执行一次轻量领取；普通 RollPig 指令、资源同步完成和群功能重新可用时也会提前唤醒。
-- 本地缺少资源或目标群关闭时会暂缓该预约，避免每分钟重复领取和刷日志；Cloud 状态不因此新增阻塞类型。
-- Local 与 Cloud 后端均完整支持预约；新插件连接旧 Cloud 时只把预约场景降级为原有「目标未抽猪」提示。
+- 公有基础小猪；
+- 基础图片；
+- EX 等级差分；
+- RollPig Resources  GIF 小猪 Overlay；
+- 共享烤猪文案。
 
-### v0.10.0 共享文案与 EX 成长差分
+资源同步采用 manifest、文件大小和 SHA-256 校验。新资源只有在完整校验通过后才会进入 active 状态；失败时继续使用当前可用缓存或插件内置资源。
 
-- 默认随小猪资源同步下载经过清洗审核的共享烤猪文案；未配置 AI Key 的实例也能直接使用更丰富的烤猪与烤群友模板。
-- 共享快照无损合并进本地 `roast_library.json`，并通过持久化来源索引区分本地与共享内容；云端更新、撤回或关闭功能都不会删除实例自有文案。
-- 共享同步复用现有启动、24 小时定时检查与 `同步小猪资源` 命令，支持大小、SHA256、结构校验、原子落盘和失败回退。
-- 本地 AI 文案软目标统一为每组合 5 条，且共享文案不占本地生成额度。
-- 新增 EX 等级差分资源协议；“今日小猪”和“小猪图鉴”会按用户当前等级分别继承可用的图片与文案差分，未提供或损坏时安全回退。
-- 差分只扩展展示，不改变小猪 ID、抽取结果、用户数据或 Cloud 数据；旧 Plus 与原版 RollPig 会继续使用同一资源包的基础内容。
+自己想添加的资源可以通过 Overlay 追加或覆盖，不需要直接修改插件源码。
 
-完整更新日志见 [CHANGELOG.md](CHANGELOG.md)。
+自建本地私有包可参考：
+
+[rollpig-resources / 本地私有包指南](https://github.com/Felis2026/rollpig-resources/blob/main/docs/local-private-pack-guide.md)
+
+> 资源文件的来源、版权和再分发条件以 `rollpig-resources` 仓库中的授权与来源说明为准；插件代码的 MIT License 不代表所有图片、文案和第三方素材都适用 MIT。
+
+---
+
+## ☁️ 多 Bot 同步
+
+**RollPig Cloud 是可选组件，不是安装 Plus 的前置条件。**
+
+单 Bot 或不需要跨实例共享数据时，保持默认 `local` 即可。
+
+如果同一套 RollPig 运行在多个 Bot / 多个实例中，可以部署并接入以下项目：
+
+**[Felis2026/rollpig-cloud](https://github.com/Felis2026/rollpig-cloud)**
+
+**或者提 Issue 直接申请接入现有的 Cloud**
+
+Cloud 主要负责把需要一致性的成长与互动状态放到统一后端，而图片、PigHub 索引和渲染等运行时资源仍由各实例本地处理。
+
+---
+
+## 🔄 和原版 RollPig 怎么选
+
+| | 原版 RollPig | RollPig Plus |
+| --- | --- | --- |
+| 每日抽猪 | ✅ | ✅ |
+| 随机 / 找猪 | ✅ | ✅ |
+| 公有资源同步 | ✅ | ✅ |
+| 图片收藏图鉴 | — | ✅ |
+| EX Lv. 成长 | — | ✅ |
+| EX 图片 / 文案差分 | — | ✅ |
+| 今日烤猪 / 烤群友 | — | ✅ |
+| 预约烤猪 / 补货 | — | ✅ |
+| 周报 / 日报 | — | ✅ |
+| 多 Overlay | — | ✅ |
+| RollPig Cloud 多 Bot 状态 | — | ✅ |
+
+如果你只需要最初的轻量功能，可以继续使用：
+
+[Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig)
+
+如果希望体验图鉴成长、群聊互动、EX、Cloud 和扩展资源，则更适合使用 Plus。
+
+再次提醒：**不要在同一个 Bot 进程中同时加载原版和 Plus。**
+
+---
+
+## 🧱 项目与生态
+
+| 项目 | 作用 |
+| --- | --- |
+| **[nonebot-plugin-rollpig-plus](https://github.com/Felis2026/nonebot-plugin-rollpig-plus)** | 围绕「今日小猪」的 NoneBot 群聊收集、成长与互动插件。 |
+| **[rollpig-resources](https://github.com/Felis2026/rollpig-resources)** | 公共小猪、EX、GIF Overlay、共享文案与资源协议。 |
+| **[rollpig-cloud](https://github.com/Felis2026/rollpig-cloud)** | 可选的多 Bot 状态同步后端。 |
+| **[Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig)** | RollPig 原作与最初核心功能。 |
+| **[PigHub](https://pighub.top/)** | `随机小猪` / `找猪` 使用的社区猪图来源之一。 |
+
+---
+
+## 🛠️ 开发与维护
+
+仓库包含自动化测试，核心代码已经按业务职责拆分为：
+
+- 指令与参数解析：`handlers/`
+- 抽猪规则：`roll_flow.py`
+- 烤群友：`roast_flow.py`
+- 预约：`reservation_flow.py` / `reservation_delivery.py`
+- 烤箱补货：`roast_refill.py`
+- 资源同步：`resource_manager.py`
+- PigHub：`pighub_service.py`
+- AI / 共享烤猪文案：`roast_manager.py`
+- 本地 / Cloud 存储：`store/`
+- 卡片与图鉴渲染：`card_renderer.py` / `catalog_renderer.py`
+
+完整版本变更请直接查看：
+
+**[CHANGELOG.md](CHANGELOG.md)**
+
+不再在 README 中重复维护每个版本的更新清单。
+
+---
 
 ## 📄 许可证与致谢
 
 插件代码使用 [MIT License](LICENSE)。
 
-本项目最初基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig) 修改，感谢原作者提供的创意与基础实现。内置初始文案和部分猪图继承自原作；后续扩展资源由维护者创作、整理或来自公开用户投稿渠道。资源包的详细来源、使用边界与贡献说明请以 [rollpig-resources](https://github.com/Felis2026/rollpig-resources) 为准。
+```text
+Copyright (c) 2025 Bear_lele
+Copyright (c) 2025-2026 Felis
+```
 
-普通卡片内置 [Source Han Sans SC Medium](https://github.com/adobe-fonts/source-han-sans) 作为默认 CJK 字体，并使用 [pilmoji](https://github.com/jay3332/pilmoji) 渲染彩色 Emoji；内置 Emoji 图形资源来自 [googlefonts/noto-emoji](https://github.com/googlefonts/noto-emoji)，第三方资源声明见 `THIRD_PARTY_NOTICES.md`。
+本项目最初基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig) 开发，感谢原作者提供 RollPig 的核心创意与基础实现。
+
+内置资源及云端资源并非全部由单一作者创作，也不统一适用插件代码的 MIT License。资源来源和授权条件请以：
+
+- [rollpig-resources](https://github.com/Felis2026/rollpig-resources)
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+
+中的实际说明为准。
+
+普通卡片使用 Source Han Sans SC Medium，并通过 `pilmoji` 与 Google Noto Emoji 渲染彩色 Emoji；相关第三方许可见 `THIRD_PARTY_NOTICES.md`。
