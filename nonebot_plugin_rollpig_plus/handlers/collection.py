@@ -107,6 +107,32 @@ async def _(event: Event, args: Message = CommandArg()):
     await cmd_catalog.finish(MessageSegment.reply(event.message_id) + MessageSegment.image(pic))
 
 
+# 6.6 小猪投稿入口
+cmd_submit_pig = on_command(
+    "小猪投稿",
+    aliases={"投稿小猪"},
+    rule=command_has_no_argument,
+    block=True,
+)
+
+
+@cmd_submit_pig.handle()
+@guard_group_enabled(cmd_submit_pig)
+async def _(event: Event):
+    message = (
+        "🐷 RollPig 小猪投稿\n"
+        "将你的小猪创意送进猪圈吧！\n\n"
+        "支持投稿：\n"
+        "• 小猪创意\n"
+        "• 完整小猪\n"
+        "• EX 等级差分\n\n"
+        "投稿地址：\n"
+        "https://pig.felislab.cc/submit\n"
+        "投稿完成后，记得保存投稿编号和私密查询码，方便随时查询审核进度。"
+    )
+    await cmd_submit_pig.finish(MessageSegment.reply(event.message_id) + message)
+
+
 # 7. 本周小猪
 cmd_week = on_command("本周小猪", rule=command_has_no_argument, block=True)
 

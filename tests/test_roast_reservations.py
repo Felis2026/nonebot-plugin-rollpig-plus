@@ -32,6 +32,7 @@ from nonebot_plugin_rollpig_plus.handlers import control as control_handler
 from nonebot_plugin_rollpig_plus.handlers import refill as refill_handler
 from nonebot_plugin_rollpig_plus.handlers import roast as roast_handler
 from nonebot_plugin_rollpig_plus.handlers import roll as roll_handler
+from nonebot_plugin_rollpig_plus.roll_flow import build_pigsty_growth_summary
 from nonebot_plugin_rollpig_plus.roast_flow import RoastOutcome
 from nonebot_plugin_rollpig_plus.store.cloud import CloudReservationUnsupportedError, CloudStore, CloudStoreError
 from nonebot_plugin_rollpig_plus.store.models import (
@@ -79,6 +80,15 @@ async def _matches(matcher, message: Message) -> bool:
 
 
 class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
+    def test_pigsty_summary_advertises_submission_command(self):
+        summary = build_pigsty_growth_summary(
+            "Felis",
+            SimpleNamespace(pig_ids=[], progress={}, duplicate_streak=0),
+            165,
+        )
+
+        self.assertTrue(summary.endswith("💡 有新的小猪创意？发送「小猪投稿」把它送进猪圈。"))
+
     def test_no_argument_matchers_share_strict_rule(self):
         matchers = (
             roll_handler.cmd_sync_resources,
@@ -88,6 +98,7 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
             roast_handler.cmd_roast,
             roast_handler.cmd_random_roast,
             collection_handler.cmd_sty,
+            collection_handler.cmd_submit_pig,
             collection_handler.cmd_week,
             refill_handler.cmd_roast_refill,
         )
@@ -99,6 +110,9 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await _matches(roll_handler.cmd_today, Message("/今日小猪")))
         self.assertFalse(await _matches(roll_handler.cmd_today, Message("/今日小猪测试")))
         self.assertFalse(await _matches(roast_handler.cmd_random_roast, Message("/随机烤猪测试")))
+        self.assertTrue(await _matches(collection_handler.cmd_submit_pig, Message("/小猪投稿")))
+        self.assertTrue(await _matches(collection_handler.cmd_submit_pig, Message("/投稿小猪")))
+        self.assertFalse(await _matches(collection_handler.cmd_submit_pig, Message("/小猪投稿测试")))
 
         self.assertTrue(await _matches(roast_handler.cmd_roast_member, Message("/烤群友 张三")))
         self.assertFalse(await _matches(roast_handler.cmd_roast_member, Message("/烤群友张三")))

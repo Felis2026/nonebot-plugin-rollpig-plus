@@ -213,5 +213,6 @@ def build_pigsty_growth_summary(user_name: str, draw_state: DrawState, total_pig
         f"{top_repeat_line}\n"
         f"{streak_line}\n"
         f"━━━━━━━━━━━━━━\n"
-        f"{footer_line}"
+        f"{footer_line}\n"
+        "💡 有新的小猪创意？发送「小猪投稿」把它送进猪圈。"
     )
