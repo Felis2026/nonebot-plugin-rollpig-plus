@@ -13,13 +13,18 @@ from ..card_renderer import render_weekly_pig_image
 from ..runtime import rollpig_today
 from ..resource_manager import PIG_LIST, find_image_file, get_pig_by_id
 from ..store import store
-from ..helpers import guard_group_enabled, guard_store_errors
+from ..helpers import command_has_no_argument, guard_group_enabled, guard_store_errors
 from ..helpers import get_event_user_name
 from ..helpers import log_perf
 
 
 # 6. 我的猪圈
-cmd_sty = on_command("我的猪圈", aliases={"我的小猪"}, block=True)
+cmd_sty = on_command(
+    "我的猪圈",
+    aliases={"我的小猪"},
+    rule=command_has_no_argument,
+    block=True,
+)
 
 @cmd_sty.handle()
 @guard_group_enabled(cmd_sty)
@@ -102,8 +107,34 @@ async def _(event: Event, args: Message = CommandArg()):
     await cmd_catalog.finish(MessageSegment.reply(event.message_id) + MessageSegment.image(pic))
 
 
+# 6.6 小猪投稿入口
+cmd_submit_pig = on_command(
+    "小猪投稿",
+    aliases={"投稿小猪"},
+    rule=command_has_no_argument,
+    block=True,
+)
+
+
+@cmd_submit_pig.handle()
+@guard_group_enabled(cmd_submit_pig)
+async def _(event: Event):
+    message = (
+        "🐷 RollPig 小猪投稿\n"
+        "将你的小猪创意送进猪圈吧！\n\n"
+        "支持投稿：\n"
+        "• 小猪创意\n"
+        "• 完整小猪\n"
+        "• EX 等级差分\n\n"
+        "投稿地址：\n"
+        "https://pig.felislab.cc/submit\n"
+        "投稿完成后，记得保存投稿编号和私密查询码，方便随时查询审核进度。"
+    )
+    await cmd_submit_pig.finish(MessageSegment.reply(event.message_id) + message)
+
+
 # 7. 本周小猪
-cmd_week = on_command("本周小猪", block=True)
+cmd_week = on_command("本周小猪", rule=command_has_no_argument, block=True)
 
 @cmd_week.handle()
 @guard_group_enabled(cmd_week)

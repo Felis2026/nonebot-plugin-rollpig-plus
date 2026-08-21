@@ -15,7 +15,7 @@ from ..reservation_flow import deliver_newly_ready_reservations
 from ..pighub_service import build_pighub_image_url, pighub_service
 from ..store import store
 from ..texts import TOMORROW_TEXTS
-from ..helpers import guard_group_enabled, guard_store_errors
+from ..helpers import command_has_no_argument, guard_group_enabled, guard_store_errors
 from ..helpers import get_event_group_id, is_superuser_user
 
 
@@ -27,7 +27,12 @@ def _build_pighub_image_message(pig: dict, image_url: str, fallback_title: str) 
 
 
 # 0. 小猪资源同步（管理员）
-cmd_sync_resources = on_command("同步小猪资源", aliases={"刷新小猪图鉴"}, block=True)
+cmd_sync_resources = on_command(
+    "同步小猪资源",
+    aliases={"刷新小猪图鉴"},
+    rule=command_has_no_argument,
+    block=True,
+)
 
 
 @cmd_sync_resources.handle()
@@ -55,7 +60,12 @@ async def _(event: Event):
 
 
 # 1. 今日小猪
-cmd_today = on_command("今天是什么小猪", aliases={"今日小猪"}, block=True)
+cmd_today = on_command(
+    "今天是什么小猪",
+    aliases={"今日小猪"},
+    rule=command_has_no_argument,
+    block=True,
+)
 
 @cmd_today.handle()
 @guard_group_enabled(cmd_today)
@@ -218,7 +228,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 
 
 # 3. 明日小猪
-cmd_tmr = on_command("明日小猪", block=True)
+cmd_tmr = on_command("明日小猪", rule=command_has_no_argument, block=True)
 
 @cmd_tmr.handle()
 @guard_group_enabled(cmd_tmr)
@@ -227,7 +237,7 @@ async def _(event: Event):
 
 
 # 4. 昨日小猪
-cmd_yest = on_command("昨日小猪", block=True)
+cmd_yest = on_command("昨日小猪", rule=command_has_no_argument, block=True)
 
 @cmd_yest.handle()
 @guard_group_enabled(cmd_yest)

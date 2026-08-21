@@ -18,6 +18,7 @@ from ..runtime import (
 cmd_daily_summary_switch = on_command(
     "小猪日报",
     aliases={"每日总结设置", "rollpig日报"},
+    force_whitespace=True,
     block=True,
 )
 

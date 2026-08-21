@@ -8,6 +8,7 @@ from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, MessageSe
 from nonebot.log import logger
 
 from ..helpers import (
+    command_has_no_argument,
     get_event_user_name,
     guard_group_enabled,
     guard_store_errors,
@@ -41,6 +42,7 @@ from ..texts import ROAST_REFILL_INSUFFICIENT_ACTIVE_TEXTS, ROAST_REFILL_PERMISS
 cmd_roast_refill = on_command(
     "烤箱补货",
     aliases={"重置烤猪次数", "恢复烧烤配额", "申请烤箱补给", "重置烧烤次数"},
+    rule=command_has_no_argument,
     block=True,
 )
 roast_refill_notice = on_notice(block=False, priority=5)

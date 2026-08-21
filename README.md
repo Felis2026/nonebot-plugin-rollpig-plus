@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.11.1-ff69b4" alt="Version 0.11.1">
+    <img src="https://img.shields.io/badge/Version-0.11.2-ff69b4" alt="Version 0.11.2">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -159,6 +159,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `我的猪圈` | 查看解锁数量、收藏率、最高 EX Lv.、本命猪等摘要。 |
 | `小猪图鉴 [页码]` | 生成图片版收藏图鉴。 |
 | `本周小猪` | 生成本周猪猪总结长图。 |
+| `小猪投稿` / `投稿小猪` | 前往 RollPig 投稿平台提交小猪创意、完整小猪或 EX 等级差分。 |
 | `今日烤猪` | 把自己的今日小猪做成料理。 |
 | `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪；目标未抽猪时自动进入预约流程。 |
 | `随机烤猪` | 从当前群已有记录中随机选择目标烤。 |

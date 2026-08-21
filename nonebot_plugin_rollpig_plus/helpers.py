@@ -6,9 +6,10 @@ from functools import wraps
 from typing import Any, Awaitable, Callable
 
 from nonebot import get_driver
-from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, Message, MessageSegment
 from nonebot.log import logger
 from nonebot.log import logger as nonebot_logger
+from nonebot.params import CommandArg, CommandWhitespace
 
 from .card_renderer import render_pig_card_image
 from .resource_manager import pig_resource_manager
@@ -17,6 +18,29 @@ from .reservation_delivery import schedule_opportunistic_delivery
 from .store import store
 from .store.cloud import CloudStoreError
 from .store.models import RoastEvent
+
+
+# ================================ 命令参数边界 ================================ #
+# NoneBot 的 on_command 默认按前缀命中；这些规则只收紧参数边界，不改变命令前缀与别名。
+
+
+def command_has_no_argument(command_arg: Message = CommandArg()) -> bool:
+    """仅允许完整的无参数命令；纯尾随空白由 NoneBot 归一化为空参数。"""
+
+    return not command_arg
+
+
+def roast_command_has_valid_boundary(
+    command_arg: Message = CommandArg(),
+    command_whitespace: str | None = CommandWhitespace(),
+) -> bool:
+    """允许完整命令、空白参数或直接 At，拒绝与命令黏连的文本。"""
+
+    if not command_arg or command_whitespace is not None:
+        return True
+
+    # QQ 输入框常把“命令 + At”编码成相邻消息段；At 本身已经是明确边界。
+    return command_arg[0].type == "at"
 
 
 # ================================ 事件身份与群成员工具 ================================ #

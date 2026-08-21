@@ -23,7 +23,12 @@ from ..roll_flow import (
 )
 from ..runtime import resolve_roast_charge_max, resolve_roast_cooldown_seconds
 from ..resource_manager import get_pig_by_id
-from ..helpers import finish_roast_outcome, send_rendered_pig
+from ..helpers import (
+    command_has_no_argument,
+    finish_roast_outcome,
+    roast_command_has_valid_boundary,
+    send_rendered_pig,
+)
 from ..reservation_delivery import register_owned_reservation
 from ..reservation_flow import deliver_newly_ready_reservations
 from ..store import store
@@ -120,7 +125,7 @@ async def _load_attacker_pig_or_finish(
 
 
 # 5. 今日烤猪
-cmd_roast = on_command("今日烤猪", block=True)
+cmd_roast = on_command("今日烤猪", rule=command_has_no_argument, block=True)
 
 @cmd_roast.handle()
 @guard_group_enabled(cmd_roast)
@@ -184,7 +189,12 @@ async def _(event: Event):
 # 5.5 烤群友
 # `加急生火` 是日常使用频率最高的后门口令，因此额外开放为直达触发命令。
 # 旧写法 `烤群友 加急生火 @某人` 保持兼容；这里只是让高频输入更顺手。
-cmd_roast_member = on_command("烤群友", aliases={"加急生火"}, block=True)
+cmd_roast_member = on_command(
+    "烤群友",
+    aliases={"加急生火"},
+    rule=roast_command_has_valid_boundary,
+    block=True,
+)
 
 @cmd_roast_member.handle()
 @guard_group_enabled(cmd_roast_member)
@@ -432,7 +442,12 @@ async def _load_random_roast_context_or_finish(matcher, bot: Bot, event: GroupMe
 
 
 # 5.6 随机烤群友
-cmd_random_roast = on_command("随机烤群友", aliases={"随机烤猪", "抽个群友烤了"}, block=True)
+cmd_random_roast = on_command(
+    "随机烤群友",
+    aliases={"随机烤猪", "抽个群友烤了"},
+    rule=command_has_no_argument,
+    block=True,
+)
 
 @cmd_random_roast.handle()
 @guard_group_enabled(cmd_random_roast)
