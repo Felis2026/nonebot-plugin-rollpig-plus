@@ -13,13 +13,18 @@ from ..card_renderer import render_weekly_pig_image
 from ..runtime import rollpig_today
 from ..resource_manager import PIG_LIST, find_image_file, get_pig_by_id
 from ..store import store
-from ..helpers import guard_group_enabled, guard_store_errors
+from ..helpers import command_has_no_argument, guard_group_enabled, guard_store_errors
 from ..helpers import get_event_user_name
 from ..helpers import log_perf
 
 
 # 6. 我的猪圈
-cmd_sty = on_command("我的猪圈", aliases={"我的小猪"}, block=True)
+cmd_sty = on_command(
+    "我的猪圈",
+    aliases={"我的小猪"},
+    rule=command_has_no_argument,
+    block=True,
+)
 
 @cmd_sty.handle()
 @guard_group_enabled(cmd_sty)
@@ -103,7 +108,7 @@ async def _(event: Event, args: Message = CommandArg()):
 
 
 # 7. 本周小猪
-cmd_week = on_command("本周小猪", block=True)
+cmd_week = on_command("本周小猪", rule=command_has_no_argument, block=True)
 
 @cmd_week.handle()
 @guard_group_enabled(cmd_week)

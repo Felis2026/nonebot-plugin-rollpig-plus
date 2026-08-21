@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import nonebot
+from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from nonebot.plugin import get_plugin
+from nonebot.rule import CommandRule, TrieRule
 
 try:
     nonebot.get_driver()
@@ -25,7 +27,11 @@ from nonebot_plugin_rollpig_plus import helpers
 from nonebot_plugin_rollpig_plus import reservation_delivery
 from nonebot_plugin_rollpig_plus import reservation_flow
 from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
+from nonebot_plugin_rollpig_plus.handlers import collection as collection_handler
+from nonebot_plugin_rollpig_plus.handlers import control as control_handler
+from nonebot_plugin_rollpig_plus.handlers import refill as refill_handler
 from nonebot_plugin_rollpig_plus.handlers import roast as roast_handler
+from nonebot_plugin_rollpig_plus.handlers import roll as roll_handler
 from nonebot_plugin_rollpig_plus.roast_flow import RoastOutcome
 from nonebot_plugin_rollpig_plus.store.cloud import CloudReservationUnsupportedError, CloudStore, CloudStoreError
 from nonebot_plugin_rollpig_plus.store.models import (
@@ -34,6 +40,91 @@ from nonebot_plugin_rollpig_plus.store.models import (
     RoastReservationParticipant,
     UnrolledRoastAttemptResult,
 )
+
+
+# ================================ 命令参数边界 ================================ #
+
+
+def _command_rule(matcher) -> CommandRule:
+    for checker in matcher.rule.checkers:
+        if isinstance(checker.call, CommandRule):
+            return checker.call
+    raise AssertionError(f"matcher {matcher} has no CommandRule")
+
+
+def _has_checker(matcher, checker_call) -> bool:
+    return any(checker.call is checker_call for checker in matcher.rule.checkers)
+
+
+class _MessageEvent:
+    """为命令 Trie 和 Rule 提供最小消息事件接口。"""
+
+    def __init__(self, message: Message):
+        self.message = message
+
+    def get_type(self) -> str:
+        return "message"
+
+    def get_message(self) -> Message:
+        return self.message
+
+
+async def _matches(matcher, message: Message) -> bool:
+    """按 NoneBot 实际顺序完成 Trie 预处理，再执行 Matcher Rule。"""
+
+    event = _MessageEvent(message)
+    state = {}
+    TrieRule.get_value(None, event, state)
+    return await matcher.rule(None, event, state)
+
+
+class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
+    def test_no_argument_matchers_share_strict_rule(self):
+        matchers = (
+            roll_handler.cmd_sync_resources,
+            roll_handler.cmd_today,
+            roll_handler.cmd_tmr,
+            roll_handler.cmd_yest,
+            roast_handler.cmd_roast,
+            roast_handler.cmd_random_roast,
+            collection_handler.cmd_sty,
+            collection_handler.cmd_week,
+            refill_handler.cmd_roast_refill,
+        )
+        for matcher in matchers:
+            with self.subTest(matcher=matcher):
+                self.assertTrue(_has_checker(matcher, helpers.command_has_no_argument))
+
+    async def test_matchers_apply_expected_boundaries(self):
+        self.assertTrue(await _matches(roll_handler.cmd_today, Message("/今日小猪")))
+        self.assertFalse(await _matches(roll_handler.cmd_today, Message("/今日小猪测试")))
+        self.assertFalse(await _matches(roast_handler.cmd_random_roast, Message("/随机烤猪测试")))
+
+        self.assertTrue(await _matches(roast_handler.cmd_roast_member, Message("/烤群友 张三")))
+        self.assertFalse(await _matches(roast_handler.cmd_roast_member, Message("/烤群友张三")))
+        self.assertTrue(
+            await _matches(
+                roast_handler.cmd_roast_member,
+                Message("/烤群友") + MessageSegment.at(123456),
+            )
+        )
+
+        self.assertTrue(await _matches(control_handler.cmd_daily_summary_switch, Message("/小猪日报 开启")))
+        self.assertFalse(await _matches(control_handler.cmd_daily_summary_switch, Message("/小猪日报开启")))
+
+        # 用户明确要求这三个既有文本参数命令继续兼容黏连写法。
+        self.assertTrue(await _matches(roll_handler.cmd_roll, Message("/随机小猪3")))
+        self.assertTrue(await _matches(collection_handler.cmd_catalog, Message("/小猪图鉴2")))
+        self.assertTrue(await _matches(roll_handler.cmd_find, Message("/找猪玩偶")))
+
+    def test_existing_text_parameter_commands_keep_default_matching(self):
+        for matcher in (
+            roll_handler.cmd_roll,
+            roll_handler.cmd_find,
+            collection_handler.cmd_catalog,
+        ):
+            with self.subTest(matcher=matcher):
+                self.assertIsNone(_command_rule(matcher).force_whitespace)
 
 
 class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
