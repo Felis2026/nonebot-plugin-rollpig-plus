@@ -51,6 +51,7 @@ class RoastOutcome:
     food_name: str = ""
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    special_reason: str = ""
 
 
 class RoastFoodMissingError(RuntimeError):

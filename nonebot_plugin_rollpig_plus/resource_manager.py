@@ -15,6 +15,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import httpx
 import nonebot_plugin_localstore as localstore
 from nonebot.log import logger
+from PIL import Image
 
 from .config import Config, plugin_config
 from .store.models import MAX_EXPERT_LEVEL
@@ -302,6 +303,31 @@ class RollPigResourceManager:
                     return image_file
         return None
 
+    def find_named_image_file(self, filename: str) -> Path | None:
+        """按快照中的安全文件名查找图片；禁止把历史字段当作任意路径读取。"""
+
+        if not filename or Path(filename).name != filename or "\\" in filename:
+            return None
+        for image_dir in self.image_dirs:
+            image_file = image_dir / filename
+            if image_file.is_file() and not image_file.is_symlink():
+                return image_file
+        return None
+
+    @staticmethod
+    def image_file_is_decodable(image_file: Path | None) -> bool:
+        """只解码首帧确认快照图片可用；该检查仅发生在首次抽取快照补全。"""
+
+        if image_file is None or not image_file.is_file() or image_file.is_symlink():
+            return False
+        try:
+            with Image.open(image_file) as image:
+                image.seek(0)
+                image.load()
+            return True
+        except (OSError, ValueError):
+            return False
+
     def resolve_pig_appearance(
         self,
         pig_data: Mapping[str, Any],
@@ -375,6 +401,17 @@ class RollPigResourceManager:
     def variant_change_fields(self, pig_id: str, level: int) -> frozenset[str]:
         """返回指定差分档显式改变的展示类型，用于选择对应的成长文案池。"""
 
+        precise_fields = self.variant_snapshot_fields(pig_id, level)
+        fields: set[str] = set()
+        if "image" in precise_fields:
+            fields.add("image")
+        if precise_fields & {"description", "analysis"}:
+            fields.add("text")
+        return frozenset(fields)
+
+    def variant_snapshot_fields(self, pig_id: str, level: int) -> frozenset[str]:
+        """返回差分真实提供的 image/description/analysis 字段，供历史快照精确记录。"""
+
         if not pig_id or pig_id in self.variant_blocked_pig_ids:
             return frozenset()
         variant = self.ex_variants.get(pig_id, {}).get(int(level or 0))
@@ -385,11 +422,13 @@ class RollPigResourceManager:
         if variant.image_path is not None:
             # 声明图片的差分以整档为单位应用；图片在加载后被删除或替换为链接时，
             # resolve_pig_appearance 也会跳过整档，因此这里不能再宣称图片或文案已变化。
-            if not variant.image_path.is_file() or variant.image_path.is_symlink():
+            if not self.image_file_is_decodable(variant.image_path):
                 return frozenset()
             fields.add("image")
-        if variant.description is not None or variant.analysis is not None:
-            fields.add("text")
+        if variant.description is not None:
+            fields.add("description")
+        if variant.analysis is not None:
+            fields.add("analysis")
         return frozenset(fields)
 
     def _read_state_version(self) -> str:

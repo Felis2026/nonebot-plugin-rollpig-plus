@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.11.2-ff69b4" alt="Version 0.11.2">
+    <img src="https://img.shields.io/badge/Version-0.12.0-ff69b4" alt="Version 0.12.0">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -152,7 +152,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | 指令 | 说明 |
 | --- | --- |
 | `今日小猪` / `今天是什么小猪` | 抽取或查看今天的小猪。 |
-| `昨日小猪` | 查看昨天真实抽到的小猪。 |
+| `昨日小猪` | 用回顾卡片查看昨天真实抽到的小猪、成长结果和与你有关的关键经历。 |
 | `明日小猪` | 查看明日预测。 |
 | `随机小猪 [数量]` | 从 PigHub 随机获取猪猪图，最多 10 张。 |
 | `找猪 关键词` / `搜猪 关键词` | 按关键词搜索 PigHub 猪猪图。 |
@@ -271,6 +271,38 @@ Cloud 模式用于同步今日小猪、图鉴成长、烧烤充能等核心状�
 
 也可以填写自己的本地或私有资源包。
 
+### 更换昨日回顾卡字体
+
+昨日回顾卡的标题与正文可以分别替换字体。默认标题使用内置 ZCOOL 快乐体，正文使用插件已有的思源黑体；不配置也能直接使用。
+
+例如，想把正文换成霞鹜文楷 TC Bold，可以从 [lxgw/LxgwWenKaiTC](https://github.com/lxgw/LxgwWenKaiTC) 下载字体文件，放进 Bot 运行目录下的 `fonts/`：
+
+```text
+fonts/LXGWWenKaiTC-Bold.ttf
+```
+
+再写入 `rollpig_config.json`：
+
+```json
+{
+  "rollpig": {
+    "rollpig_yesterday_card_title_font_path": null,
+    "rollpig_yesterday_card_body_font_path": "fonts/LXGWWenKaiTC-Bold.ttf"
+  }
+}
+```
+
+两个配置都支持绝对路径；相对路径按 Bot 运行目录解析。留空、设为 `null`，或者字体文件无法读取时，会分别回退到内置标题字体和思源黑体，不影响昨日小猪使用。
+
+<details>
+<summary><strong>展开查看霞鹜文楷正文效果</strong></summary>
+
+<p align="center">
+  <img src="docs/assets/preview-yesterday-custom-font.png" width="420" alt="昨日回顾卡使用霞鹜文楷正文的效果">
+</p>
+
+</details>
+
 <details>
 <summary><strong>展开查看常用高级配置</strong></summary>
 
@@ -286,6 +318,8 @@ Cloud 模式用于同步今日小猪、图鉴成长、烧烤充能等核心状�
 | `rollpig_resource_sync_interval_hours` | `24` | 自动检查资源更新间隔。 |
 | `rollpig_roast_library_manifest_url` | RollPig Resources | 共享烤猪文案源；设为 `""` / `null` 可关闭。 |
 | `rollpig_daily_summary_enabled` | `false` | 未单独设置的群是否默认启用日报。 |
+| `rollpig_yesterday_card_title_font_path` | `null` | 昨日回顾卡标题字体；留空使用内置 ZCOOL 快乐体。 |
+| `rollpig_yesterday_card_body_font_path` | `null` | 昨日回顾卡正文字体；留空使用内置思源黑体。 |
 | `rollpig_catalog_enabled` | `true` | 是否启用图片版小猪图鉴。 |
 | `rollpig_catalog_render_concurrency` | `2` | 图鉴并发绘制数；低内存部署可设为 `1`。 |
 
@@ -416,4 +450,4 @@ Copyright (c) 2025-2026 Felis
 
 中的实际说明为准。
 
-普通卡片使用 Source Han Sans SC Medium，并通过 `pilmoji` 与 Google Noto Emoji 渲染彩色 Emoji；相关第三方许可见 `THIRD_PARTY_NOTICES.md`。
+普通卡片、图鉴和昨日回顾卡正文默认使用 Source Han Sans SC Medium，并通过 `pilmoji` 与 Google Noto Emoji 渲染彩色 Emoji；相关第三方许可见 `THIRD_PARTY_NOTICES.md`。

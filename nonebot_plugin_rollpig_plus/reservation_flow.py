@@ -163,6 +163,7 @@ def _serialize_outcome(outcome: RoastOutcome) -> dict[str, Any]:
         "food_name": outcome.food_name,
         "backfire_victim_id": outcome.backfire_victim_id,
         "backfire_victim_name": outcome.backfire_victim_name,
+        "special_reason": outcome.special_reason,
     }
 
 
@@ -175,6 +176,7 @@ def _deserialize_outcome(snapshot: dict[str, Any]) -> RoastOutcome:
         food_name=str(snapshot.get("food_name") or ""),
         backfire_victim_id=str(snapshot.get("backfire_victim_id") or ""),
         backfire_victim_name=str(snapshot.get("backfire_victim_name") or ""),
+        special_reason=str(snapshot.get("special_reason") or ""),
     )
 
 
@@ -286,15 +288,23 @@ def _special_target_outcome(reservation: RoastReservation, target_pig: dict) -> 
     }
     if is_human_pig(target_pig):
         pool = RESERVED_TARGET_HUMAN_TEXTS
+        special_reason = "human"
     elif is_food_pig(target_pig):
         pool = RESERVED_TARGET_FOOD_TEXTS
+        special_reason = "food"
     elif is_eaten_pig(target_pig):
         pool = RESERVED_TARGET_EATEN_TEXTS
+        special_reason = "eaten"
     elif is_sold_pig(target_pig):
         pool = RESERVED_TARGET_SOLD_TEXTS
+        special_reason = "sold"
     else:
         return None
-    return RoastOutcome(event_type="reserved_special", plain_text=random.choice(pool).format(**values))
+    return RoastOutcome(
+        event_type="reserved_special",
+        plain_text=random.choice(pool).format(**values),
+        special_reason=special_reason,
+    )
 
 
 async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutcome:
@@ -373,6 +383,7 @@ def _build_reservation_event(reservation: RoastReservation, outcome: RoastOutcom
         participant_count=reservation.participant_count,
         backfire_victim_id=outcome.backfire_victim_id,
         backfire_victim_name=outcome.backfire_victim_name,
+        special_reason=outcome.special_reason,
     )
 
 

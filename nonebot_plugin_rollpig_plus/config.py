@@ -127,6 +127,12 @@ class Config(BaseModel):
     # 相对路径按 Bot 运行目录解析，例如 fonts/msyh.ttc。
     rollpig_card_font_path: Optional[str] = None
 
+    # --- 昨日回顾卡字体 ---
+    # 标题和正文可分别替换；相对路径同样按 Bot 运行目录解析。
+    # 留空时标题使用内置 ZCOOL 快乐体，正文复用内置思源黑体。
+    rollpig_yesterday_card_title_font_path: Optional[str] = None
+    rollpig_yesterday_card_body_font_path: Optional[str] = None
+
     # --- 图片版小猪图鉴 ---
     rollpig_catalog_enabled: bool = True
     # 单次 2× 绘制会同时持有多张大尺寸 RGBA 中间图；默认限制 2 个并发，

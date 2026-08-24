@@ -34,6 +34,8 @@
     "rollpig_daily_summary_enabled": false,
 
     "rollpig_card_font_path": null,
+    "rollpig_yesterday_card_title_font_path": null,
+    "rollpig_yesterday_card_body_font_path": null,
 
     "rollpig_catalog_enabled": true,
     "rollpig_catalog_render_concurrency": 2,
