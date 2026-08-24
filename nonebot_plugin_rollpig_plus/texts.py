@@ -612,65 +612,65 @@ ROAST_RESERVATION_FULL_TEXTS = [
 ROAST_RESERVATION_SUCCESS_TEXTS = [
     "🔥 等候结束，后厨开炉\n{participants}守候多时，【{target}】刚抽到【{pig}】就被推进了烤箱。",
     "🔥 终于等到食材\n【{target}】以【{pig}】形态出现，{participants}立刻关门点火。",
-    "🔥 后厨开工\n{participants}等了一整天，【{target}】的【{pig}】形态刚上线就被抓走。",
+    "🔥 后厨开工\n{participants}守了一整天，【{target}】的【{pig}】形态刚上线就被抓走。",
     "🔥 今日菜单到货\n【{target}】抽到了【{pig}】，{participants}当场点火，正式开席。",
-    "🔥 守候有了结果\n{participants}终于等到【{target}】抽出【{pig}】，烤架随即开始工作。",
+    "🔥 守候有了结果\n{participants}终于迎来【{target}】的【{pig}】，烤架随即开始工作。",
     "🔥 开炉时间到\n【{target}】带着【{pig}】出现，{participants}守住门口，没给食材留下逃跑机会。",
-    "🔥 后厨接单成功\n等待中的{participants}迎来了【{target}】的【{pig}】，火候已经安排妥当。",
-    "🔥 这顿饭终于开场\n【{target}】刚抽出【{pig}】，{participants}便把等待了一天的烤架点着了。",
+    "🔥 后厨接单成功\n{participants}守到现在，终于迎来了【{target}】的【{pig}】，火候已经安排妥当。",
+    "🔥 这顿饭终于开场\n【{target}】刚抽出【{pig}】，{participants}便把守了一天的烤架点着了。",
 ]
 
 ROAST_RESERVATION_ESCAPE_TEXTS = [
-    "🔥 等候结束，目标逃脱\n{participants}在炉边等了一整天。门刚打开，【{target}】扭头就跑，{count} 个人一起上也没抓住一根猪毛。",
-    "🔥 目标出现\n{participants}刚举起夹子，【{target}】已经从后厨窗口翻了出去。{count} 人的饭局当场改成喝西北风。",
-    "🔥 开炉失败\n【{target}】看见{participants}端着盘子，转身跑得只剩猪蹄印。{count} 人围堵仍宣告失败。",
+    "🔥 等候结束，目标逃脱\n{participants}在炉边守了一整天。门刚打开，【{target}】扭头就跑，这场守候最终连一根猪毛也没留下。",
+    "🔥 目标出现\n{participants}刚举起夹子，【{target}】已经从后厨窗口翻了出去。这顿饭局当场改成喝西北风。",
+    "🔥 开炉失败\n【{target}】看见{participants}端着盘子，转身跑得只剩猪蹄印。这次堵门仍以失败收场。",
     "🔥 食材拒绝到店\n【{target}】抽到【{pig}】后察觉不妙，赶在{participants}关门前冲了出去。",
-    "🔥 饭局临时取消\n{participants}等到了【{target}】的【{pig}】，却没等到它老实上桌，转眼只剩空烤架。",
-    "🔥 围堵没有成功\n【{target}】以【{pig}】形态出现后立即跑路，{count} 人追了半天还是空手而归。",
+    "🔥 饭局临时取消\n{participants}守到了【{target}】的【{pig}】，却没能让它老实上桌，转眼只剩空烤架。",
+    "🔥 围堵没有成功\n【{target}】以【{pig}】形态出现后立即跑路，{participants}追了半天还是空手而归。",
     "🔥 后厨扑了个空\n{participants}刚准备迎接【{target}】的【{pig}】，目标便从另一扇门溜走了。",
     "🔥 火点着了，猪跑了\n【{target}】抽出【{pig}】后拔腿就跑，留下{participants}围着热烤架发呆。",
 ]
 
 ROAST_RESERVATION_BACKFIRE_TEXTS = [
-    "🔥 后厨突然反锁\n{participants}围着烤箱等了一整天。\n【{target}】没进锅，反倒是【{victim}】不知道被谁一脚踹了进去。",
-    "🔥 后厨事故\n{participants}正准备围住【{target}】，烤箱却突然反锁。\n最后少了一个【{victim}】，锅里多了一份可疑食材。",
-    "🔥 烤箱突然点名\n{participants}本想等【{target}】下锅，烤箱门却朝【{victim}】弹开。{count} 人还没反应过来，倒霉蛋已经被拖了进去。",
-    "🔥 目标没抓住，队友先熟了\n【{target}】趁乱溜走，【{victim}】却被挤上烤架。等{participants}回过神，后厨已经开始计时。",
-    "🔥 食材成功调包\n【{target}】带着【{pig}】从后门溜走，烤箱里却传来了【{victim}】的求救声。",
-    "🔥 围堵现场发生误伤\n{participants}一拥而上想抓住【{target}】，最后被推进烤箱的却是【{victim}】。",
-    "🔥 后厨抓错了人\n【{target}】躲过了这顿烧烤，【{victim}】却被当成目标端进后厨，{count} 人只能眼看着火越烧越旺。",
-    "🔥 今天轮到守候者上桌\n【{target}】从围堵中溜走，【{victim}】反被关进后厨。{count} 人的饭局最后少了一双筷子，多了一道菜。",
+    "🔥 后厨突然反锁\n{participants}围着烤箱守了一整天。\n【{target}】没进锅，反倒是【{victim}】不知道被谁一脚踹了进去。",
+    "🔥 后厨事故\n{participants}正准备堵住【{target}】，烤箱却突然反锁。\n等炉门再次打开时，【{victim}】已经成了锅里的可疑食材。",
+    "🔥 烤箱突然点名\n{participants}本想等【{target}】下锅，烤箱门却突然朝【{victim}】弹开。炉边还没反应过来，倒霉蛋已经被拖了进去。",
+    "🔥 目标没抓住，守候者先熟了\n【{target}】趁乱溜走，【{victim}】却被挤上烤架。{participants}还没弄清发生了什么，后厨已经开始计时。",
+    "🔥 食材成功调包\n【{target}】带着【{pig}】从后门溜走，烤箱里却传来了【{victim}】的求救声。{participants}准备的菜单当场换了主角。",
+    "🔥 围堵现场发生误伤\n{participants}冲上去想抓住【{target}】，最后被推进烤箱的却是【{victim}】。",
+    "🔥 后厨抓错了人\n【{target}】躲过了这顿烧烤，【{victim}】却被当成目标端进后厨。这场由{participants}发起的预约，只能看着炉火越烧越旺。",
+    "🔥 今天轮到守候者上桌\n【{target}】从堵截中溜走，【{victim}】反被关进后厨。{participants}原本准备的饭局，最后少了一双筷子，多了一道菜。",
 ]
 
 RESERVED_TARGET_HUMAN_TEXTS = [
-    "🔥 等候结束，但食材不合规\n{participants}围着烤箱蹲了一整天。门终于开了——【{target}】抽到的却是人类形态。\n食品安全系统当场断电，{count} 个人端着盘子陷入沉默。",
+    "🔥 等候结束，但食材不合规\n{participants}围着烤箱守了一整天。门终于开了——【{target}】抽到的却是人类形态。\n食品安全系统当场断电，准备好的盘子彻底没了用处。",
     "🔥 后厨拒绝接单\n【{target}】今天抽成了人类，{participants}准备好的烤架只能原地熄火。",
-    "🔥 今日菜单审核失败\n{participants}终于等到【{target}】，却发现目标是人类形态，这顿饭当场取消。",
+    "🔥 今日菜单审核失败\n{participants}终于见到【{target}】，却发现目标是人类形态，这顿饭当场取消。",
     "🔥 食品安全系统介入\n【{target}】以人类形态出现，后厨立即断电，并请{participants}放下手里的夹子。",
-    "🔥 等来了一位人类\n【{target}】没有变成可以下锅的小猪，{count} 名守候者只能端着空盘子散场。",
+    "🔥 等来了一位人类\n【{target}】没有变成可以下锅的小猪，{participants}只能端着空盘子散场。",
 ]
 
 RESERVED_TARGET_FOOD_TEXTS = [
-    "🔥 等候结束，目标已经熟了\n{participants}守了半天，结果【{target}】自己以【{pig}】的熟食形态出现。\n烤箱都不用开机，大家已经可以分筷子了。",
+    "🔥 等候结束，目标已经熟了\n{participants}守了半天，结果【{target}】自己以【{pig}】的熟食形态出现。\n烤箱都不用开机，盘子已经可以直接端上桌。",
     "🔥 后厨省下一道工序\n【{target}】抽到的【{pig}】本来就是熟食，{participants}直接把烤架换成了餐桌。",
     "🔥 食材自带火候\n【{target}】以【{pig}】形态到场，{participants}发现根本不用再烤，拿起筷子就能开饭。",
-    "🔥 今日菜单直接出餐\n等待中的{participants}迎来了熟食形态的【{target}】，后厨连火都不用点。",
-    "🔥 烤架失去工作机会\n【{target}】抽出了【{pig}】，成品已经熟透，{count} 名守候者当场准备分餐。",
+    "🔥 今日菜单直接出餐\n{participants}终于迎来了熟食形态的【{target}】，后厨连火都不用点。",
+    "🔥 烤架失去工作机会\n【{target}】抽出了【{pig}】，成品已经熟透，{participants}当场拿起了筷子。",
 ]
 
 RESERVED_TARGET_EATEN_TEXTS = [
-    "🔥 等候结束，只剩空盘\n{participants}等来的只有残渣——【{target}】已经被吃掉了。\n{count} 个人研究了半天，也没找到可以下锅的部分。",
+    "🔥 等候结束，只剩空盘\n{participants}守到的只有残渣——【{target}】已经被吃掉了。\n翻遍盘子，也没找到可以下锅的部分。",
     "🔥 来晚了一步\n【{target}】今天抽到的形态已经被吃干净，{participants}只能围着空盘子叹气。",
-    "🔥 食材提前消失\n{participants}终于等到【{target}】，结果目标已经被吃掉，烤架上什么也没能留下。",
-    "🔥 后厨无物可烤\n【{target}】出现时只剩被吃完的痕迹，{count} 名守候者只能宣布散席。",
-    "🔥 这顿饭没有赶上\n等待中的{participants}发现【{target}】早已被吃掉，准备了一天的火只能熄灭。",
+    "🔥 食材提前消失\n{participants}终于见到【{target}】，结果目标已经被吃掉，烤架上什么也没能留下。",
+    "🔥 后厨无物可烤\n【{target}】出现时只剩被吃完的痕迹，{participants}只能宣布散席。",
+    "🔥 这顿饭没有赶上\n{participants}守到最后才发现，【{target}】早已被吃掉，准备了一天的火只能熄灭。",
 ]
 
 RESERVED_TARGET_SOLD_TEXTS = [
     "🔥 等候结束，目标已经售出\n【{target}】刚出现就显示已售出。{participants}追到收银台，只看见一张小票。",
-    "🔥 食材已被买走\n{participants}等了一整天，【{target}】却以售罄状态登场，这顿饭只能取消。",
-    "🔥 今日菜单宣告售罄\n【{target}】还没走到烤架前就被别人买走，{count} 名守候者只能空手而归。",
-    "🔥 后厨没抢到货\n等待中的{participants}终于见到【{target}】，结果目标已经售出，只剩价格牌还挂着。",
+    "🔥 食材已被买走\n{participants}守了一整天，【{target}】却以售罄状态登场，这顿饭只能取消。",
+    "🔥 今日菜单宣告售罄\n【{target}】还没走到烤架前就被别人买走，{participants}只能空手而归。",
+    "🔥 后厨没抢到货\n{participants}终于见到【{target}】，结果目标已经售出，只剩价格牌还挂着。",
     "🔥 这份食材不再供应\n【{target}】以已售出状态出现，{participants}准备好的烤架只能继续空着。",
 ]
 
