@@ -69,6 +69,37 @@ class DrawState:
 
 
 @dataclass(frozen=True)
+class DailyRollSnapshot:
+    """某日抽取真正发生时的最小历史结果；旧记录允许只保留日期与 pig_id。"""
+
+    date_str: str
+    pig_id: str
+    is_new_pig: Optional[bool] = None
+    previous_copies: Optional[int] = None
+    copies_after_roll: Optional[int] = None
+    collection_size_after_roll: Optional[int] = None
+    resource_version: str = ""
+    resolved_variant_level: Optional[int] = None
+    resolved_image_name: str = ""
+    unlocked_variant_levels: tuple[int, ...] = ()
+    unlocked_variant_fields: frozenset[str] = frozenset()
+
+    @property
+    def outcome_available(self) -> bool:
+        """是否保存了可用于昨日成长展示的抽取时结果。"""
+
+        return all(
+            value is not None
+            for value in (
+                self.is_new_pig,
+                self.previous_copies,
+                self.copies_after_roll,
+                self.collection_size_after_roll,
+            )
+        )
+
+
+@dataclass(frozen=True)
 class DailyRollResult:
     pig_id: str
     created: bool
@@ -77,6 +108,7 @@ class DailyRollResult:
     copies: int = 0
     previous_duplicate_streak: int = 0
     duplicate_streak: int = 0
+    snapshot: Optional[DailyRollSnapshot] = None
 
     def __iter__(self):
         # 兼容旧代码的 `pig_id, created = await get_or_create_daily_roll(...)` 写法。
@@ -115,6 +147,17 @@ class RoastEvent:
     participant_count: int = 0
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    special_reason: str = ""
+    event_id: str = ""
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class DailyEventQueryResult:
+    """事件查询结果；available=False 与真实的零事件严格区分。"""
+
+    items: tuple[dict[str, Any], ...] = ()
+    available: bool = True
 
 
 @dataclass(frozen=True)

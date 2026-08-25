@@ -4,6 +4,7 @@ import datetime
 import shutil
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -15,6 +16,7 @@ from .store.models import (
     CatalogSnapshot,
     CooldownConsumeResult,
     DailyRollResult,
+    DailyRollSnapshot,
     DrawState,
     GroupRoastRefillCompleteResult,
     GroupRoastRefillPrepareResult,
@@ -117,6 +119,7 @@ class PigDataManager:
     数据结构：
     - history    : {date: {user_id: pig_id}}  ← 新格式，仅存 pig_id（14天后自动清理）
                    旧版存完整 pig dict，_migrate() 会自动转换
+    - daily_roll_snapshots: {date: {user_id: snapshot}} ← 抽取时成长与资源快照
     - group_rolls: {date: {group_id: {user_id: pig_id}}} ← 群内“今日已抽/已显形”记录
     - collection : {user_id: [pig_id, ...]}   ← 永久保留，图鉴数据
     - pig_progress: {user_id: {pig_id: {copies, first_obtained_at}}} ← P1A 抽到次数/专家等级
@@ -144,6 +147,7 @@ class PigDataManager:
     def _default_data(self) -> dict:
         return {
             "history": {},
+            "daily_roll_snapshots": {},
             "group_rolls": {},
             "collection": {},
             "pig_progress": {},
@@ -194,6 +198,7 @@ class PigDataManager:
         migrated = False
         for key in (
             "history",
+            "daily_roll_snapshots",
             "group_rolls",
             "collection",
             "pig_progress",
@@ -221,6 +226,17 @@ class PigDataManager:
                 if isinstance(val, dict) and "id" in val:
                     records[uid] = val["id"]
                     migrated = True
+
+        # ================================ 历史快照容错 ================================ #
+        # 快照只是 history 的可选补充；单个日期桶损坏时直接隔离，不能让主数据文件
+        # 整体进入写保护，也不能影响旧 history 继续提供昨日身份。
+        daily_roll_snapshots = data.get("daily_roll_snapshots", {})
+        for date_str, records in list(daily_roll_snapshots.items()):
+            if isinstance(records, dict):
+                continue
+            logger.warning(f"rollpig 每日抽取快照日期桶损坏，已隔离: date={date_str}")
+            daily_roll_snapshots[date_str] = {}
+            migrated = True
 
         # ================================ P1A成长状态回填 ================================ #
         # 旧版本地数据只有 collection，只能确认“曾经拥有过”，无法还原真实重复次数。
@@ -462,6 +478,9 @@ class PigDataManager:
             participant_count=reservation.participant_count,
             backfire_victim_id=event.backfire_victim_id,
             backfire_victim_name=event.backfire_victim_name,
+            special_reason=event.special_reason,
+            event_id=event.event_id,
+            created_at=event.created_at,
         )
 
     def _find_reservation_locked(self, reservation_id: str) -> Optional[dict]:
@@ -607,6 +626,180 @@ class PigDataManager:
         target_date = date_str or rollpig_date_str()
         return dict(self.data.get("history", {}).get(target_date, {}))
 
+    # ================================ 每日抽取历史快照 ================================ #
+
+    def _snapshot_from_raw(
+        self,
+        *,
+        date_str: str,
+        user_id: str,
+        pig_id: str,
+        raw: object,
+    ) -> DailyRollSnapshot:
+        """恢复单条快照；坏条目只降级为历史身份，不拖垮整个数据文件。"""
+
+        if not isinstance(raw, dict) or str(raw.get("pig_id") or "") != pig_id:
+            if raw is not None:
+                logger.warning(
+                    "rollpig 每日抽取快照损坏，已忽略动态字段: "
+                    f"date={date_str} user={user_id} pig_id={pig_id}"
+                )
+            return DailyRollSnapshot(date_str=date_str, pig_id=pig_id)
+
+        is_new_raw = raw.get("is_new_pig")
+        is_new_pig = is_new_raw if isinstance(is_new_raw, bool) else None
+        previous_copies = _optional_nonnegative_int(raw.get("previous_copies"))
+        copies_after_roll = _optional_nonnegative_int(raw.get("copies_after_roll"))
+        collection_size = _optional_nonnegative_int(raw.get("collection_size_after_roll"))
+        resolved_level = _optional_nonnegative_int(raw.get("resolved_variant_level"))
+        if resolved_level is not None and resolved_level > 5:
+            resolved_level = None
+
+        raw_levels = raw.get("unlocked_variant_levels")
+        unlocked_levels = tuple(sorted({
+            int(level)
+            for level in raw_levels
+            if not isinstance(level, bool) and isinstance(level, int) and 1 <= level <= 5
+        })) if isinstance(raw_levels, list) else ()
+        raw_fields = raw.get("unlocked_variant_fields")
+        unlocked_fields = frozenset(
+            str(field)
+            for field in raw_fields
+            if str(field) in {"image", "description", "analysis"}
+        ) if isinstance(raw_fields, list) else frozenset()
+
+        snapshot = DailyRollSnapshot(
+            date_str=date_str,
+            pig_id=pig_id,
+            is_new_pig=is_new_pig,
+            previous_copies=previous_copies,
+            copies_after_roll=copies_after_roll,
+            collection_size_after_roll=collection_size,
+            resource_version=str(raw.get("resource_version") or ""),
+            resolved_variant_level=resolved_level,
+            resolved_image_name=str(raw.get("resolved_image_name") or ""),
+            unlocked_variant_levels=unlocked_levels,
+            unlocked_variant_fields=unlocked_fields,
+        )
+        if not snapshot.outcome_available:
+            logger.warning(
+                "rollpig 每日抽取快照字段残缺，已仅保留历史身份: "
+                f"date={date_str} user={user_id} pig_id={pig_id}"
+            )
+            return DailyRollSnapshot(date_str=date_str, pig_id=pig_id)
+        return snapshot
+
+    @staticmethod
+    def _snapshot_to_raw(snapshot: DailyRollSnapshot) -> dict:
+        """把领域快照序列化为稳定 JSON；集合字段固定排序便于幂等比较。"""
+
+        return {
+            "pig_id": snapshot.pig_id,
+            "is_new_pig": snapshot.is_new_pig,
+            "previous_copies": snapshot.previous_copies,
+            "copies_after_roll": snapshot.copies_after_roll,
+            "collection_size_after_roll": snapshot.collection_size_after_roll,
+            "resource_version": snapshot.resource_version,
+            "resolved_variant_level": snapshot.resolved_variant_level,
+            "resolved_image_name": snapshot.resolved_image_name,
+            "unlocked_variant_levels": list(snapshot.unlocked_variant_levels),
+            "unlocked_variant_fields": sorted(snapshot.unlocked_variant_fields),
+        }
+
+    def get_daily_roll_snapshot(self, user_id: str, date_str: str) -> Optional[DailyRollSnapshot]:
+        """读取指定日期历史快照；旧记录返回仅含日期与 pig_id 的降级对象。"""
+
+        normalized_user_id = str(user_id)
+        pig_id = self.data.get("history", {}).get(date_str, {}).get(normalized_user_id)
+        if not pig_id:
+            return None
+        day_snapshots = self.data.get("daily_roll_snapshots", {}).get(date_str, {})
+        raw = day_snapshots.get(normalized_user_id) if isinstance(day_snapshots, dict) else None
+        return self._snapshot_from_raw(
+            date_str=date_str,
+            user_id=normalized_user_id,
+            pig_id=str(pig_id),
+            raw=raw,
+        )
+
+    def _attach_created_snapshot_locked(
+        self,
+        *,
+        user_id: str,
+        date_str: str,
+        result: DailyRollResult,
+    ) -> DailyRollResult:
+        """在抽取临界区内写入无法事后可靠倒推的成长结果。"""
+
+        collection_size = len(self.data.setdefault("collection", {}).get(user_id, []))
+        snapshot = DailyRollSnapshot(
+            date_str=date_str,
+            pig_id=result.pig_id,
+            is_new_pig=result.is_new_pig,
+            previous_copies=result.previous_copies,
+            copies_after_roll=result.copies,
+            collection_size_after_roll=collection_size,
+        )
+        self.data.setdefault("daily_roll_snapshots", {}).setdefault(date_str, {})[user_id] = (
+            self._snapshot_to_raw(snapshot)
+        )
+        return replace(result, snapshot=snapshot)
+
+    async def complete_daily_roll_snapshot(
+        self,
+        user_id: str,
+        snapshot: DailyRollSnapshot,
+    ) -> bool:
+        """幂等补全资源快照；首次写入后禁止另一实例静默改写历史上下文。"""
+
+        normalized_user_id = str(user_id)
+        if not snapshot.outcome_available or not snapshot.resource_version:
+            raise ValueError("每日抽取快照缺少基础结果或资源版本")
+
+        async with self._lock:
+            current_pig_id = self.data.get("history", {}).get(snapshot.date_str, {}).get(normalized_user_id)
+            if str(current_pig_id or "") != snapshot.pig_id:
+                raise ValueError("每日抽取快照与 history 不一致")
+
+            snapshots = self.data.setdefault("daily_roll_snapshots", {})
+            day_snapshots = snapshots.get(snapshot.date_str)
+            if not isinstance(day_snapshots, dict):
+                # 运行期间也按日期桶隔离损坏数据，避免用户必须重启后才能恢复写入。
+                logger.warning(
+                    "rollpig 每日抽取快照日期桶损坏，补全请求已拒绝: "
+                    f"date={snapshot.date_str}"
+                )
+                raise ValueError("每日抽取快照日期桶损坏")
+            existing = self._snapshot_from_raw(
+                date_str=snapshot.date_str,
+                user_id=normalized_user_id,
+                pig_id=snapshot.pig_id,
+                raw=day_snapshots.get(normalized_user_id),
+            )
+            if not existing.outcome_available:
+                raise ValueError("旧抽取记录不支持补全历史快照")
+            if (
+                existing.is_new_pig,
+                existing.previous_copies,
+                existing.copies_after_roll,
+                existing.collection_size_after_roll,
+            ) != (
+                snapshot.is_new_pig,
+                snapshot.previous_copies,
+                snapshot.copies_after_roll,
+                snapshot.collection_size_after_roll,
+            ):
+                raise ValueError("每日抽取成长快照冲突")
+
+            if existing.resource_version:
+                if existing != snapshot:
+                    raise ValueError("每日抽取资源快照已由首次客户端写入")
+                return True
+
+            day_snapshots[normalized_user_id] = self._snapshot_to_raw(snapshot)
+            await self._atomic_save()
+            return True
+
     def _record_group_roll(self, date_str: str, group_id: str, user_id: str, pig_id: str) -> bool:
         """在群维度登记今日已出现的猪形态，用于群内日报与随机烤群友。"""
         if not group_id:
@@ -712,7 +905,26 @@ class PigDataManager:
             duplicate_streak=duplicate_streak,
         )
 
-    def _build_existing_roll_result_locked(self, user_id: str, pig_id: str) -> DailyRollResult:
+    def _build_existing_roll_result_locked(
+        self,
+        user_id: str,
+        pig_id: str,
+        date_str: str,
+    ) -> DailyRollResult:
+        snapshot = self.get_daily_roll_snapshot(user_id, date_str)
+        if snapshot and snapshot.outcome_available:
+            draw_state = self.get_draw_state(user_id)
+            return DailyRollResult(
+                pig_id=pig_id,
+                created=False,
+                is_new_pig=bool(snapshot.is_new_pig),
+                previous_copies=int(snapshot.previous_copies or 0),
+                copies=int(snapshot.copies_after_roll or 0),
+                previous_duplicate_streak=draw_state.duplicate_streak,
+                duplicate_streak=draw_state.duplicate_streak,
+                snapshot=snapshot,
+            )
+
         draw_state = self.get_draw_state(user_id)
         copies = draw_state.copies_of(pig_id)
         return DailyRollResult(
@@ -734,7 +946,12 @@ class PigDataManager:
             self.data["history"][today][user_id] = pig_id
             self._record_group_roll(today, group_id, user_id, pig_id)
             if previous_pig_id != pig_id:
-                self._apply_created_roll_progress_locked(user_id, pig_id)
+                result = self._apply_created_roll_progress_locked(user_id, pig_id)
+                self._attach_created_snapshot_locked(
+                    user_id=user_id,
+                    date_str=today,
+                    result=result,
+                )
 
             await self._atomic_save()
 
@@ -757,11 +974,16 @@ class PigDataManager:
                     dirty = self._record_group_roll(target_date, group_id, user_id, existing_pig_id)
                 if dirty:
                     await self._atomic_save()
-                return self._build_existing_roll_result_locked(user_id, existing_pig_id)
+                return self._build_existing_roll_result_locked(user_id, existing_pig_id, target_date)
 
             day_history[user_id] = proposed_pig_id
             self._record_group_roll(target_date, group_id, user_id, proposed_pig_id)
             result = self._apply_created_roll_progress_locked(user_id, proposed_pig_id)
+            result = self._attach_created_snapshot_locked(
+                user_id=user_id,
+                date_str=target_date,
+                result=result,
+            )
 
             # 预约只在 DailyRoll 首次创建的同一临界区内转为 ready；重复查看不会二次激活。
             for reservation in self.data.setdefault("roast_reservations", {}).values():
@@ -1324,6 +1546,19 @@ class PigDataManager:
             for d in history_dates_to_del:
                 del self.data["history"][d]
 
+            daily_roll_snapshots = self.data.get("daily_roll_snapshots", {})
+            snapshot_dates_to_del = [
+                date_str
+                for date_str in daily_roll_snapshots
+                if date_str in history_dates_to_del
+                or (
+                    _is_valid_date(date_str)
+                    and (today - datetime.date.fromisoformat(date_str)).days > days_to_keep
+                )
+            ]
+            for date_str in snapshot_dates_to_del:
+                del daily_roll_snapshots[date_str]
+
             group_rolls = self.data.get("group_rolls", {})
             group_dates_to_del = [
                 d for d in group_rolls
@@ -1384,6 +1619,7 @@ class PigDataManager:
 
             if (
                 history_dates_to_del
+                or snapshot_dates_to_del
                 or group_dates_to_del
                 or active_dates_to_del
                 or refill_ids_to_del
@@ -1526,6 +1762,11 @@ class PigDataManager:
                 ):
                     return False
         events.setdefault(date_str, []).append({
+            "event_id": str(event.event_id or uuid.uuid4().hex),
+            "created_at": str(
+                event.created_at
+                or datetime.datetime.now(datetime.timezone.utc).isoformat()
+            ),
             "type": event.event_type,
             "attacker": event.attacker_id,
             "target": event.target_id,
@@ -1539,6 +1780,7 @@ class PigDataManager:
             "participant_count": max(0, int(event.participant_count or 0)),
             "backfire_victim_id": str(event.backfire_victim_id or ""),
             "backfire_victim_name": str(event.backfire_victim_name or ""),
+            "special_reason": str(event.special_reason or ""),
         })
         if event.group_id:
             active_user_ids = [event.attacker_id, *event.participant_ids]
@@ -1556,7 +1798,8 @@ class PigDataManager:
                                food: str = "", group_id: str = "",
                                reservation_id: str = "", participant_ids: Optional[list[str]] = None,
                                participant_names: Optional[list[str]] = None, participant_count: int = 0,
-                               backfire_victim_id: str = "", backfire_victim_name: str = ""):
+                               backfire_victim_id: str = "", backfire_victim_name: str = "",
+                               special_reason: str = "", event_id: str = "", created_at: str = ""):
         """
         记录一次烤群友事件。
         event_type: "success" / "escape" / "backfire" / "bot_backfire" / "self_roast"
@@ -1577,20 +1820,43 @@ class PigDataManager:
                     participant_count=participant_count,
                     backfire_victim_id=backfire_victim_id,
                     backfire_victim_name=backfire_victim_name,
+                    special_reason=special_reason,
+                    event_id=event_id,
+                    created_at=created_at,
                 ),
                 date_str=rollpig_date_str(),
             )
             if changed:
                 await self._atomic_save()
 
-    def get_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list:
+    def get_daily_events(
+        self,
+        date_str: Optional[str] = None,
+        group_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> list:
         """获取指定日期（默认今天）的所有烤群友事件。"""
         if not date_str:
             date_str = rollpig_date_str()
         events = self.data.get("daily_events", {}).get(date_str, [])
-        if not group_id:
-            return [dict(e) if isinstance(e, dict) else e for e in events]
-        return [dict(e) if isinstance(e, dict) else e for e in events if e.get("group_id") == group_id]
+        result = [dict(event) for event in events if isinstance(event, dict)]
+        if group_id:
+            result = [event for event in result if str(event.get("group_id") or "") == str(group_id)]
+        if user_id:
+            normalized_user_id = str(user_id)
+            filtered: list[dict] = []
+            for event in result:
+                raw_participant_ids = event.get("participant_ids", [])
+                participant_ids = raw_participant_ids if isinstance(raw_participant_ids, list) else []
+                if (
+                    str(event.get("attacker") or "") == normalized_user_id
+                    or str(event.get("target") or "") == normalized_user_id
+                    or normalized_user_id in {str(item) for item in participant_ids}
+                    or str(event.get("backfire_victim_id") or "") == normalized_user_id
+                ):
+                    filtered.append(event)
+            result = filtered
+        return result
 
     def get_recent_rolls(self, user_id: str, days: int = 14) -> dict[str, str]:
         """返回最近若干天的抽猪记录；图鉴只读使用，不会修改 copies。"""
@@ -1825,6 +2091,18 @@ def _safe_int(value, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _optional_nonnegative_int(value: object) -> Optional[int]:
+    """读取快照中的可空非负整数；非法值返回 None，避免伪造历史结果。"""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized >= 0 else None
 
 
 def _is_valid_date(date_str: str) -> bool:

@@ -6,7 +6,9 @@ from .base import RollpigStore
 from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyEventQueryResult,
     DailyRollResult,
+    DailyRollSnapshot,
     DrawState,
     GroupRoastRefillCompleteResult,
     GroupRoastRefillPrepareResult,
@@ -35,6 +37,20 @@ class LocalJsonStore(RollpigStore):
 
     async def get_daily_rolls(self, date_str: Optional[str] = None) -> dict[str, str]:
         return self.manager.get_daily_rolls(date_str)
+
+    async def get_daily_roll_snapshot(
+        self,
+        user_id: str,
+        date_str: str,
+    ) -> Optional[DailyRollSnapshot]:
+        return self.manager.get_daily_roll_snapshot(user_id, date_str)
+
+    async def complete_daily_roll_snapshot(
+        self,
+        user_id: str,
+        snapshot: DailyRollSnapshot,
+    ) -> bool:
+        return await self.manager.complete_daily_roll_snapshot(user_id, snapshot)
 
     async def get_or_create_daily_roll(
         self,
@@ -106,10 +122,25 @@ class LocalJsonStore(RollpigStore):
             participant_count=event.participant_count,
             backfire_victim_id=event.backfire_victim_id,
             backfire_victim_name=event.backfire_victim_name,
+            special_reason=event.special_reason,
+            event_id=event.event_id,
+            created_at=event.created_at,
         )
 
-    async def list_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list[dict]:
-        return self.manager.get_daily_events(date_str=date_str, group_id=group_id)
+    async def query_daily_events(
+        self,
+        date_str: Optional[str] = None,
+        group_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> DailyEventQueryResult:
+        return DailyEventQueryResult(
+            items=tuple(self.manager.get_daily_events(
+                date_str=date_str,
+                group_id=group_id,
+                user_id=user_id,
+            )),
+            available=True,
+        )
 
     async def get_active_group_ids(self, date_str: Optional[str] = None) -> set[str]:
         return self.manager.get_active_group_ids(date_str=date_str)

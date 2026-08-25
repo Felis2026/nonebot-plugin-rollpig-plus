@@ -11,7 +11,9 @@ from .base import RollpigStore
 from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyEventQueryResult,
     DailyRollResult,
+    DailyRollSnapshot,
     DrawState,
     GroupRoastRefillCompleteResult,
     GroupRoastRefillPrepareResult,
@@ -61,6 +63,7 @@ class CloudStore(RollpigStore):
             # CloudStore 是高频路径：复用连接池能减少 TCP/TLS 开销，同时用上限避免异常并发撑爆连接。
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
+        self._daily_roll_snapshot_supported: Optional[bool] = None
 
     async def close(self) -> None:
         """NoneBot 关闭时释放长期 HTTP client，避免 reload/退出时留下连接资源。"""
@@ -175,6 +178,69 @@ class CloudStore(RollpigStore):
             failure_reason=str(payload.get("failure_reason") or ""),
         )
 
+    @staticmethod
+    def _parse_daily_roll_snapshot(
+        payload: dict | None,
+        *,
+        date_str: str,
+        allow_pending_completion: bool = False,
+    ) -> Optional[DailyRollSnapshot]:
+        """解析 Cloud 快照；只有当前抽取流程可以读取待补全的成长结果。"""
+
+        if not isinstance(payload, dict) or not payload.get("pig_id"):
+            return None
+        pig_id = str(payload["pig_id"])
+        outcome = payload.get("outcome_snapshot")
+        if not isinstance(outcome, dict):
+            return DailyRollSnapshot(date_str=date_str, pig_id=pig_id)
+
+        snapshot_available = bool(outcome.get("snapshot_available"))
+        if not snapshot_available:
+            # Cloud 会先冻结成长结果，再由抽取客户端补写资源与外观。历史读取
+            # 不能使用半成品；只有 get-or-create 可拿成长数据继续完成 PUT。
+            pending_values = (
+                payload.get("is_new_pig"),
+                payload.get("previous_copies"),
+                payload.get("copies"),
+                outcome.get("collection_size_after_roll"),
+            )
+            if not allow_pending_completion or any(value is None for value in pending_values):
+                return DailyRollSnapshot(date_str=date_str, pig_id=pig_id)
+
+        raw_levels = outcome.get("unlocked_variant_levels", [])
+        levels = tuple(sorted({
+            int(level)
+            for level in raw_levels
+            if not isinstance(level, bool) and isinstance(level, int) and 1 <= level <= 5
+        })) if isinstance(raw_levels, list) else ()
+        raw_fields = outcome.get("unlocked_variant_fields", [])
+        fields = frozenset(
+            str(field)
+            for field in raw_fields
+            if str(field) in {"image", "description", "analysis"}
+        ) if isinstance(raw_fields, list) else frozenset()
+        return DailyRollSnapshot(
+            date_str=date_str,
+            pig_id=pig_id,
+            is_new_pig=bool(payload.get("is_new_pig")),
+            previous_copies=max(0, int(payload.get("previous_copies") or 0)),
+            copies_after_roll=max(0, int(payload.get("copies") or 0)),
+            collection_size_after_roll=max(0, int(outcome.get("collection_size_after_roll") or 0)),
+            resource_version=(str(outcome.get("resource_version") or "") if snapshot_available else ""),
+            resolved_variant_level=(
+                max(0, min(5, int(outcome.get("resolved_variant_level") or 0)))
+                if snapshot_available
+                else None
+            ),
+            resolved_image_name=(
+                str(outcome.get("resolved_image_name") or "")
+                if snapshot_available
+                else ""
+            ),
+            unlocked_variant_levels=levels if snapshot_available else (),
+            unlocked_variant_fields=fields if snapshot_available else frozenset(),
+        )
+
     async def get_daily_roll(self, user_id: str, date_str: Optional[str] = None) -> Optional[str]:
         payload = await self._request(
             "GET",
@@ -198,6 +264,51 @@ class CloudStore(RollpigStore):
             if item.get("user_id") and item.get("pig_id")
         }
 
+    async def get_daily_roll_snapshot(
+        self,
+        user_id: str,
+        date_str: str,
+    ) -> Optional[DailyRollSnapshot]:
+        payload = await self._request(
+            "GET",
+            "/v1/daily-rolls/by-date",
+            params={"user_id": user_id, "date_str": date_str},
+            fallback={"pig_id": None},
+        )
+        return self._parse_daily_roll_snapshot(payload, date_str=date_str)
+
+    async def complete_daily_roll_snapshot(
+        self,
+        user_id: str,
+        snapshot: DailyRollSnapshot,
+    ) -> bool:
+        if getattr(self, "_daily_roll_snapshot_supported", None) is False:
+            return False
+        try:
+            await self._request(
+                "PUT",
+                "/v1/daily-rolls/snapshot",
+                json_body={
+                    "user_id": user_id,
+                    "date_str": snapshot.date_str,
+                    "pig_id": snapshot.pig_id,
+                    "resource_version": snapshot.resource_version,
+                    "resolved_variant_level": snapshot.resolved_variant_level or 0,
+                    "resolved_image_name": snapshot.resolved_image_name,
+                    "unlocked_variant_levels": list(snapshot.unlocked_variant_levels),
+                    "unlocked_variant_fields": sorted(snapshot.unlocked_variant_fields),
+                },
+            )
+        except CloudStoreError as error:
+            cause = error.__cause__
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in {404, 405}:
+                self._daily_roll_snapshot_supported = False
+                logger.info("当前 rollpig cloud 不支持每日抽取快照补全，已按旧版兼容模式运行。")
+                return False
+            raise
+        self._daily_roll_snapshot_supported = True
+        return True
+
     async def get_or_create_daily_roll(
         self,
         user_id: str,
@@ -205,13 +316,14 @@ class CloudStore(RollpigStore):
         date_str: Optional[str] = None,
         group_id: str = "",
     ) -> DailyRollResult:
+        target_date = date_str or rollpig_date_str()
         payload = await self._request(
             "POST",
             "/v1/daily-rolls/get-or-create",
             json_body={
                 "user_id": user_id,
                 "proposed_pig_id": proposed_pig_id,
-                "date_str": date_str or rollpig_date_str(),
+                "date_str": target_date,
                 "group_id": group_id,
             },
         )
@@ -223,6 +335,11 @@ class CloudStore(RollpigStore):
             copies=int(payload.get("copies") or 0),
             previous_duplicate_streak=int(payload.get("previous_duplicate_streak") or 0),
             duplicate_streak=int(payload.get("duplicate_streak") or 0),
+            snapshot=self._parse_daily_roll_snapshot(
+                payload,
+                date_str=target_date,
+                allow_pending_completion=True,
+            ),
         )
 
     async def get_draw_state(self, user_id: str) -> DrawState:
@@ -390,6 +507,7 @@ class CloudStore(RollpigStore):
             "participant_count": event.participant_count,
             "backfire_victim_id": event.backfire_victim_id,
             "backfire_victim_name": event.backfire_victim_name,
+            "special_reason": event.special_reason,
         }
 
     async def _append_roast_event(self, event: RoastEvent, *, date_str: str) -> None:
@@ -402,14 +520,51 @@ class CloudStore(RollpigStore):
     async def append_roast_event(self, event: RoastEvent) -> None:
         await self._append_roast_event(event, date_str=rollpig_date_str())
 
-    async def list_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list[dict]:
+    async def query_daily_events(
+        self,
+        date_str: Optional[str] = None,
+        group_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> DailyEventQueryResult:
+        try:
+            payload = await self._request(
+                "GET",
+                "/v1/events",
+                params={
+                    "date_str": date_str or rollpig_date_str(),
+                    "group_id": group_id,
+                    "user_id": user_id,
+                },
+            )
+        except CloudStoreError:
+            return DailyEventQueryResult(available=False)
+
+        raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+        items = tuple(dict(item) for item in raw_items if isinstance(item, dict))
+        return DailyEventQueryResult(items=items, available=True)
+
+    async def list_daily_events(
+        self,
+        date_str: Optional[str] = None,
+        group_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> list[dict]:
+        """保留日报旧语义：严格模式查询失败必须抛错，避免误写空保护名单。"""
+
         payload = await self._request(
             "GET",
             "/v1/events",
-            params={"date_str": date_str or rollpig_date_str(), "group_id": group_id},
+            params={
+                "date_str": date_str or rollpig_date_str(),
+                "group_id": group_id,
+                "user_id": user_id,
+            },
+            # 非严格模式继续沿用旧版安全读降级；严格模式会忽略 fallback 并抛错，
+            # 由日报任务跳过当前群，不能把查询失败当成真实的零事件。
             fallback={"items": []},
         )
-        return payload.get("items", []) if payload else []
+        raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+        return [dict(item) for item in raw_items if isinstance(item, dict)]
 
     async def get_active_group_ids(self, date_str: Optional[str] = None) -> set[str]:
         payload = await self._request(

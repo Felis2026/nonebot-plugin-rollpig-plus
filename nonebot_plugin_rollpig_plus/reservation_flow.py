@@ -107,16 +107,51 @@ def _clear_reservation_backoff(reservation_id: str) -> None:
     _group_backoff.pop(reservation_id, None)
 
 
+# ================================ 预约参与者展示 ================================ #
+
+
+def _participant_names(reservation: RoastReservation) -> list[str]:
+    """按预约顺序返回参与者名称，并为旧记录补回可能缺失的主厨。"""
+
+    names = [
+        item.display_name
+        or (reservation.owner_name if item.user_id == reservation.owner_id else "")
+        or item.user_id
+        or "一名群友"
+        for item in reservation.participants
+    ]
+    if reservation.owner_id and all(
+        item.user_id != reservation.owner_id for item in reservation.participants
+    ):
+        names.insert(0, reservation.owner_name or reservation.owner_id)
+    if not names:
+        names.append(reservation.owner_name or reservation.owner_id or "一名群友")
+    return names
+
+
 def _participants_label(reservation: RoastReservation) -> str:
-    names = [item.display_name or item.user_id for item in reservation.participants]
-    if len(names) <= 4:
-        return "、".join(f"【{name}】" for name in names)
-    return "、".join(f"【{name}】" for name in names[:3]) + f"和另外 {len(names) - 3} 名群友"
+    """卡片外最多列出三名参与者，人数更多时折叠为主厨与总人数。"""
+
+    names = _participant_names(reservation)
+    wrapped = [f"【{name}】" for name in names]
+    if len(wrapped) == 1:
+        return wrapped[0]
+    if len(wrapped) == 2:
+        return "和".join(wrapped)
+    if len(wrapped) == 3:
+        return "、".join(wrapped[:2]) + f"和{wrapped[2]}"
+    owner = reservation.owner_name or reservation.owner_id or names[0]
+    return f"【{owner}】等 {len(names)} 人"
 
 
 def _operator_label(reservation: RoastReservation) -> str:
-    owner = reservation.owner_name or reservation.owner_id
-    return owner if reservation.participant_count <= 1 else f"{owner} 等 {reservation.participant_count} 人"
+    """熟食卡署名在三人以内列全名，人数更多时保持紧凑。"""
+
+    names = _participant_names(reservation)
+    if len(names) <= 3:
+        return "、".join(names)
+    owner = reservation.owner_name or reservation.owner_id or names[0]
+    return f"{owner} 等 {len(names)} 人"
 
 
 def _serialize_outcome(outcome: RoastOutcome) -> dict[str, Any]:
@@ -128,6 +163,7 @@ def _serialize_outcome(outcome: RoastOutcome) -> dict[str, Any]:
         "food_name": outcome.food_name,
         "backfire_victim_id": outcome.backfire_victim_id,
         "backfire_victim_name": outcome.backfire_victim_name,
+        "special_reason": outcome.special_reason,
     }
 
 
@@ -140,6 +176,7 @@ def _deserialize_outcome(snapshot: dict[str, Any]) -> RoastOutcome:
         food_name=str(snapshot.get("food_name") or ""),
         backfire_victim_id=str(snapshot.get("backfire_victim_id") or ""),
         backfire_victim_name=str(snapshot.get("backfire_victim_name") or ""),
+        special_reason=str(snapshot.get("special_reason") or ""),
     )
 
 
@@ -248,19 +285,26 @@ def _special_target_outcome(reservation: RoastReservation, target_pig: dict) -> 
         "participants": _participants_label(reservation),
         "target": reservation.target_name or reservation.target_id,
         "pig": target_pig.get("name", "未知小猪"),
-        "count": reservation.participant_count,
     }
     if is_human_pig(target_pig):
         pool = RESERVED_TARGET_HUMAN_TEXTS
+        special_reason = "human"
     elif is_food_pig(target_pig):
         pool = RESERVED_TARGET_FOOD_TEXTS
+        special_reason = "food"
     elif is_eaten_pig(target_pig):
         pool = RESERVED_TARGET_EATEN_TEXTS
+        special_reason = "eaten"
     elif is_sold_pig(target_pig):
         pool = RESERVED_TARGET_SOLD_TEXTS
+        special_reason = "sold"
     else:
         return None
-    return RoastOutcome(event_type="reserved_special", plain_text=random.choice(pool).format(**values))
+    return RoastOutcome(
+        event_type="reserved_special",
+        plain_text=random.choice(pool).format(**values),
+        special_reason=special_reason,
+    )
 
 
 async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutcome:
@@ -280,7 +324,6 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
         "participants": _participants_label(reservation),
         "target": reservation.target_name or reservation.target_id,
         "pig": target_pig.get("name", "未知小猪"),
-        "count": reservation.participant_count,
     }
     if reservation.force_mode in {"normal", "super"}:
         roll = 1
@@ -340,6 +383,7 @@ def _build_reservation_event(reservation: RoastReservation, outcome: RoastOutcom
         participant_count=reservation.participant_count,
         backfire_victim_id=outcome.backfire_victim_id,
         backfire_victim_name=outcome.backfire_victim_name,
+        special_reason=outcome.special_reason,
     )
 
 

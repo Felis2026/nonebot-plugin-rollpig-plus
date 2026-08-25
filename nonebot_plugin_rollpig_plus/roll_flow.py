@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from nonebot.log import logger
 
 from .resource_manager import pig_resource_manager
 from .store import store
-from .store.models import MAX_EXPERT_LEVEL, DailyRollResult, DrawState, expert_level_from_copies
+from .store.models import (
+    MAX_EXPERT_LEVEL,
+    DailyRollResult,
+    DailyRollSnapshot,
+    DrawState,
+    expert_level_from_copies,
+)
 from .texts import (
     DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS,
     DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS,
@@ -18,6 +24,9 @@ from .texts import (
 
 DUPLICATE_PITY_WEIGHT_STEP = 0.5
 DUPLICATE_PITY_WEIGHT_CAP = 4.0
+RECORDED_PIG_RESOURCE_MISSING_TEXT = (
+    "你的今日小猪已经抽出来了，但当前 Bot 的小猪资源暂时缺失，请稍后再试。"
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +37,7 @@ class DailyPigResolution:
     roll_result: DailyRollResult | None = None
     growth_text: str = ""
     missing_resources: bool = False
+    recorded_pig_missing: bool = False
     ex_level: int | None = None
 
     @property
@@ -39,6 +49,98 @@ class DailyPigResolution:
 
 # ================================ 今日小猪成长流程 ================================ #
 # 集中处理“今日小猪”与图鉴成长相关的纯业务规则。
+
+
+def resolve_variant_unlocks(
+    pig_id: str,
+    previous_level: int,
+    current_level: int,
+) -> tuple[tuple[int, ...], frozenset[str]]:
+    """返回本次真正解锁的差分等级与精确字段，供即时提示和历史快照共用。"""
+
+    candidate_levels = pig_resource_manager.newly_unlocked_variant_levels(
+        pig_id,
+        previous_level,
+        current_level,
+    )
+    levels: list[int] = []
+    fields: set[str] = set()
+    for level in candidate_levels:
+        level_fields = pig_resource_manager.variant_snapshot_fields(pig_id, level)
+        if not level_fields:
+            continue
+        levels.append(level)
+        fields.update(level_fields)
+    return tuple(levels), frozenset(fields)
+
+
+def build_completed_daily_roll_snapshot(
+    result: DailyRollResult,
+    pig_data: dict,
+) -> DailyRollSnapshot | None:
+    """用当前已激活资源补全首次抽取快照，不对旧记录或当前进度做历史倒推。"""
+
+    snapshot = result.snapshot
+    if snapshot is None or not snapshot.outcome_available:
+        return None
+
+    previous_level = expert_level_from_copies(snapshot.previous_copies or 0)
+    current_level = expert_level_from_copies(snapshot.copies_after_roll or 0)
+    pig_id = str(pig_data.get("id") or snapshot.pig_id)
+    unlocked_levels, unlocked_fields = resolve_variant_unlocks(
+        pig_id,
+        previous_level,
+        current_level,
+    )
+    appearance = pig_resource_manager.resolve_pig_appearance(pig_data, current_level)
+    resolved_level = appearance.applied_level
+    resolved_image = appearance.image_path
+    if (
+        resolved_image is not None
+        and resolved_image != appearance.base_image_path
+        and not pig_resource_manager.image_file_is_decodable(resolved_image)
+    ):
+        # 差分图片在同步后被替换或损坏时，普通卡会整卡回退基础资源；
+        # 历史快照必须记录相同结果，不能继续宣称新立绘或新介绍已生效。
+        resolved_level = 0
+        resolved_image = appearance.base_image_path
+        unlocked_levels = ()
+        unlocked_fields = frozenset()
+    return replace(
+        snapshot,
+        resource_version=appearance.resource_version or "builtin",
+        resolved_variant_level=resolved_level,
+        resolved_image_name=resolved_image.name if resolved_image else "",
+        unlocked_variant_levels=unlocked_levels,
+        unlocked_variant_fields=unlocked_fields,
+    )
+
+
+async def _complete_daily_roll_snapshot(
+    user_id: str,
+    result: DailyRollResult,
+    pig_data: dict,
+) -> DailyRollResult:
+    """补全失败只损失昨日成长细节，不能阻断今日抽猪与预约激活。"""
+
+    base_snapshot = result.snapshot
+    if base_snapshot is None or base_snapshot.resource_version:
+        return result
+    try:
+        # 资源解析、图片首帧检查和 Store 写入都属于可选补全；任一环节异常
+        # 都必须与今日抽猪主流程隔离。
+        snapshot = build_completed_daily_roll_snapshot(result, pig_data)
+        if snapshot is None:
+            return result
+        await store.complete_daily_roll_snapshot(user_id, snapshot)
+    except Exception as error:
+        logger.warning(
+            "rollpig 每日抽取资源快照补全失败，已保留基础抽取结果: "
+            f"date={base_snapshot.date_str} user={user_id} "
+            f"pig_id={base_snapshot.pig_id} error={error}"
+        )
+        return result
+    return replace(result, snapshot=snapshot)
 
 
 async def pick_daily_roll_candidate(user_id: str) -> dict:
@@ -76,7 +178,7 @@ def build_roll_growth_text(result: DailyRollResult, pig_data: dict) -> str:
             level=current_level,
         )
 
-    unlocked_levels = pig_resource_manager.newly_unlocked_variant_levels(
+    unlocked_levels, precise_fields = resolve_variant_unlocks(
         str(pig_data.get("id") or ""),
         previous_level,
         current_level,
@@ -84,12 +186,9 @@ def build_roll_growth_text(result: DailyRollResult, pig_data: dict) -> str:
     if unlocked_levels:
         # 一次升级可能跨过多个稀疏档位；合并本次真实变化后只发送一条完整提示，
         # 避免先说普通升级、再追加“解锁图片/文案”的重复表达。
-        changed_fields = frozenset().union(
-            *(
-                pig_resource_manager.variant_change_fields(str(pig_data.get("id") or ""), level)
-                for level in unlocked_levels
-            )
-        )
+        changed_fields = frozenset({"image"} if "image" in precise_fields else set())
+        if precise_fields & {"description", "analysis"}:
+            changed_fields = changed_fields | {"text"}
         pool_key = {
             frozenset({"image"}): "image",
             frozenset({"text"}): "text",
@@ -137,9 +236,13 @@ async def resolve_daily_pig(
 
     if pig_id:
         # 已保存的 ID 缺失时绝不能用随机候选替代，否则展示结果会与账本永久不一致。
-        # 具体 ID 只进入管理员日志；命令层继续复用现有数据缺失提示，无需改变返回结构。
+        # 具体 ID 只进入管理员日志；命令层用独立标记解释为“已抽出但本机缺资源”。
         logger.warning(f"RollPig 今日形态资源缺失: user={user_id} pig_id={pig_id}")
-        return DailyPigResolution(pig=None, missing_resources=True)
+        return DailyPigResolution(
+            pig=None,
+            missing_resources=True,
+            recorded_pig_missing=True,
+        )
 
     if not pig_resource_manager.pig_list:
         return DailyPigResolution(pig=None, missing_resources=True)
@@ -150,7 +253,21 @@ async def resolve_daily_pig(
         proposed_pig["id"],
         group_id=group_id,
     )
-    pig = pig_resource_manager.pig_map.get(roll_result.pig_id) or proposed_pig
+    pig = pig_resource_manager.pig_map.get(roll_result.pig_id)
+    if pig is None:
+        # 多 Bot 并发时 Cloud 可能返回另一实例抢先写入的猪。当前实例尚未同步
+        # 该资源时必须停止展示与快照补全，不能拿本地候选猪冒充 Cloud 赢家。
+        logger.warning(
+            "RollPig Cloud 抽取结果资源缺失: "
+            f"user={user_id} pig_id={roll_result.pig_id} "
+            f"proposed_pig_id={proposed_pig['id']}"
+        )
+        return DailyPigResolution(
+            pig=None,
+            missing_resources=True,
+            recorded_pig_missing=True,
+        )
+    roll_result = await _complete_daily_roll_snapshot(user_id, roll_result, pig)
     return DailyPigResolution(
         pig=pig,
         roll_result=roll_result,

@@ -16,7 +16,18 @@ rendering stable in offline or Docker environments.
 
 - Source: [adobe-fonts/source-han-sans](https://github.com/adobe-fonts/source-han-sans)
 - Bundled path: `nonebot_plugin_rollpig_plus/resource/fonts/SourceHanSansSC-Medium.otf`
-- Usage: default CJK text font for Pillow-rendered pig cards.
+- Usage: default CJK text font for Pillow-rendered pig cards, catalogs, and
+  yesterday recap card body text.
+- Change note: the font file is redistributed as-is and is not intentionally
+  modified by this project.
+- License: **SIL Open Font License, Version 1.1**. A copy is provided at
+  `LICENSES/OFL-1.1.txt`.
+
+## ZCOOL KuaiLe Regular
+
+- Source: [google/fonts](https://github.com/google/fonts/tree/main/ofl/zcoolkuaile)
+- Bundled path: `nonebot_plugin_rollpig_plus/resource/fonts/ZCOOLKuaiLe-Regular.ttf`
+- Usage: default display font for the Pillow-rendered yesterday recap card.
 - Change note: the font file is redistributed as-is and is not intentionally
   modified by this project.
 - License: **SIL Open Font License, Version 1.1**. A copy is provided at

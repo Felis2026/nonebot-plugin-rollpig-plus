@@ -15,6 +15,7 @@ from .catalog_renderer import shutdown_catalog_renderer
 from .config import plugin_config
 from .pighub_service import PIGHUB_REFRESH_INTERVAL_HOURS, pighub_service
 from .resource_manager import get_pig_by_id, sync_rollpig_resources
+from .yesterday_card_renderer import shutdown_yesterday_card_renderer
 from .runtime import (
     is_daily_summary_enabled,
     is_group_rollpig_enabled,
@@ -44,6 +45,7 @@ async def shutdown_rollpig_runtime() -> None:
 
     await shutdown_reservation_delivery_tasks()
     await pighub_service.shutdown()
+    await shutdown_yesterday_card_renderer()
     await shutdown_card_renderer()
     await shutdown_catalog_renderer()
     await store.close()

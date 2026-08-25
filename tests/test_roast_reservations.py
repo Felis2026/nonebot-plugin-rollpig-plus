@@ -26,6 +26,7 @@ from nonebot_plugin_rollpig_plus import data_manager as data_manager_module
 from nonebot_plugin_rollpig_plus import helpers
 from nonebot_plugin_rollpig_plus import reservation_delivery
 from nonebot_plugin_rollpig_plus import reservation_flow
+from nonebot_plugin_rollpig_plus import texts as texts_module
 from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
 from nonebot_plugin_rollpig_plus.handlers import collection as collection_handler
 from nonebot_plugin_rollpig_plus.handlers import control as control_handler
@@ -833,7 +834,71 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
             claim_token="claim",
         )
 
-    async def test_force_reservation_succeeds_and_uses_group_operator_label(self):
+    def test_participant_labels_list_three_names_before_collapsing(self):
+        cases = (
+            (("主厨",), "【主厨】", "主厨"),
+            (("主厨", "帮厨"), "【主厨】和【帮厨】", "主厨、帮厨"),
+            (("主厨", "帮厨", "三厨"), "【主厨】、【帮厨】和【三厨】", "主厨、帮厨、三厨"),
+            (("主厨", "帮厨", "三厨", "四厨"), "【主厨】等 4 人", "主厨 等 4 人"),
+            (tuple(["主厨", *[f"帮厨{index}" for index in range(2, 13)]]), "【主厨】等 12 人", "主厨 等 12 人"),
+        )
+        for names, expected_text, expected_card in cases:
+            with self.subTest(names=names):
+                participants = tuple(
+                    RoastReservationParticipant(
+                        "owner" if index == 0 else f"helper-{index}",
+                        name,
+                        f"pig-{index}",
+                    )
+                    for index, name in enumerate(names)
+                )
+                reservation = self._reservation(participants=participants)
+                self.assertEqual(
+                    reservation_flow._participants_label(reservation),
+                    expected_text,
+                )
+                self.assertEqual(
+                    reservation_flow._operator_label(reservation),
+                    expected_card,
+                )
+
+        missing_owner_name = self._reservation(participants=(
+            RoastReservationParticipant("owner", "", "owner-pig"),
+        ))
+        self.assertEqual(
+            reservation_flow._participants_label(missing_owner_name),
+            "【主厨】",
+        )
+
+    def test_result_text_pools_use_participant_names_instead_of_raw_counts(self):
+        pools = (
+            texts_module.ROAST_RESERVATION_SUCCESS_TEXTS,
+            texts_module.ROAST_RESERVATION_ESCAPE_TEXTS,
+            texts_module.ROAST_RESERVATION_BACKFIRE_TEXTS,
+            texts_module.RESERVED_TARGET_HUMAN_TEXTS,
+            texts_module.RESERVED_TARGET_FOOD_TEXTS,
+            texts_module.RESERVED_TARGET_EATEN_TEXTS,
+            texts_module.RESERVED_TARGET_SOLD_TEXTS,
+        )
+        for pool in pools:
+            for template in pool:
+                with self.subTest(template=template):
+                    self.assertIn("{participants}", template)
+                    self.assertNotIn("{count}", template)
+                    rendered = template.format(
+                        participants="【主厨】",
+                        target="目标",
+                        pig="目标猪",
+                        victim="主厨",
+                    )
+                    self.assertNotIn("1 人", rendered)
+                    self.assertNotIn("1 名", rendered)
+                    self.assertNotIn("1 个", rendered)
+                    self.assertNotIn("一起", rendered)
+                    self.assertNotIn("众人", rendered)
+                    self.assertNotIn("多人", rendered)
+
+    async def test_force_reservation_succeeds_and_lists_small_group_operator_names(self):
         expected = RoastOutcome(event_type="success", plain_text="ok")
         success = AsyncMock(return_value=expected)
         with (
@@ -851,7 +916,7 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(result, expected)
         randint.assert_not_called()
-        self.assertEqual(success.await_args.kwargs["attacker_name"], "主厨 等 2 人")
+        self.assertEqual(success.await_args.kwargs["attacker_name"], "主厨、帮厨")
 
     async def test_force_reservation_still_stops_for_special_target(self):
         predicates = ("is_human_pig", "is_food_pig", "is_eaten_pig", "is_sold_pig")

@@ -6,15 +6,19 @@ from nonebot.log import logger
 from nonebot.params import CommandArg
 
 from ..roll_flow import (
+    RECORDED_PIG_RESOURCE_MISSING_TEXT,
     resolve_daily_pig,
 )
-from ..runtime import rollpig_date_str
-from ..resource_manager import PIG_LIST, get_pig_by_id, sync_rollpig_resources
+from ..resource_manager import PIG_LIST, sync_rollpig_resources
 from ..helpers import send_rendered_pig
 from ..reservation_flow import deliver_newly_ready_reservations
 from ..pighub_service import build_pighub_image_url, pighub_service
-from ..store import store
 from ..texts import TOMORROW_TEXTS
+from ..yesterday_card_renderer import render_yesterday_recap_card
+from ..yesterday_recap import (
+    YesterdayPigResourceMissingError,
+    build_yesterday_recap,
+)
 from ..helpers import command_has_no_argument, guard_group_enabled, guard_store_errors
 from ..helpers import get_event_group_id, is_superuser_user
 
@@ -74,6 +78,9 @@ async def _(event: Event):
     user_id = str(event.user_id)
     group_id = get_event_group_id(event)
     resolution = await resolve_daily_pig(user_id, group_id, include_progress=True)
+    if resolution.recorded_pig_missing:
+        await cmd_today.finish(RECORDED_PIG_RESOURCE_MISSING_TEXT)
+        return
     if resolution.missing_resources or not resolution.pig:
         await cmd_today.finish("猪圈塌房了（数据缺失）")
         return
@@ -239,15 +246,54 @@ async def _(event: Event):
 # 4. 昨日小猪
 cmd_yest = on_command("昨日小猪", rule=command_has_no_argument, block=True)
 
+
+async def _handle_yesterday_pig(event: Event) -> None:
+    """生成昨日回顾卡；失败时只返回错误，不再进入旧版普通卡流程。"""
+
+    user_id = str(event.user_id)
+    group_id = get_event_group_id(event)
+    try:
+        recap = await build_yesterday_recap(user_id, group_id=group_id)
+    except YesterdayPigResourceMissingError as error:
+        logger.warning(f"rollpig 昨日身份无法解析: user={user_id} pig_id={error}")
+        await cmd_yest.finish(
+            MessageSegment.reply(event.message_id)
+            + "昨天那只猪暂时不在当前资源包里。"
+        )
+        return
+
+    if recap is None:
+        await cmd_yest.finish(MessageSegment.reply(event.message_id) + "你昨天没抽猪。")
+        return
+
+    try:
+        render_result = await render_yesterday_recap_card(recap)
+    except Exception as error:
+        logger.error(
+            "rollpig 昨日回顾卡片生成失败: "
+            f"user={user_id} pig_id={recap.roll.pig_id} error={error}"
+        )
+        await cmd_yest.finish(
+            MessageSegment.reply(event.message_id)
+            + "昨日回顾卡生成失败，请稍后再试。"
+        )
+        return
+
+    logger.info(
+        "rollpig yesterday card rendered: "
+        f"user={user_id} pig_id={recap.roll.pig_id} "
+        f"renderer={render_result.renderer} format={render_result.image_format} "
+        f"size={render_result.width}x{render_result.height} "
+        f"bytes={len(render_result.data)} image_fallback={render_result.used_fallback_image}"
+    )
+    await cmd_yest.finish(
+        MessageSegment.reply(event.message_id)
+        + MessageSegment.image(render_result.data)
+    )
+
+
 @cmd_yest.handle()
 @guard_group_enabled(cmd_yest)
 @guard_store_errors(cmd_yest)
 async def _(event: Event):
-    user_id = str(event.user_id)
-    yesterday = rollpig_date_str(-1)
-    pig = get_pig_by_id(await store.get_pig_by_date(user_id, yesterday))
-
-    if not pig:
-        await cmd_yest.finish(MessageSegment.reply(event.message_id) + "你昨天没抽猪。")
-    msg = f"你昨天是一只【{pig['name']}】！"
-    await send_rendered_pig(cmd_yest, event, pig, extra_text=msg)
+    await _handle_yesterday_pig(event)

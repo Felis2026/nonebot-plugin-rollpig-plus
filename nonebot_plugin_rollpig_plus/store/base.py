@@ -6,7 +6,9 @@ from typing import Optional
 from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyEventQueryResult,
     DailyRollResult,
+    DailyRollSnapshot,
     DrawState,
     GroupRoastRefillCompleteResult,
     GroupRoastRefillPrepareResult,
@@ -30,6 +32,22 @@ class RollpigStore(ABC):
 
     @abstractmethod
     async def get_daily_rolls(self, date_str: Optional[str] = None) -> dict[str, str]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_daily_roll_snapshot(
+        self,
+        user_id: str,
+        date_str: str,
+    ) -> Optional[DailyRollSnapshot]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def complete_daily_roll_snapshot(
+        self,
+        user_id: str,
+        snapshot: DailyRollSnapshot,
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -91,8 +109,28 @@ class RollpigStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def list_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list[dict]:
+    async def query_daily_events(
+        self,
+        date_str: Optional[str] = None,
+        group_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> DailyEventQueryResult:
         raise NotImplementedError
+
+    async def list_daily_events(
+        self,
+        date_str: Optional[str] = None,
+        group_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> list[dict]:
+        """兼容原日报调用；需保留失败语义的后端应覆盖此方法，回顾业务读取 available。"""
+
+        result = await self.query_daily_events(
+            date_str=date_str,
+            group_id=group_id,
+            user_id=user_id,
+        )
+        return [dict(item) for item in result.items]
 
     @abstractmethod
     async def get_active_group_ids(self, date_str: Optional[str] = None) -> set[str]:
