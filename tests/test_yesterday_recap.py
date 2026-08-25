@@ -167,6 +167,20 @@ class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CloudDailyRollSnapshotCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_read_supplies_non_strict_fallback(self):
+        store = object.__new__(CloudStore)
+        store._request = AsyncMock(return_value={"pig_id": None})
+
+        snapshot = await store.get_daily_roll_snapshot("user", DATE)
+
+        self.assertIsNone(snapshot)
+        store._request.assert_awaited_once_with(
+            "GET",
+            "/v1/daily-rolls/by-date",
+            params={"user_id": "user", "date_str": DATE},
+            fallback={"pig_id": None},
+        )
+
     async def test_new_and_legacy_responses_are_distinguished(self):
         store = object.__new__(CloudStore)
         store._request = AsyncMock(return_value={
@@ -258,6 +272,13 @@ class CloudDailyRollSnapshotCompatibilityTests(unittest.IsolatedAsyncioTestCase)
         self.assertFalse(result.available)
         self.assertEqual(result.items, ())
 
+    async def test_daily_summary_event_read_preserves_cloud_failure(self):
+        store = object.__new__(CloudStore)
+        store._request = AsyncMock(side_effect=CloudStoreError("offline"))
+
+        with self.assertRaises(CloudStoreError):
+            await store.list_daily_events(DATE, group_id="group")
+
 
 class DailyRollAppearanceSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -341,6 +362,30 @@ class DailyRollAppearanceSnapshotTests(unittest.TestCase):
             }
         }
         with patch.object(roll_flow_module, "pig_resource_manager", self.manager):
+            snapshot = roll_flow_module.build_completed_daily_roll_snapshot(
+                self._result(),
+                self.manager.pig_map["pig"],
+            )
+
+        self.assertEqual(snapshot.resolved_image_name, "pig.png")
+        self.assertEqual(snapshot.resolved_variant_level, 0)
+        self.assertEqual(snapshot.unlocked_variant_fields, frozenset())
+
+    def test_decompression_bomb_variant_image_does_not_claim_unlock(self):
+        self.manager.ex_variants = {
+            "pig": {
+                2: PigExVariant(
+                    pig_id="pig",
+                    level=2,
+                    image_path=self.root / "pig_ex2.png",
+                    analysis="不会随异常图片应用",
+                )
+            }
+        }
+        with (
+            patch.object(Image, "MAX_IMAGE_PIXELS", 20),
+            patch.object(roll_flow_module, "pig_resource_manager", self.manager),
+        ):
             snapshot = roll_flow_module.build_completed_daily_roll_snapshot(
                 self._result(),
                 self.manager.pig_map["pig"],

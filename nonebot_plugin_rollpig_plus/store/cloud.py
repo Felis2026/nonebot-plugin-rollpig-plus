@@ -273,6 +273,7 @@ class CloudStore(RollpigStore):
             "GET",
             "/v1/daily-rolls/by-date",
             params={"user_id": user_id, "date_str": date_str},
+            fallback={"pig_id": None},
         )
         return self._parse_daily_roll_snapshot(payload, date_str=date_str)
 
@@ -541,6 +542,29 @@ class CloudStore(RollpigStore):
         raw_items = payload.get("items", []) if isinstance(payload, dict) else []
         items = tuple(dict(item) for item in raw_items if isinstance(item, dict))
         return DailyEventQueryResult(items=items, available=True)
+
+    async def list_daily_events(
+        self,
+        date_str: Optional[str] = None,
+        group_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> list[dict]:
+        """保留日报旧语义：严格模式查询失败必须抛错，避免误写空保护名单。"""
+
+        payload = await self._request(
+            "GET",
+            "/v1/events",
+            params={
+                "date_str": date_str or rollpig_date_str(),
+                "group_id": group_id,
+                "user_id": user_id,
+            },
+            # 非严格模式继续沿用旧版安全读降级；严格模式会忽略 fallback 并抛错，
+            # 由日报任务跳过当前群，不能把查询失败当成真实的零事件。
+            fallback={"items": []},
+        )
+        raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+        return [dict(item) for item in raw_items if isinstance(item, dict)]
 
     async def get_active_group_ids(self, date_str: Optional[str] = None) -> set[str]:
         payload = await self._request(

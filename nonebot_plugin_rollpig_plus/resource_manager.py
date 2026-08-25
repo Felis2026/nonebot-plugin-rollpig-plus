@@ -325,7 +325,7 @@ class RollPigResourceManager:
                 image.seek(0)
                 image.load()
             return True
-        except (OSError, ValueError):
+        except (OSError, ValueError, Image.DecompressionBombError):
             return False
 
     def resolve_pig_appearance(

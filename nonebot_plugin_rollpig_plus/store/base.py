@@ -123,7 +123,7 @@ class RollpigStore(ABC):
         group_id: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> list[dict]:
-        """兼容原日报调用；查询失败仍返回空列表，回顾业务应读取 available。"""
+        """兼容原日报调用；需保留失败语义的后端应覆盖此方法，回顾业务读取 available。"""
 
         result = await self.query_daily_events(
             date_str=date_str,
