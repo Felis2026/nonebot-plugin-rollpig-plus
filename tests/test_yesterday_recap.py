@@ -446,6 +446,78 @@ class DailyRollSnapshotCompletionIsolationTests(unittest.IsolatedAsyncioTestCase
         build.assert_not_called()
         complete.assert_not_awaited()
 
+    async def test_cloud_winner_missing_locally_does_not_use_proposed_pig(self):
+        proposed_pig = {"id": "pig-a", "name": "本机候选猪"}
+        cloud_result = DailyRollResult(
+            pig_id="pig-b",
+            created=False,
+            is_new_pig=True,
+            copies=1,
+            snapshot=DailyRollSnapshot(
+                date_str=DATE,
+                pig_id="pig-b",
+                is_new_pig=True,
+                previous_copies=0,
+                copies_after_roll=1,
+                collection_size_after_roll=1,
+            ),
+        )
+        fake_store = SimpleNamespace(
+            get_daily_roll=AsyncMock(return_value=None),
+            get_or_create_daily_roll=AsyncMock(return_value=cloud_result),
+        )
+        fake_manager = SimpleNamespace(
+            pig_list=[proposed_pig],
+            pig_map={"pig-a": proposed_pig},
+        )
+
+        with (
+            patch.object(roll_flow_module, "store", fake_store),
+            patch.object(roll_flow_module, "pig_resource_manager", fake_manager),
+            patch.object(
+                roll_flow_module,
+                "pick_daily_roll_candidate",
+                new=AsyncMock(return_value=proposed_pig),
+            ),
+            patch.object(
+                roll_flow_module,
+                "_complete_daily_roll_snapshot",
+                new=AsyncMock(),
+            ) as complete,
+        ):
+            resolution = await roll_flow_module.resolve_daily_pig(
+                "user",
+                "group",
+                include_progress=True,
+            )
+
+        self.assertIsNone(resolution.pig)
+        self.assertTrue(resolution.missing_resources)
+        self.assertTrue(resolution.recorded_pig_missing)
+        self.assertEqual(resolution.growth_text, "")
+        self.assertIsNone(resolution.ex_level)
+        complete.assert_not_awaited()
+
+    async def test_existing_roll_missing_locally_uses_recorded_pig_warning(self):
+        fake_store = SimpleNamespace(
+            get_daily_roll=AsyncMock(return_value="pig-b"),
+        )
+        fake_manager = SimpleNamespace(pig_map={})
+
+        with (
+            patch.object(roll_flow_module, "store", fake_store),
+            patch.object(roll_flow_module, "pig_resource_manager", fake_manager),
+        ):
+            resolution = await roll_flow_module.resolve_daily_pig("user", "group")
+
+        self.assertIsNone(resolution.pig)
+        self.assertTrue(resolution.missing_resources)
+        self.assertTrue(resolution.recorded_pig_missing)
+        self.assertEqual(
+            roll_flow_module.RECORDED_PIG_RESOURCE_MISSING_TEXT,
+            "你的今日小猪已经抽出来了，但当前 Bot 的小猪资源暂时缺失，请稍后再试。",
+        )
+
 
 class YesterdayRecapBusinessTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

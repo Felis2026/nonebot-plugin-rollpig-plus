@@ -6,6 +6,7 @@ from nonebot.log import logger
 from nonebot.params import CommandArg
 
 from ..roll_flow import (
+    RECORDED_PIG_RESOURCE_MISSING_TEXT,
     resolve_daily_pig,
 )
 from ..resource_manager import PIG_LIST, sync_rollpig_resources
@@ -77,6 +78,9 @@ async def _(event: Event):
     user_id = str(event.user_id)
     group_id = get_event_group_id(event)
     resolution = await resolve_daily_pig(user_id, group_id, include_progress=True)
+    if resolution.recorded_pig_missing:
+        await cmd_today.finish(RECORDED_PIG_RESOURCE_MISSING_TEXT)
+        return
     if resolution.missing_resources or not resolution.pig:
         await cmd_today.finish("猪圈塌房了（数据缺失）")
         return

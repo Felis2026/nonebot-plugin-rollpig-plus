@@ -19,6 +19,7 @@ from ..roast_flow import (
     pick_self_roast_block_text,
 )
 from ..roll_flow import (
+    RECORDED_PIG_RESOURCE_MISSING_TEXT,
     resolve_daily_pig,
 )
 from ..runtime import resolve_roast_charge_max, resolve_roast_cooldown_seconds
@@ -118,7 +119,7 @@ async def _load_attacker_pig_or_finish(
     if not attacker_pig:
         await matcher.finish(
             MessageSegment.reply(event.message_id)
-            + "你的今日小猪记录存在，但本机资源暂时缺失，请稍后再试。"
+            + RECORDED_PIG_RESOURCE_MISSING_TEXT
         )
         return None
     return attacker_pig
@@ -136,6 +137,12 @@ async def _(event: Event):
     attacker_name = get_event_user_name(event)
     resolution = await resolve_daily_pig(user_id, group_id)
     original_pig = resolution.pig
+    if resolution.recorded_pig_missing:
+        await cmd_roast.finish(
+            MessageSegment.reply(event.message_id)
+            + RECORDED_PIG_RESOURCE_MISSING_TEXT
+        )
+        return
     if resolution.missing_resources or not original_pig:
         await cmd_roast.finish(MessageSegment.reply(event.message_id) + "猪圈埋房了（数据缺失）")
         return

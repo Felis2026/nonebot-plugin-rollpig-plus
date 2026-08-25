@@ -24,6 +24,9 @@ from .texts import (
 
 DUPLICATE_PITY_WEIGHT_STEP = 0.5
 DUPLICATE_PITY_WEIGHT_CAP = 4.0
+RECORDED_PIG_RESOURCE_MISSING_TEXT = (
+    "你的今日小猪已经抽出来了，但当前 Bot 的小猪资源暂时缺失，请稍后再试。"
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ class DailyPigResolution:
     roll_result: DailyRollResult | None = None
     growth_text: str = ""
     missing_resources: bool = False
+    recorded_pig_missing: bool = False
     ex_level: int | None = None
 
     @property
@@ -232,9 +236,13 @@ async def resolve_daily_pig(
 
     if pig_id:
         # 已保存的 ID 缺失时绝不能用随机候选替代，否则展示结果会与账本永久不一致。
-        # 具体 ID 只进入管理员日志；命令层继续复用现有数据缺失提示，无需改变返回结构。
+        # 具体 ID 只进入管理员日志；命令层用独立标记解释为“已抽出但本机缺资源”。
         logger.warning(f"RollPig 今日形态资源缺失: user={user_id} pig_id={pig_id}")
-        return DailyPigResolution(pig=None, missing_resources=True)
+        return DailyPigResolution(
+            pig=None,
+            missing_resources=True,
+            recorded_pig_missing=True,
+        )
 
     if not pig_resource_manager.pig_list:
         return DailyPigResolution(pig=None, missing_resources=True)
@@ -245,7 +253,20 @@ async def resolve_daily_pig(
         proposed_pig["id"],
         group_id=group_id,
     )
-    pig = pig_resource_manager.pig_map.get(roll_result.pig_id) or proposed_pig
+    pig = pig_resource_manager.pig_map.get(roll_result.pig_id)
+    if pig is None:
+        # 多 Bot 并发时 Cloud 可能返回另一实例抢先写入的猪。当前实例尚未同步
+        # 该资源时必须停止展示与快照补全，不能拿本地候选猪冒充 Cloud 赢家。
+        logger.warning(
+            "RollPig Cloud 抽取结果资源缺失: "
+            f"user={user_id} pig_id={roll_result.pig_id} "
+            f"proposed_pig_id={proposed_pig['id']}"
+        )
+        return DailyPigResolution(
+            pig=None,
+            missing_resources=True,
+            recorded_pig_missing=True,
+        )
     roll_result = await _complete_daily_roll_snapshot(user_id, roll_result, pig)
     return DailyPigResolution(
         pig=pig,
