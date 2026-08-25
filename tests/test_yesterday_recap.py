@@ -523,6 +523,58 @@ class YesterdayRecapBusinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recap.summary.text, "本群昨天没有发生与你有关的烤猪事件。")
         self.assertEqual((recap.footprints, recap.experiences), ((), ()))
 
+    async def test_replay_uses_current_name_and_newly_published_ex_image(self):
+        new_variant = self.root / "pig_ex2_new.png"
+        new_variant.write_bytes(b"new ex2")
+        self.snapshot = replace(
+            self.snapshot,
+            resolved_image_name="pig.png",
+            resolved_variant_level=0,
+            unlocked_variant_levels=(),
+            unlocked_variant_fields=frozenset(),
+        )
+        self.resources.pig_map["pig"]["name"] = "新版猪序员"
+        self.resources.ex_variants = {
+            "pig": {
+                2: PigExVariant(
+                    pig_id="pig",
+                    level=2,
+                    image_path=new_variant,
+                )
+            }
+        }
+
+        recap = await build_yesterday_recap(
+            "user",
+            group_id="100",
+            date_str=DATE,
+            recap_store=self._store([]),
+            resources=self.resources,
+        )
+
+        self.assertEqual(recap.pig_name, "新版猪序员")
+        self.assertEqual(recap.image_path, new_variant)
+        self.assertEqual(recap.fallback_image_path, self.root / "pig.png")
+        self.assertEqual(recap.outcome_text, "EX Lv.1 → 2")
+
+    async def test_removed_pig_keeps_facts_and_uses_image_free_card(self):
+        self.resources.pig_list = []
+        self.resources.pig_map = {}
+
+        recap = await build_yesterday_recap(
+            "user",
+            group_id="100",
+            date_str=DATE,
+            recap_store=self._store([]),
+            resources=self.resources,
+        )
+
+        self.assertEqual(recap.pig_name, "pig")
+        self.assertIsNone(recap.image_path)
+        self.assertIsNone(recap.fallback_image_path)
+        self.assertEqual(recap.outcome_text, "EX Lv.1 → 2 · 新立绘与介绍已解锁")
+        self.assertEqual(recap.summary.text, "本群昨天没有发生与你有关的烤猪事件。")
+
     async def test_multi_events_select_two_families_and_stable_summary(self):
         events = [self._event(index) for index in range(1, 5)]
         events.append(self._event(

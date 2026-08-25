@@ -24,7 +24,7 @@ YesterdayScope = Literal["group", "cross_group"]
 
 
 class YesterdayPigResourceMissingError(RuntimeError):
-    """昨日账本存在，但当前资源池无法解析对应 pig_id。"""
+    """兼容旧调用方保留的异常类型；当前回顾构建已改为无立绘降级。"""
 
 
 @dataclass(frozen=True)
@@ -651,23 +651,30 @@ async def build_yesterday_recap(
     roll = await recap_store.get_daily_roll_snapshot(normalized_user_id, target_date)
     if roll is None:
         return None
+    # 昨日快照固定抽取与成长事实，名称和立绘则按当前资源重演。
+    # 这样今天补上的 EX 差分能立即用于昨天已经达到对应等级的用户。
     pig = resources.pig_map.get(roll.pig_id)
-    if pig is None:
+    if pig is not None:
+        replay_ex_level = (
+            expert_level_from_copies(roll.copies_after_roll)
+            if roll.copies_after_roll is not None
+            else max(0, int(roll.resolved_variant_level or 0))
+        )
+        appearance = resources.resolve_pig_appearance(pig, replay_ex_level)
+        pig_name = str(appearance.pig_data.get("name") or roll.pig_id)
+        image_path = appearance.image_path
+        base_image_path = appearance.base_image_path
+    else:
+        # 当前资源包已经移除该猪时仍保留昨日事实卡；旧图片可能只是 active
+        # 目录中的孤儿文件，不能绕过当前资源定义继续展示。
         logger.warning(
-            "rollpig 昨日身份资源缺失: "
+            "rollpig 昨日身份已不在当前资源池，已使用无立绘回顾卡: "
             f"date={target_date} user={normalized_user_id} pig_id={roll.pig_id} "
             f"snapshot_resource={roll.resource_version}"
         )
-        raise YesterdayPigResourceMissingError(roll.pig_id)
-
-    base_image_path = resources.find_image_file(roll.pig_id)
-    image_path = resources.find_named_image_file(roll.resolved_image_name) if roll.resolved_image_name else None
-    if roll.resolved_image_name and image_path is None:
-        logger.warning(
-            "rollpig 昨日快照图片缺失，已回退基础立绘: "
-            f"date={target_date} user={normalized_user_id} file={roll.resolved_image_name}"
-        )
-    image_path = image_path or base_image_path
+        pig_name = roll.pig_id
+        image_path = None
+        base_image_path = None
 
     event_query = await recap_store.query_daily_events(
         date_str=target_date,
@@ -716,7 +723,7 @@ async def build_yesterday_recap(
         scope=scope,
         group_id=normalized_group_id,
         roll=roll,
-        pig_name=str(pig.get("name") or roll.pig_id),
+        pig_name=pig_name,
         image_path=image_path,
         fallback_image_path=base_image_path,
         resource_version=roll.resource_version,
