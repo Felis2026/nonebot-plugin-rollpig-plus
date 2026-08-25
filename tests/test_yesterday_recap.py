@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
 import json
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from io import BytesIO
@@ -944,6 +948,18 @@ class YesterdayCardRendererTests(unittest.IsolatedAsyncioTestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
+        self.cache_dir = self.root / "cache"
+        self.cache_dir_patch = patch.object(
+            yesterday_card_module,
+            "YESTERDAY_CARD_CACHE_DIR",
+            self.cache_dir,
+        )
+        self.cache_dir_patch.start()
+        self.addCleanup(self.cache_dir_patch.stop)
+        yesterday_card_module.clear_yesterday_card_renderer_caches()
+
+    async def asyncTearDown(self) -> None:
+        await yesterday_card_module.shutdown_yesterday_card_renderer()
 
     @staticmethod
     def _snapshot(image_name: str = "pig.png") -> DailyRollSnapshot:
@@ -1192,6 +1208,263 @@ class YesterdayCardRendererTests(unittest.IsolatedAsyncioTestCase):
                 colors.add(rendered.convert("RGB").getpixel(center))
         self.assertEqual(durations, [80, 100, 120])
         self.assertEqual(len(colors), 3)
+
+    async def test_same_recap_hits_same_day_disk_cache(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        recap = self._recap(hero)
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            wraps=real_renderer,
+        ) as render_mock:
+            first = await yesterday_card_module.render_yesterday_recap_card(recap)
+            second = await yesterday_card_module.render_yesterday_recap_card(recap)
+
+        self.assertEqual(render_mock.call_count, 1)
+        self.assertEqual(first, second)
+        stats = yesterday_card_module.get_yesterday_card_renderer_cache_stats()
+        self.assertEqual(stats["final_entries"], 1)
+        self.assertGreater(stats["final_bytes"], len(first.data))
+
+    async def test_disk_cache_survives_renderer_memory_reset(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        recap = self._recap(hero)
+        first = await yesterday_card_module.render_yesterday_recap_card(recap)
+
+        yesterday_card_module.clear_yesterday_card_renderer_caches()
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            wraps=real_renderer,
+        ) as render_mock:
+            second = await yesterday_card_module.render_yesterday_recap_card(recap)
+
+        render_mock.assert_not_called()
+        self.assertEqual(first, second)
+
+    async def test_date_rollover_removes_previous_day_cache(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        recap = self._recap(hero)
+        current_day = [dt.date(2026, 8, 25)]
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+
+        with (
+            patch.object(
+                yesterday_card_module,
+                "rollpig_today",
+                side_effect=lambda: current_day[0],
+            ),
+            patch.object(
+                yesterday_card_module,
+                "_render_yesterday_card_sync",
+                wraps=real_renderer,
+            ) as render_mock,
+        ):
+            yesterday_card_module.clear_yesterday_card_renderer_caches()
+            await yesterday_card_module.render_yesterday_recap_card(recap)
+            old_dir = self.cache_dir / "2026-08-25"
+            self.assertTrue(old_dir.is_dir())
+
+            current_day[0] = dt.date(2026, 8, 26)
+            await yesterday_card_module.render_yesterday_recap_card(recap)
+
+        self.assertEqual(render_mock.call_count, 2)
+        self.assertFalse(old_dir.exists())
+        self.assertTrue((self.cache_dir / "2026-08-26").is_dir())
+
+    def test_same_day_cache_trims_oldest_files_to_size_limit(self) -> None:
+        cache_dir = self.cache_dir / "2026-08-25"
+        cache_dir.mkdir(parents=True)
+        files = [cache_dir / f"{name}.cache" for name in ("old", "middle", "new")]
+        for index, cache_file in enumerate(files, start=1):
+            cache_file.write_bytes(bytes([index]) * 10)
+
+        with (
+            patch.object(
+                yesterday_card_module,
+                "YESTERDAY_CARD_DISK_CACHE_MAX_BYTES",
+                25,
+            ),
+            patch.object(
+                yesterday_card_module,
+                "_yesterday_card_disk_cache_files",
+                return_value=[
+                    (files[0], 10, 1),
+                    (files[1], 10, 2),
+                    (files[2], 10, 3),
+                ],
+            ),
+        ):
+            yesterday_card_module._trim_yesterday_card_disk_cache(cache_dir)
+
+        self.assertFalse(files[0].exists())
+        self.assertTrue(files[1].exists())
+        self.assertTrue(files[2].exists())
+        self.assertLessEqual(
+            sum(path.stat().st_size for path in cache_dir.iterdir()),
+            25,
+        )
+
+    async def test_identical_concurrent_requests_share_one_render(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        recap = self._recap(hero)
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+
+        def delayed_renderer(value: YesterdayRecap):
+            time.sleep(0.1)
+            return real_renderer(value)
+
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            side_effect=delayed_renderer,
+        ) as render_mock:
+            results = await asyncio.gather(
+                *(yesterday_card_module.render_yesterday_recap_card(recap) for _ in range(5))
+            )
+
+        self.assertEqual(render_mock.call_count, 1)
+        self.assertTrue(all(result == results[0] for result in results))
+
+    async def test_cancelled_waiter_does_not_cancel_shared_render(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        recap = self._recap(hero)
+        render_started = threading.Event()
+        allow_render = threading.Event()
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+
+        def blocked_renderer(value: YesterdayRecap):
+            render_started.set()
+            if not allow_render.wait(timeout=5):
+                raise TimeoutError("test render was not released")
+            return real_renderer(value)
+
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            side_effect=blocked_renderer,
+        ) as render_mock:
+            cancelled_waiter = asyncio.create_task(
+                yesterday_card_module.render_yesterday_recap_card(recap)
+            )
+            self.assertTrue(await asyncio.to_thread(render_started.wait, 2))
+            surviving_waiter = asyncio.create_task(
+                yesterday_card_module.render_yesterday_recap_card(recap)
+            )
+            await asyncio.sleep(0)
+            cancelled_waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await cancelled_waiter
+            allow_render.set()
+            result = await surviving_waiter
+
+        self.assertEqual(render_mock.call_count, 1)
+        self.assertTrue(result.data.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    async def test_different_recap_content_does_not_share_cache_key(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        first_recap = self._recap(hero)
+        second_recap = replace(first_recap, outcome_text="新猪入圈 · 图鉴已收录")
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            wraps=real_renderer,
+        ) as render_mock:
+            await yesterday_card_module.render_yesterday_recap_card(first_recap)
+            await yesterday_card_module.render_yesterday_recap_card(second_recap)
+
+        self.assertEqual(render_mock.call_count, 2)
+        self.assertEqual(
+            yesterday_card_module.get_yesterday_card_renderer_cache_stats()["final_entries"],
+            2,
+        )
+
+    async def test_corrupt_disk_cache_is_removed_and_regenerated(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        recap = self._recap(hero)
+        cache_date, cache_key, _ = await asyncio.to_thread(
+            yesterday_card_module._read_yesterday_card_cache_input,
+            recap,
+        )
+        self.assertIsNotNone(cache_key)
+        cache_dir = self.cache_dir / cache_date
+        cache_file = yesterday_card_module._yesterday_card_cache_path(cache_dir, cache_key)
+        cache_file.write_bytes(b"broken cache")
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            wraps=real_renderer,
+        ) as render_mock:
+            result = await yesterday_card_module.render_yesterday_recap_card(recap)
+
+        self.assertEqual(render_mock.call_count, 1)
+        self.assertTrue(result.data.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(cache_file.read_bytes().startswith(yesterday_card_module.YESTERDAY_CARD_CACHE_MAGIC))
+
+    async def test_hero_content_replacement_invalidates_same_path_cache(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (230, 30, 30, 255)).save(hero)
+        recap = self._recap(hero)
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            wraps=real_renderer,
+        ) as render_mock:
+            first = await yesterday_card_module.render_yesterday_recap_card(recap)
+            Image.new("RGBA", (240, 240), (30, 80, 230, 255)).save(hero)
+            second = await yesterday_card_module.render_yesterday_recap_card(recap)
+
+        self.assertEqual(render_mock.call_count, 2)
+        self.assertNotEqual(first.data, second.data)
+
+    def test_renderer_asset_content_changes_cache_key(self) -> None:
+        asset_root = self.root / "renderer-assets"
+        asset_root.mkdir()
+        asset = asset_root / "background.png"
+        asset.write_bytes(b"first asset")
+        recap = self._recap(None)
+
+        with patch.object(yesterday_card_module._YESTERDAY_CARD_RENDERER, "root", asset_root):
+            yesterday_card_module._yesterday_renderer_asset_signature.cache_clear()
+            first_key = yesterday_card_module._yesterday_card_cache_key(recap)
+            asset.write_bytes(b"second asset")
+            second_key = yesterday_card_module._yesterday_card_cache_key(recap)
+
+        self.assertNotEqual(first_key, second_key)
+
+    async def test_failed_render_leaves_no_cache_or_inflight_task(self) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        recap = self._recap(hero)
+
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            side_effect=RuntimeError("render failed"),
+        ) as render_mock:
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "render failed"):
+                    await yesterday_card_module.render_yesterday_recap_card(recap)
+
+        self.assertEqual(render_mock.call_count, 2)
+        self.assertFalse(yesterday_card_module._yesterday_card_render_tasks)
+        self.assertFalse(list(self.cache_dir.rglob("*.cache")))
 
     async def test_command_sends_new_recap_card(self) -> None:
         recap = self._recap(None)

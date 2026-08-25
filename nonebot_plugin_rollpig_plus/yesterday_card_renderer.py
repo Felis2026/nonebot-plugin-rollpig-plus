@@ -3,18 +3,23 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import hashlib
+import json
 import math
+import os
 import random
 import re
+import shutil
 import threading
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import Literal, Sequence
 
 from nonebot.log import logger
+import nonebot_plugin_localstore as localstore
 from pilmoji import Pilmoji
 from pilmoji.helpers import getsize as pilmoji_getsize
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageSequence
@@ -34,6 +39,7 @@ from .card_renderer import (
 )
 from .catalog_renderer import catalog_render_budget
 from .config import plugin_config
+from .runtime import rollpig_today
 from .yesterday_recap import YesterdayRecap
 
 
@@ -51,6 +57,11 @@ YESTERDAY_CARD_DEFAULT_TITLE_FONT = PACKAGE_RESOURCE_DIR / "fonts" / "ZCOOLKuaiL
 YESTERDAY_CARD_DEFAULT_BODY_FONT = PACKAGE_RESOURCE_DIR / "fonts" / "SourceHanSansSC-Medium.otf"
 YESTERDAY_CARD_WIDTH = 720
 YESTERDAY_CARD_SUPERSAMPLE = 3
+YESTERDAY_CARD_DISK_CACHE_MAX_BYTES = 64 * 1024 * 1024
+YESTERDAY_CARD_CACHE_VERSION = 1
+YESTERDAY_CARD_CACHE_MAGIC = b"ROLLPIG-YESTERDAY-CACHE-V1\n"
+YESTERDAY_CARD_CACHE_HEADER_MAX_BYTES = 4096
+YESTERDAY_CARD_CACHE_DIR = localstore.get_plugin_cache_dir() / "yesterday_cards"
 
 
 @dataclass(frozen=True)
@@ -117,6 +128,18 @@ class YesterdayCardRenderResult:
     width: int
     height: int
     used_fallback_image: bool
+
+
+# ================================ 当日缓存与并发状态 ================================ #
+# 昨日回顾只在当天有重复查看价值：磁盘缓存跨进程复用，但业务日期一变化就整体清理。
+_yesterday_card_cache_lock = threading.RLock()
+_yesterday_card_cache_active_root: Path | None = None
+_yesterday_card_cache_active_date: str | None = None
+_yesterday_card_render_tasks: dict[
+    tuple[object, ...],
+    asyncio.Task[YesterdayCardRenderResult],
+] = {}
+_yesterday_card_render_tasks_lock = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -346,6 +369,22 @@ class PillowCardRenderer:
             image.close()
         if logical is not None:
             logical.close()
+
+    def clear_caches(self) -> None:
+        """释放字体与图片缓存；只允许在所有昨日卡片渲染结束后调用。"""
+
+        images = [*self._image_cache.values(), *self._hero_logical_cache.values()]
+        self._image_cache.clear()
+        self._hero_logical_cache.clear()
+        self._hero_metrics_cache.clear()
+        self._font_cache.clear()
+        self._font_fallback_warned.clear()
+        closed_ids: set[int] = set()
+        for image in images:
+            if id(image) in closed_ids:
+                continue
+            image.close()
+            closed_ids.add(id(image))
 
     def _font(self, role: Literal["display", "body"], size: float, unit: float) -> ImageFont.FreeTypeFont:
         """按角色加载可配置字体；外部字体失效时回退内置默认字体。"""
@@ -2050,8 +2089,512 @@ def _render_yesterday_card_sync(recap: YesterdayRecap) -> YesterdayCardRenderRes
         )
 
 
-async def render_yesterday_recap_card(recap: YesterdayRecap) -> YesterdayCardRenderResult:
-    """在线程与共享 Pillow 预算内生成昨日回顾 PNG/GIF。"""
+# ================================ 缓存键与资源指纹 ================================ #
+def _normalize_yesterday_cache_value(value: object) -> object:
+    """把冻结数据模型转换为稳定 JSON 值，避免集合顺序造成伪缓存失效。"""
 
-    async with catalog_render_budget("yesterday-card"):
-        return await asyncio.to_thread(_render_yesterday_card_sync, recap)
+    if isinstance(value, Path):
+        return str(value.expanduser().resolve())
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_yesterday_cache_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_yesterday_cache_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_normalize_yesterday_cache_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str),
+        )
+    return value
+
+
+def _file_content_digest(file_path: Path) -> str:
+    """流式计算缓存依赖文件摘要，避免只靠大小或时间戳误命中旧成品。"""
+
+    hasher = hashlib.sha256()
+    with file_path.open("rb") as file_handle:
+        while chunk := file_handle.read(1024 * 1024):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _yesterday_source_signature(file_path: Path | None) -> tuple[object, ...] | None:
+    """记录候选立绘内容；资源在摘要期间切换时返回 None 并跳过本次缓存。"""
+
+    if file_path is None:
+        return ("image-none",)
+    resolved = file_path.expanduser().resolve()
+    try:
+        before = resolved.stat()
+        if not resolved.is_file():
+            return ("image-not-file", str(resolved))
+        digest = _file_content_digest(resolved)
+        after = resolved.stat()
+    except FileNotFoundError:
+        # 缺图卡也允许在当天复用；资源补齐后签名会自动变化。
+        return ("image-missing", str(resolved))
+    except OSError:
+        return None
+
+    before_identity = (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    after_identity = (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    if before_identity != after_identity:
+        return None
+    return ("image", str(resolved), after.st_size, digest)
+
+
+def _yesterday_renderer_asset_metadata() -> tuple[tuple[object, ...], ...]:
+    """列出实际渲染资源元数据，供内容摘要缓存识别资源替换。"""
+
+    paths: set[Path] = set()
+    renderer_root = _YESTERDAY_CARD_RENDERER.root.expanduser().resolve()
+    try:
+        paths.update(path.resolve() for path in renderer_root.rglob("*") if path.is_file())
+    except OSError:
+        pass
+    paths.update(path.expanduser().resolve() for path in _YESTERDAY_CARD_RENDERER._font_paths.values())
+    paths.add((PACKAGE_RESOURCE_DIR / "emoji" / "google-emoji.zip").resolve())
+
+    metadata: list[tuple[object, ...]] = []
+    for path in sorted(paths, key=str):
+        try:
+            stat = path.stat()
+            if path.is_file():
+                metadata.append(
+                    (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+                )
+                continue
+        except OSError:
+            pass
+        metadata.append((str(path), "missing"))
+    return tuple(metadata)
+
+
+@lru_cache(maxsize=8)
+def _yesterday_renderer_asset_signature(
+    metadata: tuple[tuple[object, ...], ...],
+) -> str:
+    """计算布局资源、当前字体和 Emoji 的统一内容指纹。"""
+
+    hasher = hashlib.sha256()
+    for item in metadata:
+        hasher.update(
+            json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str).encode(
+                "utf-8"
+            )
+        )
+        path = Path(str(item[0]))
+        try:
+            if len(item) > 1 and item[1] != "missing":
+                hasher.update(_file_content_digest(path).encode("ascii"))
+        except OSError:
+            # 渲染资源在摘要阶段变化时，元数据会在写入前复核并阻止旧键落盘。
+            hasher.update(b"asset-unavailable")
+    return hasher.hexdigest()
+
+
+def _yesterday_card_cache_key(recap: YesterdayRecap) -> tuple[object, ...] | None:
+    """汇总回顾事实、两级立绘与全部绘图资源，生成完整成品缓存键。"""
+
+    source_signatures: list[tuple[object, ...]] = []
+    signature_cache: dict[str, tuple[object, ...] | None] = {}
+    for image_path in (recap.image_path, recap.fallback_image_path):
+        identity = (
+            str(image_path.expanduser().resolve())
+            if image_path is not None
+            else "<image-none>"
+        )
+        if identity not in signature_cache:
+            signature_cache[identity] = _yesterday_source_signature(image_path)
+        signature = signature_cache[identity]
+        if signature is None:
+            return None
+        source_signatures.append(signature)
+
+    recap_payload = json.dumps(
+        _normalize_yesterday_cache_value(asdict(recap)),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    asset_metadata = _yesterday_renderer_asset_metadata()
+    return (
+        YESTERDAY_CARD_CACHE_VERSION,
+        hashlib.sha256(recap_payload).hexdigest(),
+        tuple(source_signatures),
+        _yesterday_renderer_asset_signature(asset_metadata),
+        YESTERDAY_CARD_WIDTH,
+        YESTERDAY_CARD_SUPERSAMPLE,
+    )
+
+
+# ================================ 当日目录与磁盘容器 ================================ #
+def _remove_stale_yesterday_cache_entry(cache_root: Path, entry: Path) -> None:
+    """只删除缓存根目录的直接子项，避免异常软链接把清理范围带出插件目录。"""
+
+    try:
+        resolved_root = cache_root.resolve()
+        resolved_entry = entry.resolve(strict=False)
+        if resolved_entry.parent != resolved_root:
+            logger.warning(f"RollPig 昨日卡片缓存路径越界，已跳过清理: {entry}")
+            return
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink(missing_ok=True)
+    except OSError as error:
+        logger.warning(f"RollPig 昨日卡片过期缓存清理失败: path={entry}, error={error}")
+
+
+def _prepare_yesterday_cache_day() -> tuple[str, Path]:
+    """切换到上海业务当天目录，并在首次访问或跨日时删除其他日期。"""
+
+    global _yesterday_card_cache_active_root, _yesterday_card_cache_active_date
+
+    cache_date = rollpig_today().isoformat()
+    cache_root = YESTERDAY_CARD_CACHE_DIR.expanduser().resolve()
+    cache_dir = cache_root / cache_date
+    with _yesterday_card_cache_lock:
+        if (
+            _yesterday_card_cache_active_root != cache_root
+            or _yesterday_card_cache_active_date != cache_date
+        ):
+            prepared = False
+            try:
+                cache_root.mkdir(parents=True, exist_ok=True)
+                for entry in cache_root.iterdir():
+                    if entry.name != cache_date:
+                        _remove_stale_yesterday_cache_entry(cache_root, entry)
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                prepared = True
+            except OSError as error:
+                logger.warning(
+                    "RollPig 昨日卡片当日缓存目录准备失败，本次继续即时渲染: "
+                    f"dir={cache_dir}, error={error}"
+                )
+            _yesterday_card_cache_active_root = cache_root if prepared else None
+            _yesterday_card_cache_active_date = cache_date if prepared else None
+        else:
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+    return cache_date, cache_dir
+
+
+def _yesterday_card_cache_path(cache_dir: Path, key: tuple[object, ...]) -> Path:
+    """把完整输入摘要为安全文件名，中文与本地绝对路径不直接进入磁盘文件名。"""
+
+    serialized = json.dumps(
+        key,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    digest = hashlib.sha256(serialized).hexdigest()
+    return cache_dir / f"v{YESTERDAY_CARD_CACHE_VERSION}-{digest}.cache"
+
+
+def _serialize_yesterday_card_cache(result: YesterdayCardRenderResult) -> bytes:
+    """把图片和回退元数据写入单一容器，避免 sidecar 与正文不同步。"""
+
+    header = json.dumps(
+        {
+            "image_format": result.image_format,
+            "renderer": result.renderer,
+            "width": result.width,
+            "height": result.height,
+            "used_fallback_image": result.used_fallback_image,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return YESTERDAY_CARD_CACHE_MAGIC + len(header).to_bytes(4, "big") + header + result.data
+
+
+def _deserialize_yesterday_card_cache(payload: bytes) -> YesterdayCardRenderResult:
+    """严格校验本插件生成的 PNG/GIF 缓存容器。"""
+
+    prefix_size = len(YESTERDAY_CARD_CACHE_MAGIC)
+    if not payload.startswith(YESTERDAY_CARD_CACHE_MAGIC) or len(payload) < prefix_size + 4:
+        raise ValueError("缓存魔数不匹配")
+    header_size = int.from_bytes(payload[prefix_size : prefix_size + 4], "big")
+    if not 0 < header_size <= YESTERDAY_CARD_CACHE_HEADER_MAX_BYTES:
+        raise ValueError(f"缓存头长度非法: {header_size}")
+
+    header_start = prefix_size + 4
+    data_start = header_start + header_size
+    if data_start >= len(payload):
+        raise ValueError("缓存缺少图片数据")
+    metadata = json.loads(payload[header_start:data_start].decode("utf-8"))
+    if not isinstance(metadata, dict):
+        raise ValueError("缓存头不是 object")
+
+    image_data = payload[data_start:]
+    if image_data.startswith((b"GIF87a", b"GIF89a")):
+        detected_format = "gif"
+    elif image_data.startswith(b"\x89PNG\r\n\x1a\n"):
+        detected_format = "png"
+    else:
+        raise ValueError("缓存正文不是 PNG 或 GIF")
+    metadata_format = str(metadata.get("image_format") or detected_format).lower()
+    if metadata_format != detected_format:
+        raise ValueError(
+            f"缓存格式不一致: metadata={metadata_format}, data={detected_format}"
+        )
+
+    width = int(metadata.get("width") or 0)
+    height = int(metadata.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"缓存尺寸非法: {width}x{height}")
+    return YesterdayCardRenderResult(
+        data=image_data,
+        image_format=detected_format,
+        renderer=str(metadata.get("renderer") or f"pillow-yesterday-{detected_format}"),
+        width=width,
+        height=height,
+        used_fallback_image=bool(metadata.get("used_fallback_image")),
+    )
+
+
+def _remove_invalid_yesterday_card_cache(cache_file: Path, error: Exception) -> None:
+    """隔离单个损坏缓存；清理失败不阻断即时渲染。"""
+
+    logger.warning(f"RollPig 昨日卡片磁盘缓存损坏，已忽略: file={cache_file}, error={error}")
+    try:
+        cache_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _get_yesterday_card_cache(
+    cache_dir: Path,
+    key: tuple[object, ...],
+) -> YesterdayCardRenderResult | None:
+    """读取当日成品，并用 mtime 维护近似 LRU。"""
+
+    cache_file = _yesterday_card_cache_path(cache_dir, key)
+    with _yesterday_card_cache_lock:
+        try:
+            file_size = cache_file.stat().st_size
+            if file_size > YESTERDAY_CARD_DISK_CACHE_MAX_BYTES:
+                raise ValueError(f"缓存文件超过总容量: {file_size}")
+            result = _deserialize_yesterday_card_cache(cache_file.read_bytes())
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as error:
+            _remove_invalid_yesterday_card_cache(cache_file, error)
+            return None
+        try:
+            os.utime(cache_file, None)
+        except OSError:
+            pass
+        return result
+
+
+def _yesterday_card_disk_cache_files(cache_dir: Path) -> list[tuple[Path, int, int]]:
+    """列出当日缓存占用；临时文件也计入 64 MiB 总预算。"""
+
+    entries: list[tuple[Path, int, int]] = []
+    try:
+        candidates = cache_dir.iterdir()
+        for path in candidates:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if path.is_file():
+                entries.append((path, stat.st_size, stat.st_mtime_ns))
+    except OSError:
+        return []
+    return entries
+
+
+def _trim_yesterday_card_disk_cache(cache_dir: Path) -> None:
+    """按最近使用时间把当天的昨日卡片成品清到 64 MiB 内。"""
+
+    entries = _yesterday_card_disk_cache_files(cache_dir)
+    total_bytes = sum(size for _, size, _ in entries)
+    if total_bytes <= YESTERDAY_CARD_DISK_CACHE_MAX_BYTES:
+        return
+    for path, size, _ in sorted(entries, key=lambda item: item[2]):
+        if total_bytes <= YESTERDAY_CARD_DISK_CACHE_MAX_BYTES:
+            break
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue
+        total_bytes -= size
+
+
+def _store_yesterday_card_cache(
+    cache_date: str,
+    key: tuple[object, ...],
+    result: YesterdayCardRenderResult,
+) -> bool:
+    """原子写入当日成品；跨日任务和超大结果都不会落盘。"""
+
+    is_valid_gif = result.image_format == "gif" and result.data.startswith(
+        (b"GIF87a", b"GIF89a")
+    )
+    is_valid_png = result.image_format == "png" and result.data.startswith(
+        b"\x89PNG\r\n\x1a\n"
+    )
+    if not (is_valid_gif or is_valid_png):
+        return False
+
+    payload = _serialize_yesterday_card_cache(result)
+    if len(payload) > YESTERDAY_CARD_DISK_CACHE_MAX_BYTES:
+        logger.warning(
+            "RollPig 昨日卡片成品超过磁盘缓存总上限，本次不缓存: "
+            f"bytes={len(payload)}/{YESTERDAY_CARD_DISK_CACHE_MAX_BYTES}"
+        )
+        return False
+
+    cache_root = YESTERDAY_CARD_CACHE_DIR.expanduser().resolve()
+    cache_dir = cache_root / cache_date
+    cache_file = _yesterday_card_cache_path(cache_dir, key)
+    temporary_file = cache_file.with_name(
+        f".{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    with _yesterday_card_cache_lock:
+        # 午夜前启动的慢渲染不能在新业务日清理后重新写回旧目录。
+        if rollpig_today().isoformat() != cache_date:
+            return False
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            temporary_file.write_bytes(payload)
+            os.replace(temporary_file, cache_file)
+            _trim_yesterday_card_disk_cache(cache_dir)
+        except OSError as error:
+            logger.warning(
+                "RollPig 昨日卡片磁盘缓存写入失败，本次继续发送即时结果: "
+                f"file={cache_file}, error={error}"
+            )
+            try:
+                temporary_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+    return True
+
+
+def _read_yesterday_card_cache_input(
+    recap: YesterdayRecap,
+) -> tuple[str, tuple[object, ...] | None, YesterdayCardRenderResult | None]:
+    """在线程中准备日期、计算完整摘要并读取磁盘，不阻塞 NoneBot 事件循环。"""
+
+    for _ in range(2):
+        cache_date, cache_dir = _prepare_yesterday_cache_day()
+        cache_key = _yesterday_card_cache_key(recap)
+        cached = (
+            _get_yesterday_card_cache(cache_dir, cache_key)
+            if cache_key is not None
+            else None
+        )
+        if rollpig_today().isoformat() == cache_date:
+            return cache_date, cache_key, cached
+    return cache_date, cache_key, None
+
+
+def _render_and_store_yesterday_card(
+    recap: YesterdayRecap,
+    cache_date: str,
+    cache_key: tuple[object, ...],
+) -> YesterdayCardRenderResult:
+    """生成一次昨日卡片，并仅在日期、立绘和渲染资源均未变化时落盘。"""
+
+    result = _render_yesterday_card_sync(recap)
+    current_key = _yesterday_card_cache_key(recap)
+    if current_key == cache_key:
+        _store_yesterday_card_cache(cache_date, cache_key, result)
+    return result
+
+
+# ================================ 异步入口与生命周期 ================================ #
+async def render_yesterday_recap_card(recap: YesterdayRecap) -> YesterdayCardRenderResult:
+    """读取当日磁盘成品；同键请求合流后在线程与共享 Pillow 预算内生成。"""
+
+    cache_date, cache_key, cached = await asyncio.to_thread(
+        _read_yesterday_card_cache_input,
+        recap,
+    )
+    if cached is not None:
+        return cached
+
+    if cache_key is None:
+        async with catalog_render_budget("yesterday-card"):
+            return await asyncio.to_thread(_render_yesterday_card_sync, recap)
+
+    task_key: tuple[object, ...] = ("yesterday-card", cache_date, *cache_key)
+    async with _yesterday_card_render_tasks_lock:
+        render_task = _yesterday_card_render_tasks.get(task_key)
+        if render_task is None:
+            render_task = asyncio.create_task(
+                _render_yesterday_card_once(task_key, recap, cache_date, cache_key)
+            )
+            _yesterday_card_render_tasks[task_key] = render_task
+    # 单个命令取消时不取消共享任务，其他同时查看同一回顾的人仍可收到成品。
+    return await asyncio.shield(render_task)
+
+
+async def _render_yesterday_card_once(
+    task_key: tuple[object, ...],
+    recap: YesterdayRecap,
+    cache_date: str,
+    cache_key: tuple[object, ...],
+) -> YesterdayCardRenderResult:
+    """执行一次共享昨日卡片渲染，并在成功或失败后释放任务键。"""
+
+    try:
+        async with catalog_render_budget("yesterday-card"):
+            return await asyncio.to_thread(
+                _render_and_store_yesterday_card,
+                recap,
+                cache_date,
+                cache_key,
+            )
+    finally:
+        current_task = asyncio.current_task()
+        async with _yesterday_card_render_tasks_lock:
+            if _yesterday_card_render_tasks.get(task_key) is current_task:
+                _yesterday_card_render_tasks.pop(task_key, None)
+
+
+def get_yesterday_card_renderer_cache_stats() -> dict[str, int | str]:
+    """返回当天磁盘缓存占用，供运行诊断和回归测试。"""
+
+    cache_date, cache_dir = _prepare_yesterday_cache_day()
+    entries = _yesterday_card_disk_cache_files(cache_dir)
+    return {
+        "date": cache_date,
+        "final_entries": len(entries),
+        "final_bytes": sum(size for _, size, _ in entries),
+    }
+
+
+def clear_yesterday_card_renderer_caches() -> None:
+    """释放进程内绘图资源并重置日期状态；当天磁盘成品继续跨重启复用。"""
+
+    global _yesterday_card_cache_active_root, _yesterday_card_cache_active_date
+
+    with _YESTERDAY_CARD_RENDER_LOCK:
+        _YESTERDAY_CARD_RENDERER.clear_caches()
+    _yesterday_renderer_asset_signature.cache_clear()
+    with _yesterday_card_cache_lock:
+        _yesterday_card_cache_active_root = None
+        _yesterday_card_cache_active_date = None
+
+
+async def shutdown_yesterday_card_renderer() -> None:
+    """等待在途昨日卡片完成后释放 Pillow 资源；磁盘缓存保留到跨日清理。"""
+
+    async with _yesterday_card_render_tasks_lock:
+        render_tasks = list(_yesterday_card_render_tasks.values())
+    if render_tasks:
+        await asyncio.gather(*render_tasks, return_exceptions=True)
+    clear_yesterday_card_renderer_caches()
