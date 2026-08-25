@@ -58,8 +58,8 @@ YESTERDAY_CARD_DEFAULT_BODY_FONT = PACKAGE_RESOURCE_DIR / "fonts" / "SourceHanSa
 YESTERDAY_CARD_WIDTH = 720
 YESTERDAY_CARD_SUPERSAMPLE = 3
 YESTERDAY_CARD_DISK_CACHE_MAX_BYTES = 64 * 1024 * 1024
-YESTERDAY_CARD_CACHE_VERSION = 1
-YESTERDAY_CARD_CACHE_MAGIC = b"ROLLPIG-YESTERDAY-CACHE-V1\n"
+YESTERDAY_CARD_CACHE_VERSION = 2
+YESTERDAY_CARD_CACHE_MAGIC = b"ROLLPIG-YESTERDAY-CACHE-V2\n"
 YESTERDAY_CARD_CACHE_HEADER_MAX_BYTES = 4096
 YESTERDAY_CARD_CACHE_DIR = localstore.get_plugin_cache_dir() / "yesterday_cards"
 
@@ -2305,6 +2305,7 @@ def _serialize_yesterday_card_cache(result: YesterdayCardRenderResult) -> bytes:
     header = json.dumps(
         {
             "image_format": result.image_format,
+            "image_sha256": hashlib.sha256(result.data).hexdigest(),
             "renderer": result.renderer,
             "width": result.width,
             "height": result.height,
@@ -2341,6 +2342,14 @@ def _deserialize_yesterday_card_cache(payload: bytes) -> YesterdayCardRenderResu
         detected_format = "png"
     else:
         raise ValueError("缓存正文不是 PNG 或 GIF")
+
+    expected_digest = metadata.get("image_sha256")
+    if not isinstance(expected_digest, str) or len(expected_digest) != 64:
+        raise ValueError("缓存正文摘要缺失或非法")
+    actual_digest = hashlib.sha256(image_data).hexdigest()
+    if actual_digest != expected_digest:
+        raise ValueError("缓存正文摘要不匹配")
+
     metadata_format = str(metadata.get("image_format") or detected_format).lower()
     if metadata_format != detected_format:
         raise ValueError(

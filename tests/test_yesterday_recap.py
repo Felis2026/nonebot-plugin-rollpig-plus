@@ -1467,6 +1467,64 @@ class YesterdayCardRendererTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.data.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(cache_file.read_bytes().startswith(yesterday_card_module.YESTERDAY_CARD_CACHE_MAGIC))
 
+    async def test_disk_cache_with_intact_signature_and_corrupt_body_is_regenerated(
+        self,
+    ) -> None:
+        hero = self.root / "pig.png"
+        Image.new("RGBA", (240, 240), (28, 210, 70, 255)).save(hero)
+        recap = self._recap(hero)
+        original = await yesterday_card_module.render_yesterday_recap_card(recap)
+        cache_date, cache_key, _ = await asyncio.to_thread(
+            yesterday_card_module._read_yesterday_card_cache_input,
+            recap,
+        )
+        self.assertIsNotNone(cache_key)
+        cache_dir = self.cache_dir / cache_date
+        cache_file = yesterday_card_module._yesterday_card_cache_path(cache_dir, cache_key)
+        payload = bytearray(cache_file.read_bytes())
+        prefix_size = len(yesterday_card_module.YESTERDAY_CARD_CACHE_MAGIC)
+        header_size = int.from_bytes(payload[prefix_size : prefix_size + 4], "big")
+        image_start = prefix_size + 4 + header_size
+        self.assertEqual(payload[image_start : image_start + 8], b"\x89PNG\r\n\x1a\n")
+        payload[-1] ^= 0x01
+        cache_file.write_bytes(payload)
+        real_renderer = yesterday_card_module._render_yesterday_card_sync
+
+        with patch.object(
+            yesterday_card_module,
+            "_render_yesterday_card_sync",
+            wraps=real_renderer,
+        ) as render_mock:
+            regenerated = await yesterday_card_module.render_yesterday_recap_card(recap)
+
+        self.assertEqual(render_mock.call_count, 1)
+        self.assertEqual(regenerated, original)
+        self.assertNotEqual(cache_file.read_bytes(), bytes(payload))
+
+    def test_cache_digest_rejects_corrupt_png_and_gif_bodies(self) -> None:
+        for image_format, image_data in (
+            ("png", b"\x89PNG\r\n\x1a\nvalid png body"),
+            ("gif", b"GIF89avalid gif body"),
+        ):
+            with self.subTest(image_format=image_format):
+                result = yesterday_card_module.YesterdayCardRenderResult(
+                    data=image_data,
+                    image_format=image_format,
+                    renderer=f"test-{image_format}",
+                    width=240,
+                    height=240,
+                    used_fallback_image=False,
+                )
+                payload = bytearray(
+                    yesterday_card_module._serialize_yesterday_card_cache(result)
+                )
+                payload[-1] ^= 0x01
+
+                with self.assertRaisesRegex(ValueError, "缓存正文摘要不匹配"):
+                    yesterday_card_module._deserialize_yesterday_card_cache(
+                        bytes(payload)
+                    )
+
     async def test_hero_content_replacement_invalidates_same_path_cache(self) -> None:
         hero = self.root / "pig.png"
         Image.new("RGBA", (240, 240), (230, 30, 30, 255)).save(hero)
