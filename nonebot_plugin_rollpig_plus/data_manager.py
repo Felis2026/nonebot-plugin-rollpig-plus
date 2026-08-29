@@ -112,6 +112,10 @@ DATA_FILE = store.get_plugin_data_file("pig_data.json")
 DATA_BACKUP_COUNT = 2
 
 
+class LocalStoreUnavailableError(RuntimeError):
+    """本地账本无法安全写入；调用入口应转换为用户可读提示。"""
+
+
 class PigDataManager:
     """
     负责插件所有持久化数据的读写。
@@ -569,7 +573,9 @@ class PigDataManager:
 
     def _ensure_writable(self):
         if self._load_failed:
-            raise RuntimeError("pig_data.json 读取失败，已拒绝写入以避免覆盖旧数据。请先修复数据文件或恢复备份。")
+            raise LocalStoreUnavailableError(
+                "pig_data.json 读取失败，已拒绝写入以避免覆盖旧数据。请先修复数据文件或恢复备份。"
+            )
 
     def _backup_paths(self) -> list[Path]:
         return [self.file.with_name(f"{self.file.name}.bak{'' if index == 0 else f'.{index}'}") for index in range(DATA_BACKUP_COUNT + 1)]

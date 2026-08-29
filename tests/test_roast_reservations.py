@@ -27,7 +27,7 @@ from nonebot_plugin_rollpig_plus import helpers
 from nonebot_plugin_rollpig_plus import reservation_delivery
 from nonebot_plugin_rollpig_plus import reservation_flow
 from nonebot_plugin_rollpig_plus import texts as texts_module
-from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
+from nonebot_plugin_rollpig_plus.data_manager import LocalStoreUnavailableError, PigDataManager
 from nonebot_plugin_rollpig_plus.handlers import collection as collection_handler
 from nonebot_plugin_rollpig_plus.handlers import control as control_handler
 from nonebot_plugin_rollpig_plus.handlers import refill as refill_handler
@@ -140,6 +140,26 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(matcher=matcher):
                 self.assertIsNone(_command_rule(matcher).force_whitespace)
+
+
+class StoreErrorGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_write_protection_reaches_user_without_swallowing_other_runtime_errors(self):
+        matcher = SimpleNamespace(finish=AsyncMock(side_effect=RuntimeError("matcher finished")))
+
+        @helpers.guard_store_errors(matcher)
+        async def local_failure():
+            raise LocalStoreUnavailableError("broken local data")
+
+        with self.assertRaisesRegex(RuntimeError, "matcher finished"):
+            await local_failure()
+        self.assertIn("本地账本读取失败", str(matcher.finish.await_args.args[0]))
+
+        @helpers.guard_store_errors(matcher)
+        async def programming_failure():
+            raise RuntimeError("unexpected bug")
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected bug"):
+            await programming_failure()
 
 
 class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):

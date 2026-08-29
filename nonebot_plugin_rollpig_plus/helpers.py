@@ -12,6 +12,7 @@ from nonebot.log import logger as nonebot_logger
 from nonebot.params import CommandArg, CommandWhitespace
 
 from .card_renderer import render_pig_card_image
+from .data_manager import LocalStoreUnavailableError
 from .resource_manager import pig_resource_manager
 from .runtime import is_group_rollpig_enabled, rollpig_date_str
 from .reservation_delivery import schedule_opportunistic_delivery
@@ -195,7 +196,7 @@ def guard_group_enabled(matcher):
 
 
 def guard_store_errors(matcher, message: str = "猪圈云账本暂时离线，请稍后再试。"):
-    """把云端账本不可用转换为用户可读提示，避免底层异常刷屏。"""
+    """把已知账本不可用异常转换为用户提示，普通编程错误继续向外抛出。"""
 
     def decorator(func):
         @wraps(func)
@@ -203,6 +204,12 @@ def guard_store_errors(matcher, message: str = "猪圈云账本暂时离线，�
             event = _find_event(args, kwargs)
             try:
                 return await func(*args, **kwargs)
+            except LocalStoreUnavailableError as error:
+                logger.error(f"rollpig local store unavailable: {error}")
+                local_message = "猪圈本地账本读取失败，已进入写保护，请联系管理员恢复数据。"
+                if event is not None:
+                    await matcher.finish(MessageSegment.reply(event.message_id) + local_message)
+                await matcher.finish(local_message)
             except CloudStoreError as error:
                 logger.warning(f"rollpig cloud store unavailable: {error}")
                 if event is not None:
