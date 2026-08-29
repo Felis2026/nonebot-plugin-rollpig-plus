@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.log import logger
 
 from .runtime import ROLLPIG_TIMEZONE, is_group_rollpig_enabled, resolve_roast_charge_max
@@ -41,10 +42,26 @@ class RoastRefillReactionError(RuntimeError):
         self.capability_unsupported = capability_unsupported
 
 
-def _reaction_error_flags(message: str) -> tuple[bool, bool]:
-    """区分投票消息失效、协议明确不支持与可重试的瞬时错误。"""
+def _reaction_error_info(error: object) -> dict[str, object] | None:
+    """只提取 OneBot ActionFailed 或 API 响应中的结构化错误字段。"""
 
-    lowered = str(message).lower()
+    if isinstance(error, ActionFailed):
+        return dict(error.info)
+    if isinstance(error, dict):
+        return dict(error)
+    return None
+
+
+def _reaction_error_flags(error: object) -> tuple[bool, bool]:
+    """仅凭结构化 OneBot 信号判断终态；未知异常必须保持投票可重试。"""
+
+    info = _reaction_error_info(error)
+    if info is None:
+        return False, False
+    lowered = " ".join(
+        str(info.get(key) or "")
+        for key in ("message", "wording", "msg", "errMsg", "error")
+    ).lower()
     message_missing = any(
         token in lowered
         for token in (
@@ -58,21 +75,29 @@ def _reaction_error_flags(message: str) -> tuple[bool, bool]:
         token in lowered
         for token in (
             "unsupported api",
-            "unsupported",
             "api not found",
             "unknown api",
             "unknown action",
             "action not found",
-            "not supported",
-            "not implemented",
+            "api is not supported",
+            "action is not supported",
+            "api not implemented",
+            "action not implemented",
             "接口不存在",
             "动作不存在",
-            "不支持",
             "不支持该接口",
             "不支持此接口",
             "未实现该接口",
         )
     )
+    # 部分 OneBot 实现只返回“方法不存在”类 retcode 和动作名，没有稳定 wording。
+    # 仅在两者同时出现时判为能力缺失，避免代理层的普通 404 被误杀为不支持。
+    try:
+        retcode = int(info.get("retcode"))
+    except (TypeError, ValueError):
+        retcode = 0
+    if retcode in {-32601, 404, 1404} and "fetch_emoji_like" in lowered:
+        capability_unsupported = True
     return message_missing, capability_unsupported
 
 
@@ -131,7 +156,7 @@ async def fetch_refill_reactors(bot: Bot, message_id: str) -> set[str]:
             )
         except Exception as error:
             error_message = str(error)
-            missing, unsupported = _reaction_error_flags(error_message)
+            missing, unsupported = _reaction_error_flags(error)
             raise RoastRefillReactionError(
                 error_message,
                 message_missing=missing,
@@ -142,7 +167,7 @@ async def fetch_refill_reactors(bot: Bot, message_id: str) -> set[str]:
         result_code = payload.get("result")
         if result_code not in {None, 0, "0"}:
             error_message = str(payload.get("errMsg") or payload.get("message") or result_code)
-            missing, unsupported = _reaction_error_flags(error_message)
+            missing, unsupported = _reaction_error_flags(payload)
             raise RoastRefillReactionError(
                 error_message,
                 message_missing=missing,
