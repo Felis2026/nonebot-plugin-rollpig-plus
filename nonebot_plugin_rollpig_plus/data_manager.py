@@ -110,6 +110,8 @@ def _next_charge_seconds(charges: int, updated_ts: float, now: float, cooldown: 
 
 DATA_FILE = store.get_plugin_data_file("pig_data.json")
 DATA_BACKUP_COUNT = 2
+DATA_BACKUP_MIN_INTERVAL_SECONDS = 60.0
+DATA_BACKUP_MAX_WRITES = 10
 
 
 class LocalStoreUnavailableError(RuntimeError):
@@ -144,7 +146,10 @@ class PigDataManager:
         self._lock = asyncio.Lock()
         self._load_failed = False
         self._skip_backup_rotation_once = False
+        self._writes_since_backup_rotation = 0
+        self._last_backup_rotation_monotonic = time.monotonic()
         self.data = self._load()
+        self._restore_backup_rotation_clock()
 
     # ---- 加载与迁移 ----
 
@@ -580,15 +585,43 @@ class PigDataManager:
     def _backup_paths(self) -> list[Path]:
         return [self.file.with_name(f"{self.file.name}.bak{'' if index == 0 else f'.{index}'}") for index in range(DATA_BACKUP_COUNT + 1)]
 
+    def _restore_backup_rotation_clock(self) -> None:
+        """按现有主备份时间恢复降频窗口，避免重启反复把轮换时间清零。"""
+
+        primary_backup = self._backup_paths()[0]
+        if not primary_backup.exists():
+            return
+        try:
+            backup_age = max(0.0, time.time() - primary_backup.stat().st_mtime)
+        except OSError:
+            return
+        self._last_backup_rotation_monotonic -= min(
+            backup_age,
+            DATA_BACKUP_MIN_INTERVAL_SECONDS,
+        )
+
     def _rotate_backups(self) -> None:
-        """每次成功写入前保留滚动备份；从损坏文件恢复时跳过一次，避免把坏主文件覆盖好备份。"""
+        """按时间或写入次数轮换备份；主文件本身仍在每次业务变更时原子落盘。"""
+
         if self._skip_backup_rotation_once:
+            # 从备份恢复时主文件仍是坏数据，绝不能把它推进现有好备份链。
             self._skip_backup_rotation_once = False
+            self._writes_since_backup_rotation = 0
+            self._last_backup_rotation_monotonic = time.monotonic()
             return
         if not self.file.exists():
             return
 
         backup_paths = self._backup_paths()
+        self._writes_since_backup_rotation += 1
+        elapsed = time.monotonic() - self._last_backup_rotation_monotonic
+        if (
+            backup_paths[0].exists()
+            and self._writes_since_backup_rotation < DATA_BACKUP_MAX_WRITES
+            and elapsed < DATA_BACKUP_MIN_INTERVAL_SECONDS
+        ):
+            return
+
         for index in range(len(backup_paths) - 1, -1, -1):
             source = self.file if index == 0 else backup_paths[index - 1]
             target = backup_paths[index]
@@ -597,6 +630,8 @@ class PigDataManager:
             if target.exists():
                 target.unlink()
             shutil.copy2(source, target)
+        self._writes_since_backup_rotation = 0
+        self._last_backup_rotation_monotonic = time.monotonic()
 
     def _preserve_broken_file(self) -> None:
         """把无法读取的主文件另存为 broken 备份，方便人工排查和恢复。"""
