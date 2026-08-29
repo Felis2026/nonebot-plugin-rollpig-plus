@@ -274,6 +274,21 @@ PVP_TEMPLATES = [
 AI_TEXTS_PER_PAIR_TARGET = 5
 
 
+def _extract_origin_feature(origin_pig: dict) -> str:
+    """提取适合 AI 提示词的短特征，兼容 Overlay 省略可选文案字段。"""
+
+    description = str(origin_pig.get("description") or "").strip()
+    if description and len(description) <= 15:
+        return description
+
+    analysis = str(origin_pig.get("analysis") or "").strip()
+    if analysis:
+        return analysis[:20]
+
+    pig_name = str(origin_pig.get("name") or "").strip()
+    return pig_name[:20] or "一只普通小猪"
+
+
 class RoastManager:
     def __init__(
         self,
@@ -1146,9 +1161,7 @@ class RoastManager:
             raise RuntimeError("AI client is not initialized")
         
         # 1. 提取特征
-        origin_feature = origin_pig.get('description', '')
-        if not origin_feature or len(origin_feature) > 15:
-            origin_feature = origin_pig['analysis'][:20]
+        origin_feature = _extract_origin_feature(origin_pig)
 
         # 基础 System Prompt
         system_prompt = "你是一个擅长黑色幽默、说话刻薄但好笑的脱口秀演员。你的任务是进行‘猪生终结’吐槽。"
