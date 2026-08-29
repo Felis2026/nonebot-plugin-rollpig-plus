@@ -6,7 +6,8 @@ import random
 from collections import Counter
 from contextlib import suppress
 
-from nonebot import get_bot, get_driver
+from nonebot import get_bots, get_driver
+from nonebot.adapters.onebot.v11 import Bot
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
@@ -120,6 +121,63 @@ async def resource_sync_job():
 
 
 # ================================ 每日总结任务 ================================ #
+
+
+def _group_ids_from_response(response: object) -> set[str] | None:
+    """兼容 OneBot 直接列表与包裹 data 的群列表响应；格式非法返回 None。"""
+
+    if isinstance(response, dict):
+        response = response.get("data")
+    if not isinstance(response, list):
+        return None
+    return {
+        str(group_id)
+        for item in response
+        if isinstance(item, dict)
+        for group_id in (item.get("group_id") or item.get("groupId"),)
+        if group_id not in {None, ""}
+    }
+
+
+async def resolve_daily_summary_bots(group_ids: list[str]) -> dict[str, Bot]:
+    """按 Bot 实际可见群路由日报；多 Bot 同群时稳定选择 self_id 最小者。"""
+
+    unresolved = {str(group_id) for group_id in group_ids if group_id}
+    resolved: dict[str, Bot] = {}
+    bots = sorted(get_bots().items(), key=lambda item: str(item[0]))
+    if not bots:
+        return resolved
+
+    # 优先每个 Bot 只读取一次群列表，避免按“群数 × Bot 数”放大 OneBot 请求。
+    for self_id, bot in bots:
+        try:
+            visible_group_ids = _group_ids_from_response(await bot.get_group_list())
+        except Exception as error:
+            logger.warning(f"[每日总结] Bot 群列表读取失败，准备逐群确认: bot={self_id} error={error}")
+            continue
+        if visible_group_ids is None:
+            logger.warning(f"[每日总结] Bot 群列表格式无效，准备逐群确认: bot={self_id}")
+            continue
+        for group_id in sorted(unresolved & visible_group_ids):
+            resolved[group_id] = bot
+            unresolved.remove(group_id)
+        if not unresolved:
+            return resolved
+
+    # 群列表接口临时失败时再逐群确认，宁可少发也不把日报交给任意 Bot 试错。
+    for group_id in sorted(unresolved):
+        for self_id, bot in bots:
+            try:
+                await bot.get_group_info(group_id=int(group_id), no_cache=False)
+            except Exception:
+                continue
+            resolved[group_id] = bot
+            break
+        if group_id not in resolved:
+            logger.error(f"[每日总结] 没有在线 Bot 能确认目标群，已跳过投递: group={group_id}")
+    return resolved
+
+
 async def build_daily_summary(
     summary_store: RollpigStore,
     date_str: str | None = None,
@@ -327,13 +385,15 @@ async def daily_summary_job():
         await store.prune_events(days_to_keep=7)
         await store.prune_history(days_to_keep=14)
 
-        try:
-            bot = get_bot()
-        except ValueError:
+        delivery_bots = await resolve_daily_summary_bots(list(group_summaries))
+        if not delivery_bots:
             logger.warning("[每日总结] 无可用 Bot，跳过推送")
             return
 
         for group_id, summary in group_summaries.items():
+            bot = delivery_bots.get(group_id)
+            if bot is None:
+                continue
             try:
                 text = build_daily_summary_text(summary)
                 await bot.send_group_msg(group_id=int(group_id), message=text)
