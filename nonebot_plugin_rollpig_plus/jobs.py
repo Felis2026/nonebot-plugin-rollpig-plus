@@ -18,6 +18,7 @@ from .pighub_service import PIGHUB_REFRESH_INTERVAL_HOURS, pighub_service
 from .resource_manager import get_pig_by_id, sync_rollpig_resources
 from .yesterday_card_renderer import shutdown_yesterday_card_renderer
 from .runtime import (
+    ROLLPIG_TIMEZONE,
     is_daily_summary_enabled,
     is_group_rollpig_enabled,
     rollpig_date_str,
@@ -28,6 +29,7 @@ from .store.cloud import CloudStoreError
 from .texts import DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_FOOTER, DAILY_SUMMARY_HEADER
 
 background_resource_sync_tasks: set[asyncio.Task[None]] = set()
+background_maintenance_tasks: set[asyncio.Task[None]] = set()
 
 
 # ================================ 运行时生命周期 ================================ #
@@ -36,12 +38,13 @@ async def shutdown_rollpig_runtime() -> None:
     """释放卡片/图鉴缓存与存储连接，避免长期运行或重载后残留资源。"""
 
     # 启动期资源同步是后台任务；退出时必须先收束，避免同步仍在改缓存目录时关闭运行时。
-    for task in list(background_resource_sync_tasks):
-        task.cancel()
-    for task in list(background_resource_sync_tasks):
-        with suppress(asyncio.CancelledError):
-            await task
-    background_resource_sync_tasks.clear()
+    for task_set in (background_resource_sync_tasks, background_maintenance_tasks):
+        for task in list(task_set):
+            task.cancel()
+        for task in list(task_set):
+            with suppress(asyncio.CancelledError):
+                await task
+        task_set.clear()
     from .reservation_delivery import shutdown_reservation_delivery_tasks
 
     await shutdown_reservation_delivery_tasks()
@@ -86,6 +89,56 @@ def schedule_background_resource_sync(source: str) -> None:
     task: asyncio.Task[None] = asyncio.create_task(run_background_resource_sync(source))
     background_resource_sync_tasks.add(task)
     task.add_done_callback(background_resource_sync_tasks.discard)
+
+
+# ================================ 数据维护任务 ================================ #
+
+
+async def run_data_maintenance(source: str) -> None:
+    """独立清理过期历史和事件；单项失败不能阻止另一项继续执行。"""
+
+    failures: list[str] = []
+    for name, operation in (
+        ("events", lambda: store.prune_events(days_to_keep=7)),
+        ("history", lambda: store.prune_history(days_to_keep=14)),
+    ):
+        try:
+            await operation()
+        except Exception as error:
+            failures.append(f"{name}={error}")
+    if failures:
+        logger.warning(f"[数据维护] {source} 部分失败: {'; '.join(failures)}")
+        return
+    logger.info(f"[数据维护] {source} 完成")
+
+
+def schedule_background_maintenance(source: str) -> None:
+    """把启动期清理放入后台并纳入 shutdown 收束，避免拖慢插件启动。"""
+
+    task: asyncio.Task[None] = asyncio.create_task(run_data_maintenance(source))
+    background_maintenance_tasks.add(task)
+    task.add_done_callback(background_maintenance_tasks.discard)
+
+
+@get_driver().on_startup
+async def startup_data_maintenance() -> None:
+    """启动后补做一次清理，覆盖 Bot 长期无群活动或停机后的积压。"""
+
+    schedule_background_maintenance("startup")
+
+
+@scheduler.scheduled_job(
+    "cron",
+    hour=3,
+    minute=30,
+    timezone=ROLLPIG_TIMEZONE,
+    id="rollpig_data_maintenance",
+    max_instances=1,
+)
+async def data_maintenance_job() -> None:
+    """每天独立执行数据保留策略，不再依赖日报是否启用或当天是否活跃。"""
+
+    await run_data_maintenance("scheduled")
 
 
 @get_driver().on_startup
@@ -322,7 +375,7 @@ def build_daily_summary_text(summary: dict) -> str:
     return "\n".join(lines)
 
 
-@scheduler.scheduled_job("cron", hour=23, minute=45, timezone="Asia/Shanghai", id="rollpig_daily_summary")
+@scheduler.scheduled_job("cron", hour=23, minute=45, timezone=ROLLPIG_TIMEZONE, id="rollpig_daily_summary")
 async def daily_summary_job():
     """每晚 23:45~23:55 推送当日猪圈日报（随机延迟 0~10 分钟防风控）。"""
 
@@ -357,9 +410,7 @@ async def daily_summary_job():
             if is_daily_summary_enabled(group_id)
         ]
         if not summary_push_groups:
-            await store.prune_events(days_to_keep=7)
-            await store.prune_history(days_to_keep=14)
-            logger.info("[每日总结] 已完成旧数据清理，但没有群开启日报推送")
+            logger.info("[每日总结] 没有群开启日报推送")
             return
 
         group_summaries: dict[str, dict] = {}
@@ -381,9 +432,6 @@ async def daily_summary_job():
                 logger.warning(f"[每日总结] 汇总失败，已跳过该群: group={group_id} error={error}")
                 continue
             group_summaries[group_id] = summary
-
-        await store.prune_events(days_to_keep=7)
-        await store.prune_history(days_to_keep=14)
 
         delivery_bots = await resolve_daily_summary_bots(list(group_summaries))
         if not delivery_bots:

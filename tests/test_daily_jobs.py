@@ -55,5 +55,17 @@ class DailySummaryBotRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("400", resolved)
 
 
+class DataMaintenanceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_history_cleanup_still_runs_when_event_cleanup_fails(self) -> None:
+        with patch.object(jobs, "store") as mocked_store:
+            mocked_store.prune_events = AsyncMock(side_effect=RuntimeError("event cleanup failed"))
+            mocked_store.prune_history = AsyncMock()
+
+            await jobs.run_data_maintenance("test")
+
+        mocked_store.prune_events.assert_awaited_once_with(days_to_keep=7)
+        mocked_store.prune_history.assert_awaited_once_with(days_to_keep=14)
+
+
 if __name__ == "__main__":
     unittest.main()
