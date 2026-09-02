@@ -695,10 +695,13 @@ async def _deliver_daily_report_claim(
                 "skip",
                 error="daily_report_disabled_after_render",
             )
-            if not transition:
-                logger.warning(f"[猪圈日报] 关闭开关后的日报跳过状态未确认: group={group_id}")
+            # 与投递前的 skip 分支保持一致：迁移失败时按短退避重领，
+            # 由下一轮再次确认 skip 状态，避免 Cloud 端租约悬置到过期。
+            retry_at = transition.next_attempt_at
+            if not transition and not retry_at:
+                retry_at = _daily_report_transition_retry_at()
             logger.info(f"[猪圈日报] 渲染完成时群开关已关闭，跳过日报: group={group_id}")
-            return report_built, False, ""
+            return report_built, False, retry_at
         if not await store.transition_daily_report_delivery(claim, "sending"):
             raise CloudStoreError("日报发送意图未获 Cloud 确认")
         sending_started = True

@@ -770,6 +770,128 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "delivery_deadline_passed_after_render",
         )
 
+    async def test_disabled_group_is_skipped_after_render(self) -> None:
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        bot = SimpleNamespace(self_id="bot-a", send_group_msg=AsyncMock())
+
+        # 投递前开关全部通过，渲染完成后任一开关关闭都必须跳过发送。
+        for rollpig_enabled, report_enabled in ((False, True), (True, False)):
+            with self.subTest(
+                rollpig_enabled=rollpig_enabled,
+                report_enabled=report_enabled,
+            ):
+                mocked_store = SimpleNamespace(
+                    transition_daily_report_delivery=AsyncMock(
+                        return_value=DailyReportDeliveryTransitionResult(
+                            ok=True,
+                            status="skipped",
+                        )
+                    )
+                )
+                with (
+                    patch.object(jobs, "store", mocked_store),
+                    patch.object(
+                        jobs,
+                        "is_group_rollpig_enabled",
+                        side_effect=[True, rollpig_enabled],
+                    ),
+                    patch.object(
+                        jobs,
+                        "is_daily_report_enabled",
+                        side_effect=[True, report_enabled],
+                    ),
+                    patch.object(
+                        jobs,
+                        "_daily_report_deadline_reached",
+                        return_value=False,
+                    ),
+                    patch.object(
+                        jobs,
+                        "build_group_daily_report",
+                        new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+                    ) as build_report,
+                    patch.object(
+                        jobs,
+                        "render_daily_report_card",
+                        new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+                    ) as render_card,
+                ):
+                    result = await jobs._deliver_daily_report_claim(
+                        claim,
+                        delivery_bots={"100": bot},
+                        protect_date="2026-08-27",
+                        cutoff_time="23:45",
+                    )
+
+                self.assertEqual(result, (True, False, ""))
+                build_report.assert_awaited_once()
+                render_card.assert_awaited_once()
+                bot.send_group_msg.assert_not_awaited()
+                self.assertEqual(
+                    mocked_store.transition_daily_report_delivery.await_args.args[1],
+                    "skip",
+                )
+                self.assertEqual(
+                    mocked_store.transition_daily_report_delivery.await_args.kwargs["error"],
+                    "daily_report_disabled_after_render",
+                )
+
+    async def test_rendering_skip_failure_schedules_transition_retry(self) -> None:
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        bot = SimpleNamespace(self_id="bot-a", send_group_msg=AsyncMock())
+        mocked_store = SimpleNamespace(
+            transition_daily_report_delivery=AsyncMock(
+                return_value=DailyReportDeliveryTransitionResult(ok=False)
+            )
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "is_group_rollpig_enabled", side_effect=[True, False]),
+            patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            result = await jobs._deliver_daily_report_claim(
+                claim,
+                delivery_bots={"100": bot},
+                protect_date="2026-08-27",
+                cutoff_time="23:45",
+            )
+
+        self.assertTrue(result[0])
+        self.assertFalse(result[1])
+        # skip 状态未获确认时必须返回重领时间，由下一轮重新确认 skip。
+        self.assertTrue(result[2])
+        parsed_retry = jobs._parse_daily_report_retry_at(result[2])
+        self.assertIsNotNone(parsed_retry)
+        bot.send_group_msg.assert_not_awaited()
+        self.assertEqual(
+            mocked_store.transition_daily_report_delivery.await_args.args[1],
+            "skip",
+        )
+
     async def test_failure_before_sending_is_reclaimed_at_cloud_retry_time(self) -> None:
         bot = SimpleNamespace(
             self_id="bot-a",
