@@ -5,6 +5,7 @@ import datetime as dt
 import random
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import suppress
 
 from nonebot import get_bots, get_driver
@@ -18,8 +19,10 @@ from .config import plugin_config
 from .daily_report import (
     DailyReport,
     DailyUserReportProfile,
+    NormalizedDailyEvent,
     ProtectionReportItem,
     build_daily_report,
+    normalize_daily_events,
 )
 from .daily_report_card_renderer import (
     render_daily_report_card,
@@ -373,11 +376,13 @@ async def build_daily_user_profiles(
     return profiles
 
 
-def select_daily_protected_user_ids(report: DailyReport) -> list[str]:
+def select_daily_protected_user_ids(
+    events: Sequence[NormalizedDailyEvent],
+) -> list[str]:
     """沿用现有规则：被成功烤至少两次且次数最高的一人获得次日保护。"""
 
     roasted_counter: Counter[str] = Counter()
-    for event in report.events:
+    for event in events:
         if (
             event.event_type == "success"
             and event.target_id
@@ -388,6 +393,52 @@ def select_daily_protected_user_ids(report: DailyReport) -> list[str]:
         return []
     user_id, count = roasted_counter.most_common(1)[0]
     return [user_id] if count >= 2 else []
+
+
+async def settle_daily_protections(
+    group_ids: Sequence[str],
+    *,
+    date_str: str,
+    protect_date: str,
+    cutoff_at: str,
+) -> None:
+    """为不投递日报的群结算次日保护。
+
+    次日保护是当日游戏事实的结算，只依赖截止点之前的事件，与是否开启
+    日报通知无关；开启日报的群仍在 build_group_daily_report 内写入，
+    保持"写入成功才在卡片中承诺保护"的一致性，两条路径互不重叠。
+    """
+
+    if not group_ids:
+        return
+    event_query = await store.query_daily_events(date_str=date_str, cutoff_at=cutoff_at)
+    if not event_query.available:
+        # 与投递路径的严格语义一致：事件记录不可用时宁可跳过结算，
+        # 也不能把保护名单误写成空。
+        logger.warning("[猪圈日报] 事件记录暂时不可用，跳过未投递群的次日保护结算")
+        return
+    events_by_group: dict[str, list[dict]] = {}
+    for item in event_query.items:
+        group_id = str(item.get("group_id") or "")
+        if group_id:
+            events_by_group.setdefault(group_id, []).append(item)
+    failures: list[str] = []
+    for group_id in group_ids:
+        events = normalize_daily_events(
+            events_by_group.get(group_id, ()),
+            group_id=group_id,
+            cutoff_at=cutoff_at,
+        )
+        protected_ids = select_daily_protected_user_ids(events)
+        try:
+            await store.replace_group_protections(group_id, protected_ids, protect_date)
+        except Exception as error:
+            # 单群失败只损失该群保护这一项利好，不影响其余群继续结算。
+            failures.append(f"{group_id}={error}")
+    if failures:
+        logger.warning(f"[猪圈日报] 部分群次日保护结算失败: {'; '.join(failures)}")
+        return
+    logger.info(f"[猪圈日报] 已完成 {len(group_ids)} 个未投递群的次日保护结算")
 
 
 async def build_group_daily_report(
@@ -457,7 +508,7 @@ async def build_group_daily_report(
     )
     if not report.has_activity:
         return report
-    protected_ids = select_daily_protected_user_ids(report)
+    protected_ids = select_daily_protected_user_ids(report.events)
     await report_store.replace_group_protections(
         group_id,
         protected_ids,
@@ -680,7 +731,8 @@ async def _deliver_daily_report_claim(
             cutoff_time=cutoff_time,
         )
         # 渲染可能耗时较长；在提交发送意图前再次确认时间和开关，避免卡片
-        # 已经跨过硬截止点或管理员刚关闭日报后仍发送出去。
+        # 已经跨过硬截止点或管理员刚关闭日报后仍发送出去。build 内已写入的
+        # 次日保护属于当日事实结算，终止投递时只放弃发送，不回滚保护。
         if _daily_report_deadline_reached(claim.date_str):
             await _transition_daily_report_safely(
                 claim,
@@ -759,8 +811,8 @@ async def daily_report_job():
             return
 
         # ================================ 控制台开关过滤 ================================ #
-        # 如果宿主项目接入了群开关，这里必须在定时任务层同步收口：
-        # 未启用的群既不推日报，也不写次日保护名单，保证“关闭就是彻底关闭”。
+        # rollpig 总开关关闭的群既不推日报，也不参与次日保护结算，
+        # 保证"彻底关闭"；日报开关只控制通知投递，不影响游戏结算。
         enabled_active_groups = [
             group_id for group_id in sorted(active_groups)
             if is_group_rollpig_enabled(group_id)
@@ -770,12 +822,29 @@ async def daily_report_job():
             return
 
         # ================================ 日报推送开关过滤 ================================ #
-        # 日报支持“默认关闭 + 分群开启”。必须先过滤出真正开启日报的群，
-        # 再计算日报与次日保护名单，避免关闭日报的群被定时任务产生副作用。
+        # 日报支持“默认关闭 + 分群开启”，先过滤出真正开启日报的群，
+        # 之后再单独结算未投递群的保护。
         report_push_groups = [
             group_id for group_id in enabled_active_groups
             if is_daily_report_enabled(group_id)
         ]
+        report_push_group_set = set(report_push_groups)
+
+        # ================================ 次日保护结算 ================================ #
+        # 保护是当日游戏事实的结算：被烤最多的用户照常获得次日保护，
+        # 与是否开启日报通知无关。开启日报的群在构建日报时写入保护，
+        # 保证"写入成功才在卡片中承诺"；其余群在此统一结算。
+        await settle_daily_protections(
+            [
+                group_id
+                for group_id in enabled_active_groups
+                if group_id not in report_push_group_set
+            ],
+            date_str=report_date,
+            protect_date=protect_date,
+            cutoff_at=cutoff_at,
+        )
+
         if not report_push_groups:
             logger.info("[猪圈日报] 没有群开启日报推送")
             return

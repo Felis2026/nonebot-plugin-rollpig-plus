@@ -31,6 +31,7 @@ from nonebot_plugin_rollpig_plus.store.cloud import (
 )
 from nonebot_plugin_rollpig_plus.store.local_json import LocalJsonStore
 from nonebot_plugin_rollpig_plus.store.models import (
+    DailyEventQueryResult,
     DailyReportDeliveryClaim,
     DailyReportDeliveryClaimResult,
     DailyReportDeliveryTransitionResult,
@@ -973,6 +974,216 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             [call.args[1] for call in mocked_store.transition_daily_report_delivery.await_args_list],
             ["release", "sending", "sent"],
         )
+
+
+# ================================ 次日保护结算 ================================ #
+
+
+class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _roast_event(group_id: str, attacker: str, target: str) -> dict:
+        return {
+            "type": "success",
+            "group_id": group_id,
+            "attacker": attacker,
+            "target": target,
+            "created_at": "2026-08-26T20:00:00+08:00",
+        }
+
+    async def test_undelivered_groups_get_protection_settlement(self) -> None:
+        # 群 100 开日报走投递；群 200 关日报但 rollpig 开启，保护照常结算。
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(return_value={"message_id": 123}),
+        )
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"100", "200"}),
+            query_daily_events=AsyncMock(
+                return_value=DailyEventQueryResult(
+                    items=(
+                        self._roast_event("200", "user-a", "user-b"),
+                        self._roast_event("200", "user-c", "user-b"),
+                    ),
+                    available=True,
+                )
+            ),
+            replace_group_protections=AsyncMock(),
+            claim_daily_report_deliveries=AsyncMock(
+                return_value=DailyReportDeliveryClaimResult(claims=(claim,))
+            ),
+            transition_daily_report_delivery=AsyncMock(return_value=True),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "rollpig_date_str", return_value="2026-08-26"),
+            patch.object(jobs.random, "randint", return_value=0),
+            patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(
+                jobs,
+                "is_daily_report_enabled",
+                side_effect=lambda group_id: group_id == "100",
+            ),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
+            patch.object(
+                jobs,
+                "resolve_daily_report_bots",
+                new=AsyncMock(return_value={"100": bot}),
+            ),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            await jobs.daily_report_job()
+
+        bot.send_group_msg.assert_awaited_once()
+        mocked_store.replace_group_protections.assert_awaited_once_with(
+            "200", ["user-b"], "2026-08-27"
+        )
+
+    async def test_settlement_skipped_when_events_unavailable(self) -> None:
+        # 事件记录不可用时宁可跳过结算，也不能把保护名单误写成空。
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"200"}),
+            query_daily_events=AsyncMock(
+                return_value=DailyEventQueryResult(items=(), available=False)
+            ),
+            replace_group_protections=AsyncMock(),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "rollpig_date_str", return_value="2026-08-26"),
+            patch.object(jobs.random, "randint", return_value=0),
+            patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=False),
+        ):
+            await jobs.daily_report_job()
+
+        mocked_store.query_daily_events.assert_awaited_once()
+        mocked_store.replace_group_protections.assert_not_awaited()
+
+    async def test_settlement_continues_after_group_failure(self) -> None:
+        # 单群写入失败只损失该群保护，不能阻断其余群结算。
+        events = (
+            self._roast_event("200", "user-a", "user-b"),
+            self._roast_event("200", "user-c", "user-b"),
+            self._roast_event("300", "user-d", "user-e"),
+            self._roast_event("300", "user-f", "user-e"),
+        )
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"200", "300"}),
+            query_daily_events=AsyncMock(
+                return_value=DailyEventQueryResult(items=events, available=True)
+            ),
+            replace_group_protections=AsyncMock(
+                side_effect=[RuntimeError("cloud write failed"), None]
+            ),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "rollpig_date_str", return_value="2026-08-26"),
+            patch.object(jobs.random, "randint", return_value=0),
+            patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=False),
+        ):
+            await jobs.daily_report_job()
+
+        self.assertEqual(mocked_store.replace_group_protections.await_count, 2)
+        second_call = mocked_store.replace_group_protections.await_args_list[1]
+        self.assertEqual(second_call.args, ("300", ["user-e"], "2026-08-27"))
+
+    async def test_no_settlement_query_when_all_groups_deliver(self) -> None:
+        # 回归保障：所有活跃群都开日报时不产生额外事件查询与保护写入。
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(return_value={"message_id": 123}),
+        )
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"100"}),
+            query_daily_events=AsyncMock(),
+            replace_group_protections=AsyncMock(),
+            claim_daily_report_deliveries=AsyncMock(
+                return_value=DailyReportDeliveryClaimResult(claims=(claim,))
+            ),
+            transition_daily_report_delivery=AsyncMock(return_value=True),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "rollpig_date_str", return_value="2026-08-26"),
+            patch.object(jobs.random, "randint", return_value=0),
+            patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
+            patch.object(
+                jobs,
+                "resolve_daily_report_bots",
+                new=AsyncMock(return_value={"100": bot}),
+            ),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            await jobs.daily_report_job()
+
+        mocked_store.query_daily_events.assert_not_awaited()
+        mocked_store.replace_group_protections.assert_not_awaited()
+        bot.send_group_msg.assert_awaited_once()
+
+    async def test_rollpig_disabled_groups_are_not_settled(self) -> None:
+        # rollpig 总开关关闭的群既不投递也不结算，保持"彻底关闭"。
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"200"}),
+            query_daily_events=AsyncMock(),
+            replace_group_protections=AsyncMock(),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "rollpig_date_str", return_value="2026-08-26"),
+            patch.object(jobs.random, "randint", return_value=0),
+            patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=False),
+            patch.object(jobs, "is_daily_report_enabled", return_value=False),
+        ):
+            await jobs.daily_report_job()
+
+        mocked_store.query_daily_events.assert_not_awaited()
+        mocked_store.replace_group_protections.assert_not_awaited()
 
 
 # ================================ Cloud 日报 HTTP 契约 ================================ #
