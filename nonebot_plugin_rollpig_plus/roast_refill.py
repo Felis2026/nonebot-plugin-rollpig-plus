@@ -26,7 +26,7 @@ ROAST_REFILL_EMOJI_ID = "424"
 ROAST_REFILL_EMOJI_TYPE = 1
 ROAST_REFILL_FETCH_PAGE_SIZE = 100
 ROAST_REFILL_FETCH_MAX_PAGES = 20
-ROAST_REFILL_IMAGE_PATH = Path(__file__).parent / "resource" / "refill.png"
+ROAST_REFILL_IMAGE_PATH = Path(__file__).parent / "resource" / "refill.jpg"
 
 
 class RoastRefillReactionError(RuntimeError):

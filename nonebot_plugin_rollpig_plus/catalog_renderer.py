@@ -77,7 +77,7 @@ async def catalog_render_budget(_label: str) -> AsyncIterator[None]:
         semaphore.release()
 
 
-CATALOG_BASE_IMAGE = RESOURCE_DIR / "catalog_base.png"
+CATALOG_BASE_IMAGE = RESOURCE_DIR / "catalog_base.jpg"
 CATALOG_FONT = RESOURCE_DIR / "fonts" / "SourceHanSansSC-Medium.otf"
 CATALOG_PAGE_SIZE = 38
 CATALOG_CACHE_MAX_ENTRIES = 64
