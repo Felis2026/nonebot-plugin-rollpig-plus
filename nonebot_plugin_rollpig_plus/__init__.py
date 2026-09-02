@@ -15,7 +15,7 @@ from .config import Config  # noqa: E402
 
 __plugin_meta__ = PluginMetadata(
     name="今天是什么小猪（今日小猪）Plus",
-    description="基于原版Rollpig的拓展分支，新增拓展烤群友、图鉴成长等多项玩法",
+    description="每天抽取小猪、收集图鉴并提升 EX 等级，还可体验烤群友、预约烤猪、猪圈日报与多 Bot 同步",
     usage="""
     🐷 基础指令：
     今日小猪 / 今天是什么小猪 - 抽取今天的命运之猪
@@ -35,7 +35,7 @@ __plugin_meta__ = PluginMetadata(
     小猪图鉴 - 生成图片版小猪图鉴
     本周小猪 - 生成本周猪猪总结长图
     小猪投稿 - 前往 RollPig 投稿平台提交创意、完整小猪或 EX 等级差分
-    小猪日报 开启/关闭/状态 - 控制本群每日总结推送
+    小猪日报 开启/关闭/状态 - 控制本群猪圈日报推送
     """,
     type="application",
     homepage="https://github.com/Felis2026/nonebot-plugin-rollpig-plus",

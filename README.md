@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.12.0-ff69b4" alt="Version 0.12.0">
+    <img src="https://img.shields.io/badge/Version-0.13.0-ff69b4" alt="Version 0.13.0">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -23,7 +23,7 @@
 </div>
 
 > RollPig Plus 最初基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig) 开发。  
-> 在保留「每天抽一只小猪」核心玩法的基础上，继续扩展了图鉴成长、EX Lv.、烤群友、日报、云端资源与多 Bot 同步等能力。
+> 在保留「每天抽一只小猪」核心功能的基础上，继续扩展了图鉴成长、EX Lv.、烤群友、日报、云端资源与多 Bot 同步等能力。
 
 ## ✨ 效果预览
 
@@ -112,7 +112,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 
 `本周小猪` 会生成个人一周总结长图。
 
-群主或管理员还可以通过 `小猪日报 开启` 为当前群开启每日总结；默认关闭，不会在安装后自动向群里推送。
+群主或管理员还可以通过 `小猪日报 开启` 为当前群开启猪圈日报；默认关闭，不会在安装后自动向群里推送。
 
 <details>
 <summary><strong>展开查看烤群友、预约与补货的详细规则</strong></summary>
@@ -185,7 +185,7 @@ RollPig Plus 自带完整默认值，**不写 `.env`、不创建 JSON 配置文�
 - 公有小猪资源同步开启；
 -  GIF 小猪 Overlay 随资源同步启用；
 - 图片版小猪图鉴开启；
-- 每日总结默认关闭；
+- 猪圈日报默认关闭；
 - Cloud 关闭。
 
 配置优先级：
@@ -249,6 +249,8 @@ ROLLPIG_CLOUD_TOKEN=replace-with-token
 ```
 
 Cloud 模式用于同步今日小猪、图鉴成长、烧烤充能等核心状态。关键写操作不会在异常时偷偷落回本地，避免多 Bot 产生数据分叉。
+
+完整的多 Bot 猪圈日报协同需要 RollPig Cloud `0.6.0+`。连接旧版 Cloud 时，其他既有功能保持可用，但日报会安全停止，不会让多个实例各自降级后向同一群重复发送。
 
 ### 添加额外 Overlay
 
@@ -450,4 +452,4 @@ Copyright (c) 2025-2026 Felis
 
 中的实际说明为准。
 
-普通卡片、图鉴和昨日回顾卡正文默认使用 Source Han Sans SC Medium，并通过 `pilmoji` 与 Google Noto Emoji 渲染彩色 Emoji；相关第三方许可见 `THIRD_PARTY_NOTICES.md`。
+普通卡片、图鉴、昨日回顾卡正文及猪圈日报动态内容默认使用 Source Han Sans SC Medium，并通过 `pilmoji` 与 Google Noto Emoji 渲染彩色 Emoji。猪圈日报的固定报头和栏目标题使用内置的 Noto Serif SC 轻量子集；相关第三方许可见 `THIRD_PARTY_NOTICES.md`。
