@@ -127,6 +127,7 @@ class PigDataManager:
                    旧版存完整 pig dict，_migrate() 会自动转换
     - daily_roll_snapshots: {date: {user_id: snapshot}} ← 抽取时成长与资源快照
     - group_rolls: {date: {group_id: {user_id: pig_id}}} ← 群内“今日已抽/已显形”记录
+    - group_roll_seen_at: {date: {group_id: {user_id: ISO时间}}} ← 日报固定截止快照
     - collection : {user_id: [pig_id, ...]}   ← 永久保留，图鉴数据
     - pig_progress: {user_id: {pig_id: {copies, first_obtained_at}}} ← P1A 抽到次数/专家等级
     - draw_state : {user_id: {duplicate_streak}} ← P1A 连续重复次数，用于伪保底
@@ -136,6 +137,7 @@ class PigDataManager:
     - unrolled_roast_attempts: {date: {user_id: count}} ← 未抽猪先烤的每日违规次数
     - roast_reservations: {reservation_id: reservation} ← 延迟到目标抽猪后结算的群预约
     - group_daily_active_users: {date: {group_id: [user_id, ...]}} ← 群日活玩家
+    - group_daily_active_at: {date: {group_id: {user_id: ISO时间}}} ← 群日活首次登记时间
     - roast_refill_requests: {request_id: request} ← 烤箱补货投票及结果
 
     写操作通过 asyncio.Lock 串行化，文件使用原子替换（.tmp → rename）防止 JSON 损坏。
@@ -158,6 +160,7 @@ class PigDataManager:
             "history": {},
             "daily_roll_snapshots": {},
             "group_rolls": {},
+            "group_roll_seen_at": {},
             "collection": {},
             "pig_progress": {},
             "draw_state": {},
@@ -168,6 +171,7 @@ class PigDataManager:
             "unrolled_roast_attempts": {},
             "roast_reservations": {},
             "group_daily_active_users": {},
+            "group_daily_active_at": {},
             "roast_refill_requests": {},
         }
 
@@ -209,6 +213,7 @@ class PigDataManager:
             "history",
             "daily_roll_snapshots",
             "group_rolls",
+            "group_roll_seen_at",
             "collection",
             "pig_progress",
             "draw_state",
@@ -218,6 +223,7 @@ class PigDataManager:
             "unrolled_roast_attempts",
             "roast_reservations",
             "group_daily_active_users",
+            "group_daily_active_at",
             "roast_refill_requests",
         ):
             if not isinstance(data.get(key), dict):
@@ -433,6 +439,13 @@ class PigDataManager:
         updated = current | {str(user_id) for user_id in user_ids if user_id}
         if updated == current:
             return False
+        active_at = self.data.setdefault("group_daily_active_at", {}).setdefault(
+            date_str,
+            {},
+        ).setdefault(str(group_id), {})
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        for user_id in updated - current:
+            active_at.setdefault(user_id, now_iso)
         self.data["group_daily_active_users"][date_str][str(group_id)] = sorted(updated)
         return True
 
@@ -850,6 +863,15 @@ class PigDataManager:
         group_roll_map = day_rolls.setdefault(group_id, {})
         changed = group_roll_map.get(user_id) != pig_id
         group_roll_map[user_id] = pig_id
+        if changed:
+            seen_at = self.data.setdefault("group_roll_seen_at", {}).setdefault(
+                date_str,
+                {},
+            ).setdefault(group_id, {})
+            seen_at.setdefault(
+                user_id,
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            )
         return self._mark_group_active_users_locked(date_str, group_id, [user_id]) or changed
 
     # ================================ P1A抽猪成长状态 ================================ #
@@ -1345,9 +1367,26 @@ class PigDataManager:
             if self._mark_group_active_users_locked(target_date, str(group_id), user_ids):
                 await self._atomic_save()
 
-    def get_group_active_user_ids(self, group_id: str, date_str: Optional[str] = None) -> set[str]:
+    def get_group_active_user_ids(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
+    ) -> set[str]:
         target_date = date_str or rollpig_date_str()
-        return set(self._group_active_users_locked(target_date, str(group_id)))
+        users = set(self._group_active_users_locked(target_date, str(group_id)))
+        cutoff = _parse_utc_datetime(cutoff_at)
+        if cutoff is None:
+            return users
+        active_at = self.data.get("group_daily_active_at", {}).get(
+            target_date,
+            {},
+        ).get(str(group_id), {})
+        return {
+            user_id
+            for user_id in users
+            if _timestamp_not_after_cutoff(active_at.get(user_id), cutoff)
+        }
 
     async def prepare_group_roast_refill(
         self,
@@ -1609,6 +1648,11 @@ class PigDataManager:
             for d in group_dates_to_del:
                 del group_rolls[d]
 
+            group_roll_seen_at = self.data.get("group_roll_seen_at", {})
+            for d in list(group_roll_seen_at):
+                if _is_valid_date(d) and (today - datetime.date.fromisoformat(d)).days > days_to_keep:
+                    del group_roll_seen_at[d]
+
             active_users = self.data.get("group_daily_active_users", {})
             active_dates_to_del = [
                 d for d in active_users
@@ -1617,6 +1661,11 @@ class PigDataManager:
             ]
             for d in active_dates_to_del:
                 del active_users[d]
+
+            group_daily_active_at = self.data.get("group_daily_active_at", {})
+            for d in list(group_daily_active_at):
+                if _is_valid_date(d) and (today - datetime.date.fromisoformat(d)).days > days_to_keep:
+                    del group_daily_active_at[d]
 
             refill_requests = self.data.get("roast_refill_requests", {})
             refill_ids_to_del = [
@@ -1875,12 +1924,20 @@ class PigDataManager:
         date_str: Optional[str] = None,
         group_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> list:
         """获取指定日期（默认今天）的所有烤群友事件。"""
         if not date_str:
             date_str = rollpig_date_str()
         events = self.data.get("daily_events", {}).get(date_str, [])
         result = [dict(event) for event in events if isinstance(event, dict)]
+        cutoff = _parse_utc_datetime(cutoff_at)
+        if cutoff is not None:
+            result = [
+                event
+                for event in result
+                if _timestamp_not_after_cutoff(event.get("created_at"), cutoff)
+            ]
         if group_id:
             result = [event for event in result if str(event.get("group_id") or "") == str(group_id)]
         if user_id:
@@ -1944,11 +2001,28 @@ class PigDataManager:
             roasted_7d=self.count_success_roasted(user_id, days=7),
         )
 
-    def get_group_rolls(self, group_id: str, date_str: Optional[str] = None) -> dict:
+    def get_group_rolls(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
+    ) -> dict:
         """获取指定群在某天登记过的今日形态。"""
         if not date_str:
             date_str = rollpig_date_str()
-        return dict(self.data.get("group_rolls", {}).get(date_str, {}).get(group_id, {}))
+        rolls = dict(self.data.get("group_rolls", {}).get(date_str, {}).get(group_id, {}))
+        cutoff = _parse_utc_datetime(cutoff_at)
+        if cutoff is None:
+            return rolls
+        seen_at = self.data.get("group_roll_seen_at", {}).get(
+            date_str,
+            {},
+        ).get(group_id, {})
+        return {
+            user_id: pig_id
+            for user_id, pig_id in rolls.items()
+            if _timestamp_not_after_cutoff(seen_at.get(user_id), cutoff)
+        }
 
     def get_active_group_ids(self, date_str: Optional[str] = None) -> set[str]:
         """获取指定日期内有抽猪或烧烤活动的群号集合。"""
@@ -2034,6 +2108,28 @@ def _safe_int(value, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_utc_datetime(value: object) -> Optional[datetime.datetime]:
+    """解析本地快照时间；旧数据无时间时由调用方继续按兼容记录处理。"""
+
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _timestamp_not_after_cutoff(value: object, cutoff: datetime.datetime) -> bool:
+    """旧记录缺少首次时间时继续保留；新记录严格排除截止点之后的活动。"""
+
+    parsed = _parse_utc_datetime(value)
+    return parsed is None or parsed <= cutoff
 
 
 def _optional_nonnegative_int(value: object) -> Optional[int]:

@@ -7,6 +7,9 @@ from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
     DailyEventQueryResult,
+    DailyReportDeliveryClaim,
+    DailyReportDeliveryClaimResult,
+    DailyReportDeliveryTransitionResult,
     DailyRollResult,
     DailyRollSnapshot,
     DrawState,
@@ -78,8 +81,13 @@ class LocalJsonStore(RollpigStore):
     ) -> None:
         await self.manager.mark_group_roll_seen(user_id, pig_id, group_id, date_str=date_str)
 
-    async def get_group_rolls(self, group_id: str, date_str: Optional[str] = None) -> dict[str, str]:
-        return self.manager.get_group_rolls(group_id, date_str)
+    async def get_group_rolls(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
+    ) -> dict[str, str]:
+        return self.manager.get_group_rolls(group_id, date_str, cutoff_at=cutoff_at)
 
     async def get_user_collection(self, user_id: str) -> list[str]:
         return self.manager.get_user_collection(user_id)
@@ -132,12 +140,14 @@ class LocalJsonStore(RollpigStore):
         date_str: Optional[str] = None,
         group_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> DailyEventQueryResult:
         return DailyEventQueryResult(
             items=tuple(self.manager.get_daily_events(
                 date_str=date_str,
                 group_id=group_id,
                 user_id=user_id,
+                cutoff_at=cutoff_at,
             )),
             available=True,
         )
@@ -155,6 +165,45 @@ class LocalJsonStore(RollpigStore):
 
     async def is_protected(self, group_id: str, user_id: str, date_str: Optional[str] = None) -> bool:
         return self.manager.is_protected(group_id, user_id, date_str=date_str)
+
+    # ================================ 猪圈日报投递 ================================ #
+
+    async def claim_daily_report_deliveries(
+        self,
+        *,
+        instance_id: str,
+        delivery_bots: dict[str, str],
+        date_str: str,
+        cutoff_at: str,
+    ) -> DailyReportDeliveryClaimResult:
+        # 本地 JSON 不支持跨进程共享；单进程仍走同一领域接口，避免 jobs 分叉两套流程。
+        return DailyReportDeliveryClaimResult(
+            claims=tuple(
+                DailyReportDeliveryClaim(
+                    date_str=date_str,
+                    group_id=group_id,
+                    delivery_bot_id=delivery_bot_id,
+                    cutoff_at=cutoff_at,
+                    claim_token=f"local:{instance_id}:{date_str}:{group_id}",
+                )
+                for group_id, delivery_bot_id in sorted(delivery_bots.items())
+            )
+        )
+
+    async def transition_daily_report_delivery(
+        self,
+        claim: DailyReportDeliveryClaim,
+        action: str,
+        *,
+        message_id: str = "",
+        error: str = "",
+    ) -> DailyReportDeliveryTransitionResult:
+        accepted = action in {"sending", "sent", "release", "uncertain", "skip"}
+        status = {
+            "release": "pending",
+            "skip": "skipped",
+        }.get(action, action)
+        return DailyReportDeliveryTransitionResult(ok=accepted, status=status)
 
     async def prune_history(self, days_to_keep: int = 14) -> None:
         await self.manager.clean_old_history(days_to_keep=days_to_keep)
@@ -230,8 +279,13 @@ class LocalJsonStore(RollpigStore):
         self,
         group_id: str,
         date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> set[str]:
-        return self.manager.get_group_active_user_ids(group_id, date_str=date_str)
+        return self.manager.get_group_active_user_ids(
+            group_id,
+            date_str=date_str,
+            cutoff_at=cutoff_at,
+        )
 
     async def prepare_group_roast_refill(self, **kwargs) -> GroupRoastRefillPrepareResult:
         return await self.manager.prepare_group_roast_refill(**kwargs)

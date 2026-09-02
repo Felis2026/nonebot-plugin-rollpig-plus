@@ -47,13 +47,12 @@ cmd_roast_refill = on_command(
 )
 roast_refill_notice = on_notice(block=False, priority=5)
 
-# 同一 request_id + message_id 在 Local 与 Cloud 均可幂等重放。
-# 两次短等待覆盖瞬时网络抖动，同时避免把命令处理拖成长任务。
+# 短暂重试消息绑定，应对网络抖动。
 ROAST_REFILL_BIND_RETRY_DELAYS = (0.25, 0.75)
 
 
 def _can_start_refill(event: GroupMessageEvent) -> bool:
-    """只有本群群主、管理员或 NoneBot superuser 可以主持补货投票。"""
+    """检查是否具备发起补货投票权限（群主、管理员或 SUPERUSER）。"""
 
     if is_superuser_user(str(event.user_id)):
         return True
@@ -73,7 +72,7 @@ async def _bind_refill_message_with_retry(
     request_id: str,
     message_id: str,
 ) -> GroupRoastRefillRequest | None:
-    """有限重试消息绑定，处理 Cloud 已提交但响应丢失及短暂断网。"""
+    """重试绑定补货消息 ID。"""
 
     total_attempts = len(ROAST_REFILL_BIND_RETRY_DELAYS) + 1
     for attempt in range(total_attempts):
@@ -101,11 +100,10 @@ async def _handle_post_send_probe_error(
     request: GroupRoastRefillRequest,
     error: RoastRefillReactionError,
 ) -> bool:
-    """处理发消息后的能力探测异常；返回是否必须终止当前投票。"""
+    """处理发消息后的 OneBot 异常，返回是否终止投票。"""
 
     if not error.message_missing and not error.capability_unsupported:
-        # 网络抖动和临时 OneBot 异常不能证明接口不可用。保留 voting，后续 Notice
-        # 或再次执行命令会重新验票，避免一场已经发出的投票被永久作废。
+        # 临时网络异常不终止投票，留待后续 Notice 或命令重试验票。
         logger.warning(
             f"rollpig 烤箱补货发起后验票临时失败，申请保持有效: "
             f"request={request.request_id} error={error}"
@@ -127,14 +125,12 @@ async def _handle_post_send_probe_error(
 
 
 async def _reconcile_after_bind(bot: Bot, request: GroupRoastRefillRequest) -> bool:
-    """绑定消息后立即补验票；返回是否应停止后续 reaction 引导。"""
+    """绑定消息后补验票。"""
 
     try:
         result = await reconcile_refill_request(bot, request)
     except RoastRefillReactionError as error:
         return await _handle_post_send_probe_error(bot, request, error)
-    # 绑定重试期间可能已经收齐票；成功文案由统一结算函数发送。只有仍在
-    # pending 的申请需要继续 reaction 引导，其他状态均应在此停止。
     return result.status != "pending"
 
 
@@ -142,7 +138,7 @@ def _preparation_matches_members(
     preparation: GroupRoastRefillPrepareResult,
     eligible_user_ids: set[str],
 ) -> bool:
-    """确认 Store 确实按当前群成员冻结门槛；旧 Cloud 忽略新字段时安全停场。"""
+    """校验补货门槛快照与当前活跃成员是否一致。"""
 
     request = preparation.request
     if request is None:

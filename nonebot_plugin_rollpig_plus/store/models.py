@@ -161,6 +161,56 @@ class DailyEventQueryResult:
 
 
 @dataclass(frozen=True)
+class DailyReportDeliveryClaim:
+    """某实例从 Cloud 原子领取的一份群日报；claim_token 绑定全部状态迁移。"""
+
+    date_str: str
+    group_id: str
+    delivery_bot_id: str
+    cutoff_at: str
+    claim_token: str
+    status: str = "claimed"
+    attempt_count: int = 1
+
+
+@dataclass(frozen=True)
+class DailyReportDeliveryClaimResult:
+    """一次群日报领取响应；next_claim_at 用于等待其他实例租约或服务端退避。"""
+
+    claims: tuple[DailyReportDeliveryClaim, ...] = ()
+    next_claim_at: str = ""
+
+
+@dataclass(frozen=True)
+class DailyReportDeliveryTransitionResult:
+    """日报状态迁移结果；失败释放时携带服务端决定的下次领取时间。"""
+
+    ok: bool
+    status: str = ""
+    attempt_count: int = 0
+    next_attempt_at: str = ""
+
+    def __bool__(self) -> bool:
+        """兼容既有布尔判断，同时让调用方可以读取完整重试信息。"""
+
+        return self.ok
+
+
+@dataclass(frozen=True)
+class DailyReportProfileSnapshot:
+    """Cloud 在日报固定截止点批量返回的用户排行资料。"""
+
+    user_id: str
+    daily_pig_id: str = ""
+    daily_ex_level: Optional[int] = None
+    daily_achieved_at: str = ""
+    catalog_count: Optional[int] = None
+    catalog_achieved_at: str = ""
+    recent_pig_id: str = ""
+    recent_ex_level: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class RoastReservationParticipant:
     user_id: str
     display_name: str = ""

@@ -63,7 +63,7 @@ class RoastLibrarySyncResult:
 
 
 def _normalize_roast_text(text: str) -> str:
-    """生成稳定的文案身份；正文仍保留原样，避免无意改写用户本地内容。"""
+    """标准化文案占位符与空白，用于生成去重哈希。"""
 
     normalized = text.strip()
     quote_pairs = {('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’")}
@@ -81,7 +81,7 @@ def _roast_text_identity(text: str) -> str:
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """远端快照禁止重复键，避免不同 JSON 实现对同一包得到不同结果。"""
+    """解析 JSON 时检查重复键。"""
 
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -99,7 +99,7 @@ def _copy_library(library: dict[str, dict[str, list[str]]]) -> dict[str, dict[st
 
 
 def _safe_roast_library(data: Any) -> dict[str, dict[str, list[str]]]:
-    """读取本地旧库时只做结构校验，不套用云端内容审核规则以免误删用户数据。"""
+    """读取并校验本地文案库基本结构。"""
 
     if not isinstance(data, dict):
         raise ValueError("顶层必须是 object")
@@ -119,7 +119,7 @@ def _safe_roast_library(data: Any) -> dict[str, dict[str, list[str]]]:
 
 
 def _validate_shared_library(data: Any) -> tuple[dict[str, dict[str, list[str]]], dict[str, int]]:
-    """严格校验远端只读快照，任何异常都会拒绝整包而不是污染本地运行库。"""
+    """校验远端共享文案库快照格式与安全限制。"""
 
     if not isinstance(data, dict):
         raise ValueError("共享文案库顶层必须是 object")
@@ -342,10 +342,9 @@ class RoastManager:
             )
 
     # ================================ 文案库持久化 ================================ #
-    # 正文和来源索引都位于 data；snapshot/state 只是可清理缓存。所有未知来源正文
-    # 一律保守认定为 local，保证升级、缓存丢失或中途崩溃时宁可多留也不误删用户文案。
+    # 未知来源正文默认按本地处理，防止误删用户自定义文案。
     def _backup_corrupt_file(self, path: Path, label: str) -> None:
-        """隔离损坏数据并保留故障现场，不能用空文件直接覆盖原始内容。"""
+        """备份并隔离损坏的文件。"""
 
         if not path.exists():
             return
@@ -460,7 +459,7 @@ class RoastManager:
         library: dict[str, dict[str, list[str]]],
         source_flags: dict[tuple[str, str], dict[str, int]],
     ) -> None:
-        """先替换来源索引再替换正文；中途崩溃也只会留下可保守恢复的状态。"""
+        """原子保存文案库与来源索引。"""
 
         token = uuid.uuid4().hex
         library_temp: Path | None = None
@@ -503,13 +502,10 @@ class RoastManager:
                 for current_text in current_texts
             )
             texts = library.setdefault(origin_id, {}).setdefault(target_id, [])
-            # 来源判断与远端撤回都按规范化正文哈希工作；仅引号或空白不同的
-            # AI 结果应给现有正文补 local 来源，而不是再写入一份视觉重复文案。
+            # 正文仅空白或引号差异时不重复添加，仅标记本地来源
             if not identity_already_exists:
                 texts.append(text)
 
-            # AI 恰好生成了与共享库相同的正文时，必须补上 local 标记；
-            # 否则未来云端撤回会误删该实例刚刚独立生成的同文文案。
             flags_by_hash = source_flags.setdefault((origin_id, target_id), {})
             previous_flags = flags_by_hash.get(identity, 0)
             flags_by_hash[identity] = previous_flags | SOURCE_LOCAL
@@ -815,8 +811,7 @@ class RoastManager:
                     identity = _roast_text_identity(shared_text)
                     if identity in used_shared_identities:
                         continue
-                    # 同身份正文在升级前已属于本地时，用第一条本地原文占据共享位置；
-                    # 其余原文稍后仍按旧顺序追加，不能因引入规范化身份而静默丢失。
+                    # 本地正文与共享库重复时，保留本地原文与顺序
                     local_index = first_local_index.get(identity)
                     if local_index is None:
                         merged_texts.append(shared_text)
@@ -879,8 +874,7 @@ class RoastManager:
                 flags_by_hash: dict[str, int] = {}
                 for text in texts:
                     identity = _roast_text_identity(text)
-                    # 来源索引按规范化身份记录；同一身份可能对应多条升级前的本地原文，
-                    # 关闭共享库时必须逐条保留，不能再次按身份去重。
+                    # 保留具有本地来源标记的正文
                     if old_flags.get(identity, SOURCE_LOCAL) & SOURCE_LOCAL:
                         kept.append(text)
                         flags_by_hash[identity] = SOURCE_LOCAL

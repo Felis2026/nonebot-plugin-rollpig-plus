@@ -7,14 +7,14 @@ TOMORROW_TEXTS = [
     "天机不可泄露，但我闻到了一股红烧味……",
     "明日运势：大概率是一只特立独行的猪。",
     "不要问明天，明天你会变瘦（确信）。",
-    "水晶球显示，明天你的猪槽里会有好吃的。",
+    "提前算了一卦：明天你八成还是逃不过被烤的命运。",
     "明天的猪猪正在赶来的路上，据说是坐火箭来的。",
     "睡觉吧，梦里什么猪都有。",
-    "根据星象，明天你可能会进化成更高级的形态。",
+    "明天少熬夜，不然明天抽到的小猪黑眼圈比你还大。",
     "塔罗牌告诉我，明天的小猪身上有金色的光芒✨",
     "我夜观天象，明日宜养猪，忌烤猪。",
     "根据猪猪星历，明天是'吃饱不愁'的黄道吉日。",
-    "水晶猪猪球显示：明日财运与饲料量成正比。",
+    "明天群里好像有大餐，建议你明天空腹来抽猪。",
     "温馨提示：明天小猪的体重取决于你今天的投喂。",
     "占卜结果显示：明天的你，猪格魅力+100%✨",
     "猪神悄悄告诉我：明天有人要'猪'力全开哦。",
@@ -24,27 +24,27 @@ TOMORROW_TEXTS = [
     "小道消息：明天你的床会格外有'猪'引力。",
     "据说明天的你，看到饲料会莫名兴奋……",
     "预警：明天你可能会对泥坑产生特殊兴趣🕳️",
-    "剧透一下：明天你的'哼哼'声会异常悦耳。",
+    "明天你的猪很能跑，抓它可能得多费点劲。",
     "放心，明天的你绝对不会变成小猪佩奇...大概吧。",
     "我保证，明天的你肯定不会胖成球——才怪！",
     "据可靠情报，明天你绝不会想赖床...真的吗？",
     "明天的你：我肯定能管住嘴！🐷：不，你不能。",
-    "预言：明天你会说自己'猪'事顺利（物理）。",
+    "明天动手前最好先看看风向，别又烧到自己。",
     "明天的你，连自己都会觉得'猪'么可爱。",
     "偷偷告诉你：明天你的鼻子会有点痒……",
     "剧透禁止！但我可以提示：明天别穿你最喜欢的衣服。",
-    "明天的惊喜正在加载中...当前进度：99%（猪化）",
+    "明天的猪已经在热身了，就等明天一早逮捕你。",
     "准备好迎接'全新'的自己了吗？🐷",
     "明天的你，会重新思考'猪生'的意义。",
-    "猪生三问：我是谁？我在哪？明天我是什么猪？",
-    "你将亲身体验：什么叫'笨猪先飞'🐷✈️",
+    "提前剧透：明天这只猪不仅会跑，还会踹翻你的烤架。",
+    "明天少赖床，早起抓猪胜率翻倍。",
     "明天过后，你会深刻理解'猪队友'这个词。",
     "预告：明天的你将获得'猪'一样的睡眠质量。",
     "想提前知道？先学三声猪叫来听听🐷🐷🐷",
     "明天的你已经在我手里了，拿零食来换！",
     "如果现在告诉我你最喜欢的饲料，我就……还是不说。",
     "给你三个提示：哼哼、咕噜、呼...猜到了吗？",
-    "明天的你正在发送好友申请，是否通过？✅",
+    "明天的菜单已经写好了，希望上面没有你的名字。",
 ]
 
 # --- 今日小猪 成长提示文案 ---
@@ -447,16 +447,16 @@ FORCE_ROAST_LIMIT_TEXTS = [
 # Bot 以"系统管理员"身份回应，无情、冷静、带一丝轻蔑，纯文本发出
 
 ROAST_BOT_TEXTS = [
-    "【{attacker}】朝我举起了叉子，以为我不知道。我知道。【{attacker}】现在是【{food}】，叉子还在，换了个用途。",
-    "烤我？这个请求每周都有人提。结果每次都一样——【{attacker}】成了【{food}】。日志已更新，不用谢。",
-    "举起叉子之前，你有没有想过这只叉子最后会用在谁身上？现在你知道了，可惜晚了——【{attacker}】现在是【{food}】。",
-    "感谢【{attacker}】的参与！您的烧烤申请已被审核拒绝，同时您本人已作为今日特供食材入库。当前形态：【{food}】。如有疑问，请不要联系我们。",
-    "【{attacker}】把叉子对准了我。系统判定：这是一次无效输入。处理结果：【{attacker}】已被归档至今日菜单，当前形态【{food}】。",
-    "你真的以为能烤我？是我运行这个厨房的系统。【{attacker}】现在是【{food}】，这才是正确的顺序。",
-    "检测到敌意输入。已执行唯一响应模板：操作者转食材。模板没换过，因为从来不需要。【{attacker}】现在是【{food}】。",
-    "烤我之前，建议先读用户协议第 114 条：凡对本 Bot 动手者，自动降级为食材，不另行通知。【{attacker}】已完成阅读，形态：【{food}】。",
-    "你烤我的时候，我在写你的讣告。写完了：'该用户卒于挑战不可能，现安息于餐盘。'——【{attacker}】，你现在叫【{food}】。",
-    "本轮攻防结果已出：Bot 完好率 100%，【{attacker}】完熟率 100%。恭喜达成双百，奖品是成为【{food}】。",
+    "【{attacker}】朝我伸手，以为我看不见。现在你成了【{food}】，后厨多了一道菜。",
+    "想烤我？结果每次都一样——【{attacker}】直接成了【{food}】，不用谢。",
+    "动手之前也不看看是谁的地盘。【{attacker}】当场被请进烤炉，出炉是【{food}】。",
+    "【{attacker}】把夹子对准了 Bot。Bot 连眼都没眨，反手就把你办成了【{food}】。",
+    "敢冲 Bot 下手？【{attacker}】当场成了今日特供，现在叫【{food}】。",
+    "你真以为能烤我？后厨总闸在我手里。【{attacker}】现在是【{food}】，上桌去吧。",
+    "向 Bot 动手的下场向来只有一个：【{attacker}】当场被做成了【{food}】。",
+    "烤 Bot 属于高危操作，可惜【{attacker}】明白得太晚，现在已经是【{food}】了。",
+    "【{attacker}】刚举起夹子，就直接被送进了烤箱，现在躺在餐盘里的叫【{food}】。",
+    "本群第一倒霉蛋诞生了：【{attacker}】挑战 Bot 失败，当场被做成了【{food}】。",
 ]
 
 # -------- 今日烤猪 自动补抽文案 --------
@@ -469,20 +469,176 @@ AUTO_ROLL_ROAST_TEXTS = [
     "都不知道自己是什么猪就急着烤？行吧，先帮你抽了——你今天是【{name}】。现在可以烤了。",
 ]
 
-# -------- 每日总结 无数据文案 --------
+# ================================ 猪圈日报文案 ================================ #
 
-DAILY_SUMMARY_EMPTY_TEXTS = [
-    "今天猪圈一片祥和，没有任何烧烤活动。猪们表示很满意。",
-    "今日烤猪日报：零！和平的一天，后厨的烤架已经在哭了。",
-    "猪圈今天无事发生。烤架上积了一层灰，保安在打盹。",
-    "今天居然没有一场烧烤？猪们已经开始怀疑这是不是放假了。",
-]
+# 日报会在失败后被同一实例或其他 Bot 重领。调用方必须使用稳定业务键选择文案，
+# 不能直接 random.choice，否则同一份日报在重试时会改变正文。
+DAILY_REPORT_OBSERVATION_TEXTS = {
+    "reservation": (
+        "今天 {matched} 场预约都动了手，\n最常见的结局是{result}。",
+        "预约今天开了 {matched} 轮，\n最后多半是{result}。",
+        "今天有 {matched} 场预约动了手，\n{breakdown}。",
+        "今天的预约一共 {matched} 场，\n最多的一种结局是：{result}。",
+    ),
+    "backfire": (
+        "今天一共有 {total} 次烤猪，其中 {matched} 次掌勺的反把自己烤了，\n动手前最好先看清风向。",
+        "今天烤了 {total} 次，有 {matched} 次把自己搭了进去，\n火候明显没控制住。",
+        "全天 {total} 次烤猪里，有 {matched} 次烧到了动手的人，\n今天掌勺可并不容易。",
+        "{matched} 次烤到了发起者自己，混在 {total} 次尝试里，\n今天的火候更偏向收拾掌勺的人。",
+    ),
+    "escape": (
+        "今天一共发起 {total} 次烤猪，有 {matched} 次让目标溜了，\n想逮住一只可不容易。",
+        "今天烤了 {total} 次，跑了 {matched} 头猪，\n会跑的明显更占便宜。",
+        "全天 {total} 次烤猪失手了 {matched} 次，\n今天的目标普遍很滑溜。",
+        "{matched} 次逃脱发生在 {total} 次烤猪里，\n今天的目标普遍很会找空子。",
+    ),
+    "success": (
+        "{total} 次普通烤猪里有 {matched} 次顺利烤成，\n今天的火候相当到位。",
+        "今天的普通烤猪一共 {total} 次，\n其中 {matched} 次顺利烤成了大餐。",
+        "在 {total} 次普通烤猪中，有 {matched} 次顺利烤成，\n几乎撑起了今天一整天的排场。",
+        "普通烤猪今天开了 {total} 轮，\n其中 {matched} 轮顺利烤成了。",
+    ),
+    "human": (
+        "{total} 人完成抽取，\n其中有 {matched} 人保持人类形态。",
+        "今天入圈的 {total} 人里，\n{matched} 人没有变成小猪。",
+        "{matched} 名人类混进了今天的猪圈，\n当日共有 {total} 人完成抽取。",
+        "猪圈今天迎来 {total} 人，\n仍以人类形态出现的有 {matched} 人。",
+    ),
+    "collision": (
+        "{roll_count} 人抽出了 {variety_count} 种小猪，\n其中{top_pig}出现了 {top_count} 次，是今天出现最多的小猪。",
+        "今天最常见的是{top_pig}，一共出现 {top_count} 次；\n"
+        "{roll_count} 人最终只抽出 {variety_count} 种小猪。",
+        "{top_pig}今天出现了 {top_count} 次，\n"
+        "猪圈里明显不只一位群友和它碰面。",
+        "{roll_count} 份抽取结果里，{top_pig}出现了 {top_count} 次，\n"
+        "今天的撞猪主要集中在它身上。",
+    ),
+    "variety": (
+        "{roll_count} 人抽出了 {variety_count} 种小猪，\n今天的猪圈几乎没有撞猪。",
+        "{roll_count} 人带回 {variety_count} 种不同小猪，\n"
+        "今天几乎每次抽取都换了一张脸。",
+        "今天的 {roll_count} 份结果铺开后共有 {variety_count} 种，\n"
+        "猪圈阵容难得没有挤在一起。",
+        "{variety_count} 种小猪来自 {roll_count} 人的抽取，\n"
+        "今天的猪圈阵容格外分散。",
+    ),
+}
 
-# -------- 每日总结 模板 --------
-# 由代码动态拼接，不是 random.choice，而是完整模板
+DAILY_REPORT_HEADLINE_TEXTS = {
+    "normal_success": (
+        "{attacker}果断出手，{target}当场被烤成了{food}。",
+        "{attacker}今天对{target}下手，{target}没能跑掉，最后被烤成了{food}。",
+        "这次由{attacker}掌勺，{target}最后成了{food}。",
+        "{target}没能躲过{attacker}的火候，最后成了一道香喷喷的{food}。",
+    ),
+    "normal_escape": (
+        "{attacker}刚准备动手，{target}一眨眼就{escape}。",
+        "{attacker}刚把火点上，{target}已经带着完整猪身{escape}。",
+        "这次没能留住{target}，{attacker}只能眼睁睁看着目标{escape}。",
+        "{target}抢在动手前脱身，{attacker}这次彻底扑了个空。",
+    ),
+    "normal_backfire": (
+        "{attacker}本想烤{target}，火势却当场掉头，{victim}{backfire}。",
+        "{attacker}原本准备烤{target}，火苗却认错了方向，{victim}{backfire}。",
+        "刚准备对{target}动手，火势却扑向了{victim}，当场{backfire}。",
+        "{target}毫发无损，先遭殃的却是{victim}，当场{backfire}。",
+    ),
+    "self_roast": (
+        "{attacker}主动躺上烤盘，给今天的猪圈添了一次{self_result}。",
+        "{attacker}没等别人动手，自己躺上烤盘，今天多了一次{self_result}。",
+        "今天迎来一位自带食材的主厨：{attacker}主动把自己送去{self_result}。",
+        "{attacker}亲自上料、开火、端上桌，完成了一次标准的{self_result}。",
+    ),
+    "bot_backfire": (
+        "{attacker}试图对 Bot 动手，结果当场反被 Bot 烤了。",
+        "{attacker}向 Bot 发起挑战，不仅没得手，反而当场{backfire}。",
+        "Bot 触发了防卫机制，{attacker}没能得逞，当场{backfire}。",
+        "{attacker}尝试烤 Bot，系统只执行了一条反制指令：让发起者{backfire}。",
+    ),
+    "reservation_success": (
+        "{opening}，大家果断围上，{target}最终{success}。",
+        "等到{target}现身，{team_subject}果断出手，最后{target}{success}。",
+        "{team}守到目标现身，{target}没能逃脱，最后{success}。",
+        "{attacker}守到目标现身，{target}插翅难飞，最后{success}。",
+    ),
+    "reservation_escape": (
+        "{opening}，刚要动手，{target}在最后一刻还是{escape}。",
+        "等到{target}现身，{team_subject}刚要围上去，目标就已经从包围中跑了。",
+        "{team}守到了最后，{target}却还是在眼皮底下{escape}。",
+        "{attacker}把预约守到了动手时刻，{target}还是抢先一步溜了。",
+    ),
+    "reservation_backfire": (
+        "{opening}，开炉时火势突然转向，{victim}{backfire}。",
+        "等到{target}现身，{team_subject}刚要动手，火势却扑向了{victim}，当场{backfire}。",
+        "{team}守到了最后一刻，现场却意外走火，{victim}当场{backfire}。",
+        "{attacker}好不容易守到开炉，还没等对准{target}，{victim}就先{backfire}。",
+    ),
+    "reservation_human": (
+        "{opening}，{target}却以{human_state}现身，谁也下不去手。",
+        "等到{target}现身，{team_subject}才发现目标仍是{human_state}，根本没法烤。",
+        "{team}守到了最后，{target}依然是{human_state}，大家只能当场停手。",
+        "{attacker}等来了{target}，但{human_state}不能烤，这场预约只能作罢。",
+    ),
+    "reservation_food": (
+        "{opening}，{target}出现时已经是{food_state}，根本不用再烤了。",
+        "等到{target}现身，{team_subject}只看见一份{food_state}，预约当场失去目标。",
+        "{team}守到了最后，{target}却早已变成{food_state}，只能就地散伙。",
+        "{attacker}等来了{target}，但目标早已是{food_state}，这场预约无需再开火。",
+    ),
+    "reservation_eaten": (
+        "{opening}，{target}露面前就已经{eaten_state}，现场只剩空盘。",
+        "等到动手时刻，{team_subject}才发现{target}早已{eaten_state}，白等了一场。",
+        "{team}守到最后，只等来{target}已经{eaten_state}的消息。",
+        "{attacker}等了一整场预约，{target}却早已{eaten_state}，连火都没点成。",
+    ),
+    "reservation_sold": (
+        "{opening}，{target}现身前就已经{sold_state}，大家扑了个空。",
+        "等到动手时刻，{team_subject}才得知{target}已经{sold_state}，预约无法继续。",
+        "{team}守到最后，{target}的位置上只剩一张'已{sold_state}'的记录。",
+        "{attacker}守到了动手时刻，却没等到{target}：目标早已{sold_state}。",
+    ),
+}
 
-DAILY_SUMMARY_HEADER = "🐷 今日猪圈日报 🐷\n━━━━━━━━━━━━━━━━━━━━━\n"
-DAILY_SUMMARY_FOOTER = "━━━━━━━━━━━━━━━━━━━━━\n明天继续，猪圈永不打烊🔥"
+DAILY_REPORT_TIMELINE_INTRO_TEXTS = {
+    "mutual": (
+        "{attacker}和{target}\n今天来回过招：",
+        "{attacker}与{target}\n今天互相找麻烦：",
+        "今天死磕到底，\n{attacker}和{target}连续交手 {event_count} 次：",
+        "{attacker}和{target}\n今天谁也没闲着：",
+    ),
+    "personal_turn": (
+        "{attacker}今天的运气\n可以说是跌宕起伏：",
+        "{attacker}今天连续出手，\n结局一再反转：",
+        "{attacker}的 {event_count} 次尝试，\n结果完全不同：",
+        "从得手到翻车，\n{attacker}今天没少折腾：",
+    ),
+    "reservation_followup": (
+        "{attacker}与{target}的预约\n结束之后又起了波折：",
+        "预约刚一结束，\n{attacker}和{target}又杠上了：",
+        "{attacker}刚完事，\n又和{target}碰上了 {event_count} 次：",
+        "围绕{target}的预约结束后，\n后头还有新故事：",
+    ),
+    "repeat_target": (
+        "{attacker}今天盯准了目标，\n多次对{target}下手：",
+        "认准了就不放，\n{attacker}连续试了 {event_count} 次：",
+        "{attacker}今天死盯{target}，\n接连出手了 {event_count} 次：",
+        "{target}今天没能躲开，\n被{attacker}连续盯了 {event_count} 次：",
+    ),
+}
+
+DAILY_REPORT_TIMELINE_DETAIL_TEXTS = {
+    "self_roast": ("{attacker}把自己烤了", "{attacker}主动开烤"),
+    "normal_success": ("{target}被烤了", "成功烤了{target}"),
+    "reservation_success": ("{target}被蹲到了", "预约成功烤了{target}"),
+    "escape": ("{target}溜了", "没能留住{target}"),
+    "bot_backfire": ("{attacker}反被 Bot 烤了", "Bot 反烤{attacker}"),
+    "backfire": ("{victim}把自己烤了", "火势烧到了{victim}"),
+    "special_human": ("{target}是人类没法烤", "人类形态无法开烤"),
+    "special_food": ("{target}已经是熟食", "目标早已熟透"),
+    "special_eaten": ("{target}早就被吃掉了", "现场只剩空盘"),
+    "special_sold": ("{target}已经卖出去了", "目标早已售出"),
+    "special_other": ("{target}状态异常", "预约遇到突发情况"),
+}
 
 # -------- 保护拦截文案 --------
 # 占位符：{target} = 受保护的用户昵称

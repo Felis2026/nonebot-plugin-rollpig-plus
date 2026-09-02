@@ -276,7 +276,7 @@ class CloudDailyRollSnapshotCompatibilityTests(unittest.IsolatedAsyncioTestCase)
         self.assertFalse(result.available)
         self.assertEqual(result.items, ())
 
-    async def test_daily_summary_event_read_preserves_cloud_failure(self):
+    async def test_daily_report_event_read_preserves_cloud_failure(self):
         store = object.__new__(CloudStore)
         store._request = AsyncMock(side_effect=CloudStoreError("offline"))
 
@@ -1203,7 +1203,7 @@ class YesterdayCardRendererTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(
                 any(
                     red > 240 and 80 < green < 230 and 80 < blue < 220 and alpha > 200
-                    for red, green, blue, alpha in canvas.get_flattened_data()
+                    for red, green, blue, alpha in canvas.getdata()
                 )
             )
         finally:

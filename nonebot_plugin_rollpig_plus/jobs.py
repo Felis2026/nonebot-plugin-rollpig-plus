@@ -3,41 +3,60 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import random
+import uuid
 from collections import Counter
 from contextlib import suppress
 
 from nonebot import get_bots, get_driver
-from nonebot.adapters.onebot.v11 import Bot
+from nonebot.adapters.onebot.v11 import Bot, MessageSegment
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
 from .card_renderer import shutdown_card_renderer
 from .catalog_renderer import shutdown_catalog_renderer
 from .config import plugin_config
+from .daily_report import (
+    DailyReport,
+    DailyUserReportProfile,
+    ProtectionReportItem,
+    build_daily_report,
+)
+from .daily_report_card_renderer import (
+    render_daily_report_card,
+    shutdown_daily_report_card_renderer,
+)
 from .pighub_service import PIGHUB_REFRESH_INTERVAL_HOURS, pighub_service
-from .resource_manager import get_pig_by_id, sync_rollpig_resources
+from .resource_manager import get_pig_by_id, pig_resource_manager, sync_rollpig_resources
 from .yesterday_card_renderer import shutdown_yesterday_card_renderer
 from .runtime import (
     ROLLPIG_TIMEZONE,
-    is_daily_summary_enabled,
+    is_daily_report_enabled,
     is_group_rollpig_enabled,
     rollpig_date_str,
 )
 from .store import store
 from .store.base import RollpigStore
-from .store.cloud import CloudStoreError
-from .texts import DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_FOOTER, DAILY_SUMMARY_HEADER
+from .store.cloud import CloudDailyReportUnsupportedError, CloudStoreError
+from .store.models import (
+    DailyReportDeliveryClaim,
+    DailyReportDeliveryClaimResult,
+    DailyReportDeliveryTransitionResult,
+)
+from .store.local_json import LocalJsonStore
 
 background_resource_sync_tasks: set[asyncio.Task[None]] = set()
 background_maintenance_tasks: set[asyncio.Task[None]] = set()
+DAILY_REPORT_INSTANCE_ID = uuid.uuid4().hex
+DAILY_REPORT_RETRY_CUTOFF = dt.time(0, 10)
+DAILY_REPORT_TRANSITION_RETRY_SECONDS = 30
 
 
 # ================================ 运行时生命周期 ================================ #
 @get_driver().on_shutdown
 async def shutdown_rollpig_runtime() -> None:
-    """释放卡片/图鉴缓存与存储连接，避免长期运行或重载后残留资源。"""
+    """释放渲染器缓存与数据库连接。"""
 
-    # 启动期资源同步是后台任务；退出时必须先收束，避免同步仍在改缓存目录时关闭运行时。
+    # 退出前等待后台同步与维护任务结束
     for task_set in (background_resource_sync_tasks, background_maintenance_tasks):
         for task in list(task_set):
             task.cancel()
@@ -50,6 +69,7 @@ async def shutdown_rollpig_runtime() -> None:
     await shutdown_reservation_delivery_tasks()
     await pighub_service.shutdown()
     await shutdown_yesterday_card_renderer()
+    await shutdown_daily_report_card_renderer()
     await shutdown_card_renderer()
     await shutdown_catalog_renderer()
     await store.close()
@@ -57,7 +77,7 @@ async def shutdown_rollpig_runtime() -> None:
 
 # ================================ 资源同步任务 ================================ #
 def get_resource_sync_interval_hours() -> int:
-    """读取资源同步间隔；配置异常时回退 24 小时，避免定时任务注册失败。"""
+    """读取资源同步间隔配置（默认 24 小时）。"""
 
     try:
         return max(1, int(plugin_config.rollpig_resource_sync_interval_hours or 24))
@@ -67,13 +87,12 @@ def get_resource_sync_interval_hours() -> int:
 
 
 async def run_background_resource_sync(source: str) -> None:
-    """后台同步云端小猪资源；任何异常都只记日志，不能影响主业务。"""
+    """后台同步云端小猪资源包。"""
 
     try:
         message = await sync_rollpig_resources(force=False)
         logger.info(f"[小猪资源同步] {source}: {message}")
-        # 同步成功（包括确认资源已经最新）后，提前解除资源缺失暂缓并立即检查 Owner。
-        # 延迟导入避免 jobs 与预约投递模块在插件初始化期间形成环。
+        # 延迟导入避免循环引用
         from .reservation_delivery import schedule_all_owned_deliveries
         from .reservation_flow import clear_resource_reservation_backoffs
 
@@ -173,7 +192,7 @@ async def resource_sync_job():
     await run_background_resource_sync("interval")
 
 
-# ================================ 每日总结任务 ================================ #
+# ================================ 猪圈日报任务 ================================ #
 
 
 def _group_ids_from_response(response: object) -> set[str] | None:
@@ -192,8 +211,8 @@ def _group_ids_from_response(response: object) -> set[str] | None:
     }
 
 
-async def resolve_daily_summary_bots(group_ids: list[str]) -> dict[str, Bot]:
-    """按 Bot 实际可见群路由日报；多 Bot 同群时稳定选择 self_id 最小者。"""
+async def resolve_daily_report_bots(group_ids: list[str]) -> dict[str, Bot]:
+    """为目标群匹配发送 Bot（多 Bot 同群取最小 self_id）。"""
 
     unresolved = {str(group_id) for group_id in group_ids if group_id}
     resolved: dict[str, Bot] = {}
@@ -201,15 +220,15 @@ async def resolve_daily_summary_bots(group_ids: list[str]) -> dict[str, Bot]:
     if not bots:
         return resolved
 
-    # 优先每个 Bot 只读取一次群列表，避免按“群数 × Bot 数”放大 OneBot 请求。
+    # 优先批量读取群列表
     for self_id, bot in bots:
         try:
             visible_group_ids = _group_ids_from_response(await bot.get_group_list())
         except Exception as error:
-            logger.warning(f"[每日总结] Bot 群列表读取失败，准备逐群确认: bot={self_id} error={error}")
+            logger.warning(f"[猪圈日报] Bot 群列表读取失败，准备逐群确认: bot={self_id} error={error}")
             continue
         if visible_group_ids is None:
-            logger.warning(f"[每日总结] Bot 群列表格式无效，准备逐群确认: bot={self_id}")
+            logger.warning(f"[猪圈日报] Bot 群列表格式无效，准备逐群确认: bot={self_id}")
             continue
         for group_id in sorted(unresolved & visible_group_ids):
             resolved[group_id] = bot
@@ -217,7 +236,7 @@ async def resolve_daily_summary_bots(group_ids: list[str]) -> dict[str, Bot]:
         if not unresolved:
             return resolved
 
-    # 群列表接口临时失败时再逐群确认，宁可少发也不把日报交给任意 Bot 试错。
+    # 列表接口失败时逐群确认，避免向未知群发送
     for group_id in sorted(unresolved):
         for self_id, bot in bots:
             try:
@@ -227,168 +246,513 @@ async def resolve_daily_summary_bots(group_ids: list[str]) -> dict[str, Bot]:
             resolved[group_id] = bot
             break
         if group_id not in resolved:
-            logger.error(f"[每日总结] 没有在线 Bot 能确认目标群，已跳过投递: group={group_id}")
+            logger.error(f"[猪圈日报] 没有在线 Bot 能确认目标群，已跳过投递: group={group_id}")
     return resolved
 
 
-async def build_daily_summary(
-    summary_store: RollpigStore,
-    date_str: str | None = None,
-    group_id: str | None = None,
-) -> dict:
-    """通过统一存储接口聚合指定日期、指定群的抽猪与烧烤数据。"""
+# ================================ 日报群资料聚合 ================================ #
 
-    target_date = date_str or rollpig_date_str()
-    today_rolls = (
-        await summary_store.get_group_rolls(group_id, target_date)
-        if group_id
-        else await summary_store.get_daily_rolls(target_date)
-    )
-    events = await summary_store.list_daily_events(
-        date_str=target_date,
-        group_id=group_id,
-    )
 
-    roll_stats = _get_roll_stats(today_rolls)
-    if not events and roll_stats.get("roll_count", 0) == 0:
-        return {"total": 0, **roll_stats}
+def _group_member_rows(response: object) -> list[dict]:
+    """兼容 OneBot 直接列表与包裹 data 的群成员列表响应。"""
+
+    if isinstance(response, dict):
+        response = response.get("data")
+    if not isinstance(response, list):
+        return []
+    return [dict(item) for item in response if isinstance(item, dict)]
+
+
+async def load_daily_group_member_names(bot: Bot, group_id: str) -> dict[str, str]:
+    """每群只读取一次成员列表；失败时由事件快照姓名和用户 ID 继续降级。"""
+
+    try:
+        response = await bot.get_group_member_list(group_id=int(group_id), no_cache=False)
+    except Exception as error:
+        logger.warning(f"[猪圈日报] 群成员昵称读取失败，继续使用事件快照: group={group_id} error={error}")
+        return {}
+    names: dict[str, str] = {}
+    for item in _group_member_rows(response):
+        user_id = str(item.get("user_id") or item.get("userId") or "").strip()
+        display_name = str(item.get("card") or item.get("nickname") or "").strip()
+        if user_id and display_name:
+            names[user_id] = display_name
+    return names
+
+
+def _resolved_profile_pig(pig_id: str, expert_level: int) -> tuple[str, str]:
+    """解析排行用小猪名称和实际生效立绘；缺图交给 renderer 使用猪章兜底。"""
+
+    pig = get_pig_by_id(pig_id) if pig_id else None
+    if not pig:
+        return pig_id, ""
+    appearance = pig_resource_manager.resolve_pig_appearance(pig, expert_level)
+    image_path = appearance.image_path or appearance.base_image_path
+    return str(pig.get("name") or pig_id), str(image_path.resolve()) if image_path else ""
+
+
+def _catalog_achieved_at(progress: dict) -> str:
+    """图鉴数量首次达到当前值的时间等于最后一只新猪的首次获得时间。"""
+
+    timestamps = [
+        str(item.first_obtained_at)
+        for item in progress.values()
+        if item.first_obtained_at
+    ]
+    return max(timestamps, default="")
+
+
+async def build_daily_user_profiles(
+    report_store: RollpigStore,
+    *,
+    report: DailyReport,
+    group_id: str,
+    date_str: str,
+    cutoff_at: str,
+    group_rolls: dict[str, str],
+    member_names: dict[str, str],
+) -> dict[str, DailyUserReportProfile]:
+    """补齐昵称、EX 与图鉴资料；Cloud 使用群级批量请求而不是逐用户补查。"""
+
+    profiles = {
+        user_id: DailyUserReportProfile(
+            user_id=user_id,
+            display_name=member_names.get(user_id, ""),
+        )
+        for user_id in report.participant_ids
+    }
+    if not isinstance(report_store, LocalJsonStore):
+        try:
+            snapshots = await report_store.get_daily_report_profiles(
+                group_id=group_id,
+                date_str=date_str,
+                cutoff_at=cutoff_at,
+                user_ids=report.participant_ids,
+            )
+        except CloudDailyReportUnsupportedError:
+            # 仅当 Cloud 已支持日报领取、但尚未提供批量资料接口时才会走到这里。
+            # 不能逐用户补查，否则千人群会把一次日报放大成数百个请求；真正的
+            # 旧 Cloud 会在领取阶段停止日报，避免多个实例各自降级后重复发送。
+            logger.info(
+                f"[猪圈日报] 当前 Cloud 不支持批量排行资料，已隐藏 EX 与图鉴榜: "
+                f"group={group_id}"
+            )
+            return profiles
+
+        snapshot_by_user = {item.user_id: item for item in snapshots}
+        for user_id in report.participant_ids:
+            snapshot = snapshot_by_user.get(user_id)
+            if snapshot is None:
+                continue
+
+            daily_pig_id = str(group_rolls.get(user_id) or "")
+            daily_matches = bool(
+                daily_pig_id and snapshot.daily_pig_id == daily_pig_id
+            )
+            daily_level = snapshot.daily_ex_level if daily_matches else None
+            daily_name, daily_image = (
+                _resolved_profile_pig(daily_pig_id, daily_level or 0)
+                if daily_pig_id
+                else ("", "")
+            )
+            recent_name, recent_image = (
+                _resolved_profile_pig(
+                    snapshot.recent_pig_id,
+                    snapshot.recent_ex_level or 0,
+                )
+                if snapshot.recent_pig_id
+                else ("", "")
+            )
+            profiles[user_id] = DailyUserReportProfile(
+                user_id=user_id,
+                display_name=member_names.get(user_id, ""),
+                daily_pig_id=daily_pig_id,
+                daily_pig_name=daily_name,
+                daily_ex_level=daily_level,
+                daily_image_name=daily_image,
+                daily_achieved_at=(snapshot.daily_achieved_at if daily_matches else ""),
+                catalog_count=snapshot.catalog_count,
+                catalog_achieved_at=snapshot.catalog_achieved_at,
+                recent_pig_id=snapshot.recent_pig_id,
+                recent_pig_name=recent_name,
+                recent_image_name=recent_image,
+            )
+        return profiles
+
+    for user_id in report.participant_ids:
+        try:
+            catalog = await report_store.get_catalog_snapshot(user_id, days=14)
+        except Exception as error:
+            logger.warning(f"[猪圈日报] 本地用户图鉴读取失败，已隐藏相关排行项: user={user_id} error={error}")
+            continue
+
+        daily_pig_id = str(group_rolls.get(user_id) or "")
+        daily_level = (
+            catalog.draw_state.expert_level_of(daily_pig_id)
+            if daily_pig_id
+            else None
+        )
+        daily_name, daily_image = (
+            _resolved_profile_pig(daily_pig_id, daily_level or 0)
+            if daily_pig_id
+            else ("", "")
+        )
+
+        recent_pig_id = ""
+        if catalog.recent_rolls:
+            _recent_date, recent_pig_id = max(catalog.recent_rolls.items())
+        recent_level = catalog.draw_state.expert_level_of(recent_pig_id) if recent_pig_id else 0
+        recent_name, recent_image = (
+            _resolved_profile_pig(recent_pig_id, recent_level)
+            if recent_pig_id
+            else ("", "")
+        )
+        profiles[user_id] = DailyUserReportProfile(
+            user_id=user_id,
+            display_name=member_names.get(user_id, ""),
+            daily_pig_id=daily_pig_id,
+            daily_pig_name=daily_name,
+            daily_ex_level=daily_level,
+            daily_image_name=daily_image,
+            catalog_count=len(set(catalog.draw_state.pig_ids)),
+            catalog_achieved_at=_catalog_achieved_at(catalog.draw_state.progress),
+            recent_pig_id=recent_pig_id,
+            recent_pig_name=recent_name,
+            recent_image_name=recent_image,
+        )
+    return profiles
+
+
+def select_daily_protected_user_ids(report: DailyReport) -> list[str]:
+    """沿用现有规则：被成功烤至少两次且次数最高的一人获得次日保护。"""
 
     roasted_counter: Counter[str] = Counter()
-    attacker_counter: Counter[str] = Counter()
-    escape_counter: Counter[str] = Counter()
-    backfire_counter: Counter[str] = Counter()
-    name_map: dict[str, str] = {}
-
-    for event in events:
-        attacker_id = str(event.get("attacker") or "")
-        target_id = str(event.get("target") or "")
-        if event.get("attacker_name"):
-            name_map[attacker_id] = str(event["attacker_name"])
-        if event.get("target_name"):
-            name_map[target_id] = str(event["target_name"])
-
-        event_type = event.get("type", "")
-        if event_type == "success":
-            attacker_counter[attacker_id] += 1
-            # 自烤只计入发起次数，不能把自己算进“最惨食材”。
-            if attacker_id and target_id and attacker_id != target_id:
-                roasted_counter[target_id] += 1
-        elif event_type == "self_roast":
-            attacker_counter[attacker_id] += 1
-        elif event_type == "escape":
-            escape_counter[target_id] += 1
-            attacker_counter[attacker_id] += 1
-        elif event_type in {"backfire", "bot_backfire"}:
-            backfire_counter[attacker_id] += 1
-            attacker_counter[attacker_id] += 1
-
-    def get_top(counter: Counter[str]) -> tuple[str | None, str, int]:
-        """返回计数最高的用户 ID、显示名和次数；空计数器返回稳定空值。"""
-
-        if not counter:
-            return None, "", 0
-        user_id, count = counter.most_common(1)[0]
-        return user_id, name_map.get(user_id, user_id), count
-
-    most_roasted_id, most_roasted_name, most_roasted_count = get_top(roasted_counter)
-    most_active_id, most_active_name, most_active_count = get_top(attacker_counter)
-    escape_king_id, escape_king_name, escape_king_count = get_top(escape_counter)
-    backfire_king_id, backfire_king_name, backfire_king_count = get_top(backfire_counter)
-
-    return {
-        "total": len(events),
-        "most_roasted_id": most_roasted_id,
-        "most_roasted_name": most_roasted_name,
-        "most_roasted_count": most_roasted_count,
-        "most_active_id": most_active_id,
-        "most_active_name": most_active_name,
-        "most_active_count": most_active_count,
-        "escape_king_id": escape_king_id,
-        "escape_king_name": escape_king_name,
-        "escape_king_count": escape_king_count,
-        "backfire_king_id": backfire_king_id,
-        "backfire_king_name": backfire_king_name,
-        "backfire_king_count": backfire_king_count,
-        **roll_stats,
-    }
+    for event in report.events:
+        if (
+            event.event_type == "success"
+            and event.target_id
+            and event.target_id != event.attacker_id
+        ):
+            roasted_counter[event.target_id] += 1
+    if not roasted_counter:
+        return []
+    user_id, count = roasted_counter.most_common(1)[0]
+    return [user_id] if count >= 2 else []
 
 
-def _get_roll_stats(today_rolls: dict[str, str]) -> dict:
-    """统计抽猪人数、最热门形态和人类形态人数。"""
+async def build_group_daily_report(
+    report_store: RollpigStore,
+    bot: Bot,
+    *,
+    date_str: str,
+    protect_date: str,
+    group_id: str,
+    cutoff_at: str,
+) -> DailyReport:
+    """读取固定日期快照、写入次日保护，再返回可安全承诺保护结果的日报。"""
 
-    if not today_rolls:
-        return {"roll_count": 0}
+    group_rolls, event_query = await asyncio.gather(
+        report_store.get_group_rolls(
+            group_id,
+            date_str,
+            cutoff_at=cutoff_at,
+        ),
+        report_store.query_daily_events(
+            date_str=date_str,
+            group_id=group_id,
+            cutoff_at=cutoff_at,
+        ),
+    )
+    if not event_query.available:
+        raise CloudStoreError("日报事件记录暂时不可用")
+    try:
+        active_user_ids = await report_store.get_group_active_user_ids(
+            group_id,
+            date_str,
+            cutoff_at=cutoff_at,
+        )
+    except Exception as error:
+        logger.warning(f"[猪圈日报] 活跃用户读取失败，排行仅使用抽猪和互动用户: group={group_id} error={error}")
+        active_user_ids = set()
 
-    pig_counter = Counter(today_rolls.values())
-    top_pig_id, top_pig_count = pig_counter.most_common(1)[0]
-    return {
-        "roll_count": len(today_rolls),
-        "top_pig_id": top_pig_id,
-        "top_pig_count": top_pig_count,
-        "human_count": sum(pig_id == "human" for pig_id in today_rolls.values()),
-    }
+    bot_user_ids = tuple(str(self_id) for self_id in get_bots())
+    preliminary = build_daily_report(
+        date_str=date_str,
+        group_id=group_id,
+        group_rolls=group_rolls,
+        raw_events=event_query.items,
+        active_user_ids=active_user_ids,
+        bot_user_ids=bot_user_ids,
+        cutoff_at=cutoff_at,
+    )
+    member_names = await load_daily_group_member_names(bot, group_id)
+    profiles = await build_daily_user_profiles(
+        report_store,
+        report=preliminary,
+        group_id=group_id,
+        date_str=date_str,
+        cutoff_at=cutoff_at,
+        group_rolls=group_rolls,
+        member_names=member_names,
+    )
+    report = build_daily_report(
+        date_str=date_str,
+        group_id=group_id,
+        group_rolls=group_rolls,
+        raw_events=event_query.items,
+        active_user_ids=active_user_ids,
+        bot_user_ids=bot_user_ids,
+        user_profiles=profiles,
+        cutoff_at=cutoff_at,
+    )
+    if not report.has_activity:
+        return report
+    protected_ids = select_daily_protected_user_ids(report)
+    await report_store.replace_group_protections(
+        group_id,
+        protected_ids,
+        protect_date,
+    )
+
+    expires_at = dt.datetime.combine(
+        dt.date.fromisoformat(protect_date),
+        dt.time(23, 59),
+        tzinfo=ROLLPIG_TIMEZONE,
+    ).isoformat()
+    protections = tuple(
+        ProtectionReportItem(
+            user_id=user_id,
+            display_name=profiles.get(
+                user_id,
+                DailyUserReportProfile(user_id=user_id),
+            ).display_name
+            or report.display_names.get(user_id, ""),
+            expires_at=expires_at,
+        )
+        for user_id in protected_ids
+    )
+    return build_daily_report(
+        date_str=date_str,
+        group_id=group_id,
+        group_rolls=group_rolls,
+        raw_events=event_query.items,
+        active_user_ids=active_user_ids,
+        bot_user_ids=bot_user_ids,
+        user_profiles=profiles,
+        protections=protections,
+        cutoff_at=cutoff_at,
+    )
 
 
-def build_daily_summary_text(summary: dict) -> str:
-    """将按群聚合后的日报结果拼成文案。"""
+def _daily_report_message_id(response: object) -> str:
+    """兼容 OneBot 直接字典与包裹 data 的发送响应，只记录可确认的消息 ID。"""
 
-    roll_count = summary.get("roll_count", 0)
-    roast_total = summary.get("total", 0)
-
-    if roll_count == 0 and roast_total == 0:
-        return random.choice(DAILY_SUMMARY_EMPTY_TEXTS)
-
-    lines = [DAILY_SUMMARY_HEADER]
-
-    if roll_count > 0:
-        top_pig_id = summary.get("top_pig_id")
-        if top_pig_id:
-            pig_data = get_pig_by_id(top_pig_id)
-            pig_name = pig_data["name"] if pig_data else top_pig_id
-            lines.append(f"\U0001f451 最热门形态：【{pig_name}】（共 {summary.get('top_pig_count', 0)} 人抽到）")
-        human_count = summary.get("human_count", 0)
-        if human_count > 0:
-            lines.append(f"\U0001f9cd 今日人类：{human_count} 位幸运儿逃过了猪化")
-        lines.append("")
-
-    if roast_total > 0:
-        lines.append(f"\U0001f525 今日共发生 {roast_total} 场烧烤事件")
-
-        if summary.get("most_active_id"):
-            lines.append(f"\U0001f3c6 烧烤狂人：【{summary['most_active_name']}】（发起 {summary['most_active_count']} 次）")
-
-        if summary.get("most_roasted_id"):
-            lines.append(f"\U0001f356 最惨食材：【{summary['most_roasted_name']}】（被烤 {summary['most_roasted_count']} 次）")
-
-        if summary.get("escape_king_id") and summary["escape_king_count"] > 0:
-            lines.append(f"\U0001f3c3 逃脱大师：【{summary['escape_king_name']}】（成功逃脱 {summary['escape_king_count']} 次）")
-
-        if summary.get("backfire_king_id") and summary["backfire_king_count"] > 0:
-            lines.append(f"\U0001f4a5 反噬之王：【{summary['backfire_king_name']}】（自爆 {summary['backfire_king_count']} 次）")
-
-        if summary.get("most_roasted_id") and summary["most_roasted_count"] >= 2:
-            lines.append(f"\n\U0001f6e1\ufe0f 【{summary['most_roasted_name']}】明天将获得猪圈保护协议，免受一切烧烤！")
-    else:
-        lines.append("\U0001f54a 今天无人烧烤，猪们度过了平静的一天。")
-
-    lines.append("\n" + DAILY_SUMMARY_FOOTER)
-    return "\n".join(lines)
+    if not isinstance(response, dict):
+        return ""
+    payload = response.get("data") if isinstance(response.get("data"), dict) else response
+    return str(payload.get("message_id") or payload.get("messageId") or "")
 
 
-@scheduler.scheduled_job("cron", hour=23, minute=45, timezone=ROLLPIG_TIMEZONE, id="rollpig_daily_summary")
-async def daily_summary_job():
+def _normalize_daily_report_claim_result(
+    result: object,
+) -> DailyReportDeliveryClaimResult:
+    """兼容尚未升级的自定义 Store，使日报升级不会直接打断宿主扩展。"""
+
+    if isinstance(result, DailyReportDeliveryClaimResult):
+        return result
+    if isinstance(result, (tuple, list)):
+        return DailyReportDeliveryClaimResult(
+            claims=tuple(
+                item for item in result if isinstance(item, DailyReportDeliveryClaim)
+            )
+        )
+    return DailyReportDeliveryClaimResult()
+
+
+def _normalize_daily_report_transition_result(
+    result: object,
+) -> DailyReportDeliveryTransitionResult:
+    """将旧 Store 的 bool 返回值归一成包含状态与重试时间的新结果。"""
+
+    if isinstance(result, DailyReportDeliveryTransitionResult):
+        return result
+    return DailyReportDeliveryTransitionResult(ok=bool(result))
+
+
+def _parse_daily_report_retry_at(raw_value: str) -> dt.datetime | None:
+    """Cloud 数据库存储 UTC naive；客户端明确按 UTC 解释，避免宿主时区漂移。"""
+
+    normalized = str(raw_value or "").strip()
+    if not normalized:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning(f"[猪圈日报] Cloud 返回了非法重试时间，已停止本次重领: value={normalized}")
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(ROLLPIG_TIMEZONE)
+
+
+def _daily_report_retry_delay(
+    date_str: str,
+    retry_times: list[str],
+) -> float | None:
+    """选择服务端允许的最早重领时间，并硬性限制在次日 00:10 以前。"""
+
+    deadline = dt.datetime.combine(
+        dt.date.fromisoformat(date_str) + dt.timedelta(days=1),
+        DAILY_REPORT_RETRY_CUTOFF,
+        tzinfo=ROLLPIG_TIMEZONE,
+    )
+    parsed_times = [
+        parsed
+        for raw_value in retry_times
+        if (parsed := _parse_daily_report_retry_at(raw_value)) is not None
+        and parsed < deadline
+    ]
+    if not parsed_times:
+        return None
+    delay = (min(parsed_times) - dt.datetime.now(ROLLPIG_TIMEZONE)).total_seconds()
+    # 到点后仍未领取通常只是客户端与 Cloud 存在亚秒级时钟差；保留一秒下限，
+    # 避免异常响应造成定时任务原地空转。
+    return max(1.0, delay)
+
+
+def _daily_report_transition_retry_at() -> str:
+    """状态迁移响应丢失时短暂再查 Cloud，由服务端最终状态决定能否重领。"""
+
+    return (
+        dt.datetime.now(dt.timezone.utc)
+        + dt.timedelta(seconds=DAILY_REPORT_TRANSITION_RETRY_SECONDS)
+    ).isoformat()
+
+
+async def _transition_daily_report_safely(
+    claim: DailyReportDeliveryClaim,
+    action: str,
+    *,
+    message_id: str = "",
+    error: str = "",
+) -> DailyReportDeliveryTransitionResult:
+    """收束失败后的 Cloud 状态；二次异常只能记录，不能阻断其他群。"""
+
+    try:
+        return _normalize_daily_report_transition_result(
+            await store.transition_daily_report_delivery(
+                claim,
+                action,
+                message_id=message_id,
+                error=error,
+            )
+        )
+    except Exception as transition_error:
+        logger.error(
+            f"[猪圈日报] 投递状态更新失败: group={claim.group_id} "
+            f"action={action} error={transition_error}"
+        )
+        return DailyReportDeliveryTransitionResult(ok=False)
+
+
+async def _deliver_daily_report_claim(
+    claim: DailyReportDeliveryClaim,
+    *,
+    delivery_bots: dict[str, Bot],
+    protect_date: str,
+    cutoff_time: str,
+) -> tuple[bool, bool, str]:
+    """处理一份已领取日报，返回是否生成、是否发送及下一次安全重领时间。"""
+
+    group_id = claim.group_id
+    bot = delivery_bots.get(group_id)
+    if bot is None or str(bot.self_id) != claim.delivery_bot_id:
+        transition = await _transition_daily_report_safely(
+            claim,
+            "release",
+            error="delivery_bot_unavailable",
+        )
+        retry_at = transition.next_attempt_at
+        if not transition and not retry_at:
+            retry_at = _daily_report_transition_retry_at()
+        return False, False, retry_at
+
+    sending_started = False
+    report_built = False
+    try:
+        report = await build_group_daily_report(
+            store,
+            bot,
+            date_str=claim.date_str,
+            protect_date=protect_date,
+            group_id=group_id,
+            cutoff_at=claim.cutoff_at,
+        )
+        if not report.has_activity:
+            if not await store.transition_daily_report_delivery(claim, "skip"):
+                raise CloudStoreError("日报空活动状态确认失败")
+            logger.info(f"[猪圈日报] 群内没有可展示活动，已跳过: group={group_id}")
+            return False, False, ""
+
+        report_built = True
+        rendered = await render_daily_report_card(
+            report,
+            cutoff_time=cutoff_time,
+        )
+        if not await store.transition_daily_report_delivery(claim, "sending"):
+            raise CloudStoreError("日报发送意图未获 Cloud 确认")
+        sending_started = True
+        response = await bot.send_group_msg(
+            group_id=int(group_id),
+            message=MessageSegment.image(rendered.data),
+        )
+        if not await store.transition_daily_report_delivery(
+            claim,
+            "sent",
+            message_id=_daily_report_message_id(response),
+        ):
+            raise CloudStoreError("日报发送完成状态未获 Cloud 确认")
+        return True, True, ""
+    except Exception as error:
+        # sending 前可以安全释放并按 Cloud 退避重领；进入 sending 后消息结果可能
+        # 已不可确认，只能冻结为 uncertain，绝不能自动重复发送。
+        transition = await _transition_daily_report_safely(
+            claim,
+            "uncertain" if sending_started else "release",
+            error=str(error),
+        )
+        retry_at = transition.next_attempt_at if not sending_started else ""
+        if not sending_started and not transition and not retry_at:
+            retry_at = _daily_report_transition_retry_at()
+        logger.warning(
+            f"[猪圈日报] 推送失败: group={group_id} attempt={claim.attempt_count} "
+            f"fallback={'uncertain' if sending_started else 'retry'} error={error}"
+        )
+        return report_built, False, retry_at
+
+
+@scheduler.scheduled_job("cron", hour=23, minute=45, timezone=ROLLPIG_TIMEZONE, id="rollpig_daily_report")
+async def daily_report_job():
     """每晚 23:45~23:55 推送当日猪圈日报（随机延迟 0~10 分钟防风控）。"""
 
-    # 日期必须在随机延迟和逐群查询前固定，避免任务跨过零点后混入次日数据。
-    summary_date = rollpig_date_str()
-    protect_date = (dt.date.fromisoformat(summary_date) + dt.timedelta(days=1)).isoformat()
+    # 日期与截止点必须在随机延迟前固定；所有后端读取都使用同一截止点，
+    # 23:45 后的新抽取和互动只能进入下一日实时功能，不能混入本期日报。
+    report_date = rollpig_date_str()
+    protect_date = (dt.date.fromisoformat(report_date) + dt.timedelta(days=1)).isoformat()
+    cutoff = dt.datetime.combine(
+        dt.date.fromisoformat(report_date),
+        dt.time(23, 45),
+        tzinfo=ROLLPIG_TIMEZONE,
+    )
+    cutoff_at = cutoff.isoformat()
+    cutoff_time = cutoff.strftime("%H:%M")
     delay = random.randint(0, 600)  # 0~10 分钟随机延迟
-    logger.info(f"[每日总结] 定时触发，随机延迟 {delay} 秒后推送")
+    logger.info(f"[猪圈日报] 定时触发，随机延迟 {delay} 秒后推送")
     await asyncio.sleep(delay)
     try:
-        active_groups = await store.get_active_group_ids(summary_date)
+        active_groups = await store.get_active_group_ids(report_date)
         if not active_groups:
-            logger.info("[每日总结] 今日无活跃群，跳过推送")
+            logger.info("[猪圈日报] 今日无活跃群，跳过推送")
             return
 
         # ================================ 控制台开关过滤 ================================ #
@@ -399,57 +763,78 @@ async def daily_summary_job():
             if is_group_rollpig_enabled(group_id)
         ]
         if not enabled_active_groups:
-            logger.info("[每日总结] 今日没有启用 rollpig 的活跃群，跳过推送")
+            logger.info("[猪圈日报] 今日没有启用 rollpig 的活跃群，跳过推送")
             return
 
         # ================================ 日报推送开关过滤 ================================ #
         # 日报支持“默认关闭 + 分群开启”。必须先过滤出真正开启日报的群，
         # 再计算日报与次日保护名单，避免关闭日报的群被定时任务产生副作用。
-        summary_push_groups = [
+        report_push_groups = [
             group_id for group_id in enabled_active_groups
-            if is_daily_summary_enabled(group_id)
+            if is_daily_report_enabled(group_id)
         ]
-        if not summary_push_groups:
-            logger.info("[每日总结] 没有群开启日报推送")
+        if not report_push_groups:
+            logger.info("[猪圈日报] 没有群开启日报推送")
             return
 
-        group_summaries: dict[str, dict] = {}
-        for group_id in summary_push_groups:
-            try:
-                summary = await build_daily_summary(
-                    store,
-                    date_str=summary_date,
-                    group_id=group_id,
-                )
-                protected_ids = (
-                    [summary["most_roasted_id"]]
-                    if summary.get("most_roasted_id") and summary.get("most_roasted_count", 0) >= 2
-                    else []
-                )
-                await store.replace_group_protections(group_id, protected_ids, protect_date)
-            except Exception as error:
-                # 单群数据或云请求异常不能阻断其它群；保护写入失败时也不发送承诺了保护的日报。
-                logger.warning(f"[每日总结] 汇总失败，已跳过该群: group={group_id} error={error}")
-                continue
-            group_summaries[group_id] = summary
-
-        delivery_bots = await resolve_daily_summary_bots(list(group_summaries))
+        delivery_bots = await resolve_daily_report_bots(report_push_groups)
         if not delivery_bots:
-            logger.warning("[每日总结] 无可用 Bot，跳过推送")
+            logger.warning("[猪圈日报] 无可用 Bot，跳过推送")
             return
 
-        for group_id, summary in group_summaries.items():
-            bot = delivery_bots.get(group_id)
-            if bot is None:
-                continue
-            try:
-                text = build_daily_summary_text(summary)
-                await bot.send_group_msg(group_id=int(group_id), message=text)
-            except Exception as error:
-                logger.warning(f"[每日总结] 推送失败: group={group_id} error={error}")
+        report_groups: set[str] = set()
+        sent_groups: set[str] = set()
+        claimed_attempts = 0
 
-        logger.info(f"[每日总结] 推送完成, 成功汇总 {len(group_summaries)}/{len(summary_push_groups)} 个群")
+        # ================================ Cloud 安全重领循环 ================================ #
+        # Claim 响应同时携带“其他实例租约何时到期”；release 响应携带当前群的
+        # 服务端退避时间。这里只按这些明确时间唤醒，不做固定频率空轮询。
+        while delivery_bots:
+            claim_result = _normalize_daily_report_claim_result(
+                await store.claim_daily_report_deliveries(
+                    instance_id=DAILY_REPORT_INSTANCE_ID,
+                    delivery_bots={
+                        group_id: str(bot.self_id)
+                        for group_id, bot in delivery_bots.items()
+                    },
+                    date_str=report_date,
+                    cutoff_at=cutoff_at,
+                )
+            )
+            retry_times = [claim_result.next_claim_at]
+            claimed_attempts += len(claim_result.claims)
+            for claim in claim_result.claims:
+                report_built, sent, retry_at = await _deliver_daily_report_claim(
+                    claim,
+                    delivery_bots=delivery_bots,
+                    protect_date=protect_date,
+                    cutoff_time=cutoff_time,
+                )
+                if report_built:
+                    report_groups.add(claim.group_id)
+                if sent:
+                    sent_groups.add(claim.group_id)
+                if retry_at:
+                    retry_times.append(retry_at)
+
+            retry_delay = _daily_report_retry_delay(report_date, retry_times)
+            if retry_delay is None:
+                break
+            logger.info(f"[猪圈日报] 等待 {retry_delay:.1f} 秒后重新领取未完成日报")
+            await asyncio.sleep(retry_delay)
+
+            # 等待期间 Bot 可能上下线或改变群可见性；重领前重新确认路由，不能沿用
+            # 旧 Bot 对象把恢复任务发往已经断开的连接。
+            delivery_bots = await resolve_daily_report_bots(report_push_groups)
+
+        if claimed_attempts == 0:
+            logger.info("[猪圈日报] 当前群日报已由其他实例完成，或没有可安全领取的任务")
+            return
+        logger.info(
+            f"[猪圈日报] 推送完成, 成功发送 {len(sent_groups)}/{len(report_groups)}，"
+            f"累计领取 {claimed_attempts} 次，候选群 {len(report_push_groups)} 个"
+        )
     except CloudStoreError as error:
-        logger.warning(f"[每日总结] 云端账本暂时不可用，跳过本轮推送: {error}")
+        logger.warning(f"[猪圈日报] 云端账本暂时不可用，跳过本轮推送: {error}")
     except Exception as error:
-        logger.error(f"[每日总结] 任务异常: {error}")
+        logger.error(f"[猪圈日报] 任务异常: {error}")

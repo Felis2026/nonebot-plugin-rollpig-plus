@@ -125,8 +125,8 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertTrue(await _matches(control_handler.cmd_daily_summary_switch, Message("/小猪日报 开启")))
-        self.assertFalse(await _matches(control_handler.cmd_daily_summary_switch, Message("/小猪日报开启")))
+        self.assertTrue(await _matches(control_handler.cmd_daily_report_switch, Message("/小猪日报 开启")))
+        self.assertFalse(await _matches(control_handler.cmd_daily_report_switch, Message("/小猪日报开启")))
 
         # 用户明确要求这三个既有文本参数命令继续兼容黏连写法。
         self.assertTrue(await _matches(roll_handler.cmd_roll, Message("/随机小猪3")))

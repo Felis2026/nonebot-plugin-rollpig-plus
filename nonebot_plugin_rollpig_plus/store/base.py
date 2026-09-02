@@ -7,6 +7,10 @@ from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
     DailyEventQueryResult,
+    DailyReportDeliveryClaim,
+    DailyReportDeliveryClaimResult,
+    DailyReportDeliveryTransitionResult,
+    DailyReportProfileSnapshot,
     DailyRollResult,
     DailyRollSnapshot,
     DrawState,
@@ -75,7 +79,12 @@ class RollpigStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def get_group_rolls(self, group_id: str, date_str: Optional[str] = None) -> dict[str, str]:
+    async def get_group_rolls(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
+    ) -> dict[str, str]:
         raise NotImplementedError
 
     @abstractmethod
@@ -114,6 +123,7 @@ class RollpigStore(ABC):
         date_str: Optional[str] = None,
         group_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> DailyEventQueryResult:
         raise NotImplementedError
 
@@ -122,6 +132,7 @@ class RollpigStore(ABC):
         date_str: Optional[str] = None,
         group_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> list[dict]:
         """兼容原日报调用；需保留失败语义的后端应覆盖此方法，回顾业务读取 available。"""
 
@@ -129,6 +140,7 @@ class RollpigStore(ABC):
             date_str=date_str,
             group_id=group_id,
             user_id=user_id,
+            cutoff_at=cutoff_at,
         )
         return [dict(item) for item in result.items]
 
@@ -147,6 +159,42 @@ class RollpigStore(ABC):
 
     @abstractmethod
     async def is_protected(self, group_id: str, user_id: str, date_str: Optional[str] = None) -> bool:
+        raise NotImplementedError
+
+    # ================================ 猪圈日报投递 ================================ #
+
+    async def get_daily_report_profiles(
+        self,
+        *,
+        group_id: str,
+        date_str: str,
+        cutoff_at: str,
+        user_ids: tuple[str, ...],
+    ) -> tuple[DailyReportProfileSnapshot, ...]:
+        """返回日报排行资料；不提供批量能力的后端可返回空结果并隐藏增强榜单。"""
+
+        return ()
+
+    @abstractmethod
+    async def claim_daily_report_deliveries(
+        self,
+        *,
+        instance_id: str,
+        delivery_bots: dict[str, str],
+        date_str: str,
+        cutoff_at: str,
+    ) -> DailyReportDeliveryClaimResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def transition_daily_report_delivery(
+        self,
+        claim: DailyReportDeliveryClaim,
+        action: str,
+        *,
+        message_id: str = "",
+        error: str = "",
+    ) -> DailyReportDeliveryTransitionResult:
         raise NotImplementedError
 
     @abstractmethod
@@ -237,6 +285,7 @@ class RollpigStore(ABC):
         self,
         group_id: str,
         date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> set[str]:
         raise NotImplementedError
 
