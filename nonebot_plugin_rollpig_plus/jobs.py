@@ -575,6 +575,17 @@ def _daily_report_retry_delay(
     return max(1.0, delay)
 
 
+def _daily_report_deadline_reached(date_str: str) -> bool:
+    """判断指定日报日期是否已越过次日投递硬截止点。"""
+
+    deadline = dt.datetime.combine(
+        dt.date.fromisoformat(date_str) + dt.timedelta(days=1),
+        DAILY_REPORT_RETRY_CUTOFF,
+        tzinfo=ROLLPIG_TIMEZONE,
+    )
+    return dt.datetime.now(ROLLPIG_TIMEZONE) >= deadline
+
+
 def _daily_report_transition_retry_at() -> str:
     """状态迁移响应丢失时短暂再查 Cloud，由服务端最终状态决定能否重领。"""
 
@@ -772,7 +783,23 @@ async def daily_report_job():
             )
             retry_times = [claim_result.next_claim_at]
             claimed_attempts += len(claim_result.claims)
-            for claim in claim_result.claims:
+            deadline_reached = False
+            for index, claim in enumerate(claim_result.claims):
+                if _daily_report_deadline_reached(report_date):
+                    # 同一批 claim 会顺序渲染和发送；一旦到达硬截止点，当前及
+                    # 后续租约都必须主动释放，不能让慢群拖着整批越界投递。
+                    for remaining_claim in claim_result.claims[index:]:
+                        await _transition_daily_report_safely(
+                            remaining_claim,
+                            "release",
+                            error="delivery_deadline_passed",
+                        )
+                    logger.info(
+                        f"[猪圈日报] 已到次日投递截止时间，释放剩余 "
+                        f"{len(claim_result.claims) - index} 个领取任务"
+                    )
+                    deadline_reached = True
+                    break
                 report_built, sent, retry_at = await _deliver_daily_report_claim(
                     claim,
                     delivery_bots=delivery_bots,
@@ -786,6 +813,8 @@ async def daily_report_job():
                 if retry_at:
                     retry_times.append(retry_at)
 
+            if deadline_reached:
+                break
             retry_delay = _daily_report_retry_delay(report_date, retry_times)
             if retry_delay is None:
                 break

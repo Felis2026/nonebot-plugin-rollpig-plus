@@ -415,6 +415,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
             patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
             patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
             patch.object(
                 jobs,
                 "resolve_daily_report_bots",
@@ -463,6 +464,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
             patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
             patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
             patch.object(jobs, "resolve_daily_report_bots", new=AsyncMock(return_value={"100": bot})),
             patch.object(jobs, "build_group_daily_report", new=AsyncMock(side_effect=RuntimeError("build failed"))),
         ):
@@ -497,6 +499,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
             patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
             patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
             patch.object(jobs, "resolve_daily_report_bots", new=AsyncMock(return_value={"100": bot})),
             patch.object(jobs, "build_group_daily_report", new=AsyncMock(return_value=SimpleNamespace(has_activity=True))),
             patch.object(jobs, "render_daily_report_card", new=AsyncMock(return_value=SimpleNamespace(data=b"image"))),
@@ -583,6 +586,76 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_batch_releases_remaining_claims_when_deadline_is_reached(self) -> None:
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(return_value={"message_id": 123}),
+        )
+        claims = tuple(
+            DailyReportDeliveryClaim(
+                "2026-08-26",
+                group_id,
+                "bot-a",
+                "2026-08-26T23:45:00+08:00",
+                f"claim-{group_id}",
+            )
+            for group_id in ("100", "200", "300")
+        )
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"100", "200", "300"}),
+            claim_daily_report_deliveries=AsyncMock(
+                return_value=DailyReportDeliveryClaimResult(claims=claims)
+            ),
+            transition_daily_report_delivery=AsyncMock(return_value=True),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "rollpig_date_str", return_value="2026-08-26"),
+            patch.object(jobs.random, "randint", return_value=0),
+            patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(
+                jobs,
+                "_daily_report_deadline_reached",
+                side_effect=[False, True],
+            ),
+            patch.object(
+                jobs,
+                "resolve_daily_report_bots",
+                new=AsyncMock(return_value={group_id: bot for group_id in ("100", "200", "300")}),
+            ),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ) as build_report,
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            await jobs.daily_report_job()
+
+        build_report.assert_awaited_once()
+        bot.send_group_msg.assert_awaited_once()
+        transitions = mocked_store.transition_daily_report_delivery.await_args_list
+        self.assertEqual(
+            [(call.args[0].group_id, call.args[1]) for call in transitions],
+            [
+                ("100", "sending"),
+                ("100", "sent"),
+                ("200", "release"),
+                ("300", "release"),
+            ],
+        )
+        self.assertEqual(
+            [call.kwargs.get("error") for call in transitions[2:]],
+            ["delivery_deadline_passed", "delivery_deadline_passed"],
+        )
+
     async def test_failure_before_sending_is_reclaimed_at_cloud_retry_time(self) -> None:
         bot = SimpleNamespace(
             self_id="bot-a",
@@ -634,6 +707,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(jobs, "_daily_report_retry_delay", side_effect=[1.0, None]),
             patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
             patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
             patch.object(
                 jobs,
                 "resolve_daily_report_bots",
