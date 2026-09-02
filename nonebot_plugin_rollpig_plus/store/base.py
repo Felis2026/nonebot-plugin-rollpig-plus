@@ -175,7 +175,6 @@ class RollpigStore(ABC):
 
         return ()
 
-    @abstractmethod
     async def claim_daily_report_deliveries(
         self,
         *,
@@ -184,9 +183,10 @@ class RollpigStore(ABC):
         date_str: str,
         cutoff_at: str,
     ) -> DailyReportDeliveryClaimResult:
-        raise NotImplementedError
+        """领取待投递日报；旧后端默认不参与投递，保持升级兼容。"""
 
-    @abstractmethod
+        return DailyReportDeliveryClaimResult()
+
     async def transition_daily_report_delivery(
         self,
         claim: DailyReportDeliveryClaim,
@@ -195,7 +195,9 @@ class RollpigStore(ABC):
         message_id: str = "",
         error: str = "",
     ) -> DailyReportDeliveryTransitionResult:
-        raise NotImplementedError
+        """迁移日报投递状态；未实现日报能力的旧后端始终拒绝迁移。"""
+
+        return DailyReportDeliveryTransitionResult(ok=False)
 
     @abstractmethod
     async def prune_history(self, days_to_keep: int = 14) -> None:

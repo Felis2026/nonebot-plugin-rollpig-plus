@@ -548,6 +548,8 @@ def _parse_daily_report_retry_at(raw_value: str) -> dt.datetime | None:
 def _daily_report_retry_delay(
     date_str: str,
     retry_times: list[str],
+    *,
+    now: dt.datetime | None = None,
 ) -> float | None:
     """选择服务端允许的最早重领时间，并硬性限制在次日 00:10 以前。"""
 
@@ -556,6 +558,9 @@ def _daily_report_retry_delay(
         DAILY_REPORT_RETRY_CUTOFF,
         tzinfo=ROLLPIG_TIMEZONE,
     )
+    current_time = now or dt.datetime.now(ROLLPIG_TIMEZONE)
+    if current_time >= deadline:
+        return None
     parsed_times = [
         parsed
         for raw_value in retry_times
@@ -564,7 +569,7 @@ def _daily_report_retry_delay(
     ]
     if not parsed_times:
         return None
-    delay = (min(parsed_times) - dt.datetime.now(ROLLPIG_TIMEZONE)).total_seconds()
+    delay = (min(parsed_times) - current_time).total_seconds()
     # 到点后仍未领取通常只是客户端与 Cloud 存在亚秒级时钟差；保留一秒下限，
     # 避免异常响应造成定时任务原地空转。
     return max(1.0, delay)
@@ -627,6 +632,20 @@ async def _deliver_daily_report_claim(
             retry_at = _daily_report_transition_retry_at()
         return False, False, retry_at
 
+    # Claim 与实际处理之间可能隔着前序群渲染或 Cloud 退避；必须在任何日报
+    # 聚合及保护名单写入前重读开关，避免管理员关闭后仍产生群内副作用。
+    if not is_group_rollpig_enabled(group_id) or not is_daily_report_enabled(group_id):
+        transition = await _transition_daily_report_safely(
+            claim,
+            "skip",
+            error="daily_report_disabled_before_delivery",
+        )
+        retry_at = transition.next_attempt_at
+        if not transition and not retry_at:
+            retry_at = _daily_report_transition_retry_at()
+        logger.info(f"[猪圈日报] 群开关已关闭，跳过已领取日报: group={group_id}")
+        return False, False, retry_at
+
     sending_started = False
     report_built = False
     try:
@@ -683,7 +702,7 @@ async def _deliver_daily_report_claim(
 
 @scheduler.scheduled_job("cron", hour=23, minute=45, timezone=ROLLPIG_TIMEZONE, id="rollpig_daily_report")
 async def daily_report_job():
-    """每晚 23:45~23:55 推送当日猪圈日报（随机延迟 0~10 分钟防风控）。"""
+    """每晚 23:45 起推送日报，失败重试最晚持续到次日 00:10。"""
 
     # 日期与截止点必须在随机延迟前固定；所有后端读取都使用同一截止点，
     # 23:45 后的新抽取和互动只能进入下一日实时功能，不能混入本期日报。

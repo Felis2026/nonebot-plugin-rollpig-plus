@@ -632,6 +632,39 @@ class DailyReportRankingTests(unittest.TestCase):
 
 
 class DailyReportAssemblyTests(unittest.TestCase):
+    def test_live_profile_name_wins_over_event_snapshots(self) -> None:
+        report = build_daily_report(
+            date_str=DATE,
+            group_id=GROUP,
+            group_rolls={"a": "pig-a"},
+            raw_events=[
+                event(
+                    "older",
+                    "success",
+                    "a",
+                    "b",
+                    8,
+                    attacker_name="旧名",
+                    target_name="旧目标名",
+                ),
+                event(
+                    "newer",
+                    "success",
+                    "a",
+                    "b",
+                    9,
+                    attacker_name="较新旧名",
+                    target_name="新目标名",
+                ),
+            ],
+            user_profiles={
+                "a": DailyUserReportProfile(user_id="a", display_name="当前群名片"),
+            },
+        )
+
+        self.assertEqual(report.display_names["a"], "当前群名片")
+        self.assertEqual(report.display_names["b"], "新目标名")
+
     def test_protections_are_passed_through_without_derivation(self) -> None:
         protection = ProtectionReportItem(
             user_id="b",

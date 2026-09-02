@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ if get_plugin("nonebot_plugin_rollpig_plus") is None:
 from nonebot_plugin_rollpig_plus import jobs
 from nonebot_plugin_rollpig_plus import data_manager as data_manager_module
 from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
+from nonebot_plugin_rollpig_plus.store.base import RollpigStore
 from nonebot_plugin_rollpig_plus.store.cloud import (
     CloudDailyReportUnsupportedError,
     CloudStore,
@@ -238,6 +240,32 @@ class LocalDailyReportProfileTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_base_store_defaults_keep_legacy_backends_compatible(self) -> None:
+        self.assertNotIn("claim_daily_report_deliveries", RollpigStore.__abstractmethods__)
+        self.assertNotIn("transition_daily_report_delivery", RollpigStore.__abstractmethods__)
+
+        claim_result = await RollpigStore.claim_daily_report_deliveries(
+            object(),
+            instance_id="instance-a",
+            delivery_bots={"100": "bot-a"},
+            date_str="2026-08-26",
+            cutoff_at="2026-08-26T23:45:00+08:00",
+        )
+        transition = await RollpigStore.transition_daily_report_delivery(
+            object(),
+            DailyReportDeliveryClaim(
+                "2026-08-26",
+                "100",
+                "bot-a",
+                "2026-08-26T23:45:00+08:00",
+                "claim-a",
+            ),
+            "sending",
+        )
+
+        self.assertEqual(claim_result, DailyReportDeliveryClaimResult())
+        self.assertFalse(transition)
+
     async def test_group_report_writes_protection_before_returning_coupon(self) -> None:
         summary_store = SimpleNamespace(
             get_group_rolls=AsyncMock(return_value={"a": "pig", "b": "pig"}),
@@ -478,6 +506,81 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call.args[1] for call in mocked_store.transition_daily_report_delivery.await_args_list],
             ["sending", "uncertain"],
+        )
+
+    async def test_disabled_group_is_rechecked_before_claim_side_effects(self) -> None:
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        bot = SimpleNamespace(self_id="bot-a", send_group_msg=AsyncMock())
+
+        for rollpig_enabled, report_enabled in ((False, True), (True, False)):
+            with self.subTest(
+                rollpig_enabled=rollpig_enabled,
+                report_enabled=report_enabled,
+            ):
+                mocked_store = SimpleNamespace(
+                    transition_daily_report_delivery=AsyncMock(
+                        return_value=DailyReportDeliveryTransitionResult(
+                            ok=True,
+                            status="skipped",
+                        )
+                    )
+                )
+                with (
+                    patch.object(jobs, "store", mocked_store),
+                    patch.object(
+                        jobs,
+                        "is_group_rollpig_enabled",
+                        return_value=rollpig_enabled,
+                    ),
+                    patch.object(
+                        jobs,
+                        "is_daily_report_enabled",
+                        return_value=report_enabled,
+                    ),
+                    patch.object(
+                        jobs,
+                        "build_group_daily_report",
+                        new=AsyncMock(),
+                    ) as build_report,
+                ):
+                    result = await jobs._deliver_daily_report_claim(
+                        claim,
+                        delivery_bots={"100": bot},
+                        protect_date="2026-08-27",
+                        cutoff_time="23:45",
+                    )
+
+                self.assertEqual(result, (False, False, ""))
+                build_report.assert_not_awaited()
+                bot.send_group_msg.assert_not_awaited()
+                self.assertEqual(
+                    mocked_store.transition_daily_report_delivery.await_args.args[1],
+                    "skip",
+                )
+
+    def test_retry_stops_when_current_time_reaches_deadline(self) -> None:
+        date_str = "2026-08-26"
+        deadline = dt.datetime(
+            2026,
+            8,
+            27,
+            0,
+            10,
+            tzinfo=jobs.ROLLPIG_TIMEZONE,
+        )
+
+        self.assertIsNone(
+            jobs._daily_report_retry_delay(
+                date_str,
+                ["2026-08-26T16:09:00+00:00"],
+                now=deadline,
+            )
         )
 
     async def test_failure_before_sending_is_reclaimed_at_cloud_retry_time(self) -> None:

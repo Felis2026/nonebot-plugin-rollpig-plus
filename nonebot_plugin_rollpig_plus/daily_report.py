@@ -352,16 +352,19 @@ def _collect_display_names(
         for user_id, profile in profiles.items()
         if user_id and profile.display_name
     }
+    # 群成员接口返回的是当前名片，优先级高于事件产生时保存的历史姓名；
+    # 没有实时姓名的用户仍按事件顺序更新，最终保留当天最新一次快照。
+    live_name_user_ids = frozenset(names)
     for event in events:
         for user_id, display_name in (
             (event.attacker_id, event.attacker_name),
             (event.target_id, event.target_name),
             (event.backfire_victim_id, event.backfire_victim_name),
         ):
-            if user_id and display_name:
+            if user_id and display_name and user_id not in live_name_user_ids:
                 names[user_id] = display_name
         for user_id, display_name in zip(event.participant_ids, event.participant_names):
-            if user_id and display_name:
+            if user_id and display_name and user_id not in live_name_user_ids:
                 names[user_id] = display_name
     return names
 
