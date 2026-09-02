@@ -31,6 +31,7 @@ SOURCE_LOCAL = roast_manager_module.SOURCE_LOCAL
 SOURCE_SHARED = roast_manager_module.SOURCE_SHARED
 RoastManager = roast_manager_module.RoastManager
 _roast_text_identity = roast_manager_module._roast_text_identity
+_extract_origin_feature = roast_manager_module._extract_origin_feature
 
 
 class SharedRoastLibraryTests(unittest.IsolatedAsyncioTestCase):
@@ -50,6 +51,18 @@ class SharedRoastLibraryTests(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8",
             newline="\n",
         )
+
+    def test_ai_feature_falls_back_when_overlay_omits_optional_text(self) -> None:
+        self.assertEqual(
+            _extract_origin_feature({"name": "短名猪", "description": "短描述", "analysis": "详细分析"}),
+            "短描述",
+        )
+        self.assertEqual(
+            _extract_origin_feature({"name": "分析猪", "description": "这是一段超过十五个字的描述字段需要改走分析", "analysis": "分析字段可用"}),
+            "分析字段可用",
+        )
+        self.assertEqual(_extract_origin_feature({"name": "只有名字的猪"}), "只有名字的猪")
+        self.assertEqual(_extract_origin_feature({}), "一只普通小猪")
 
     def _write_remote(
         self,

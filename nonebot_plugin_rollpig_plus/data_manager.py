@@ -15,6 +15,7 @@ from .runtime import rollpig_date_str, rollpig_today, resolve_roast_cooldown_sec
 from .store.models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyReportProfileSnapshot,
     DailyRollResult,
     DailyRollSnapshot,
     DrawState,
@@ -28,6 +29,7 @@ from .store.models import (
     RoastReservationParticipant,
     RoastReservationPrepareResult,
     UnrolledRoastAttemptResult,
+    expert_level_from_copies,
     roast_refill_threshold,
 )
 
@@ -110,6 +112,12 @@ def _next_charge_seconds(charges: int, updated_ts: float, now: float, cooldown: 
 
 DATA_FILE = store.get_plugin_data_file("pig_data.json")
 DATA_BACKUP_COUNT = 2
+DATA_BACKUP_MIN_INTERVAL_SECONDS = 60.0
+DATA_BACKUP_MAX_WRITES = 10
+
+
+class LocalStoreUnavailableError(RuntimeError):
+    """本地账本无法安全写入；调用入口应转换为用户可读提示。"""
 
 
 class PigDataManager:
@@ -121,6 +129,7 @@ class PigDataManager:
                    旧版存完整 pig dict，_migrate() 会自动转换
     - daily_roll_snapshots: {date: {user_id: snapshot}} ← 抽取时成长与资源快照
     - group_rolls: {date: {group_id: {user_id: pig_id}}} ← 群内“今日已抽/已显形”记录
+    - group_roll_seen_at: {date: {group_id: {user_id: ISO时间}}} ← 日报固定截止快照
     - collection : {user_id: [pig_id, ...]}   ← 永久保留，图鉴数据
     - pig_progress: {user_id: {pig_id: {copies, first_obtained_at}}} ← P1A 抽到次数/专家等级
     - draw_state : {user_id: {duplicate_streak}} ← P1A 连续重复次数，用于伪保底
@@ -130,6 +139,7 @@ class PigDataManager:
     - unrolled_roast_attempts: {date: {user_id: count}} ← 未抽猪先烤的每日违规次数
     - roast_reservations: {reservation_id: reservation} ← 延迟到目标抽猪后结算的群预约
     - group_daily_active_users: {date: {group_id: [user_id, ...]}} ← 群日活玩家
+    - group_daily_active_at: {date: {group_id: {user_id: ISO时间}}} ← 群日活首次登记时间
     - roast_refill_requests: {request_id: request} ← 烤箱补货投票及结果
 
     写操作通过 asyncio.Lock 串行化，文件使用原子替换（.tmp → rename）防止 JSON 损坏。
@@ -140,7 +150,10 @@ class PigDataManager:
         self._lock = asyncio.Lock()
         self._load_failed = False
         self._skip_backup_rotation_once = False
+        self._writes_since_backup_rotation = 0
+        self._last_backup_rotation_monotonic = time.monotonic()
         self.data = self._load()
+        self._restore_backup_rotation_clock()
 
     # ---- 加载与迁移 ----
 
@@ -149,6 +162,7 @@ class PigDataManager:
             "history": {},
             "daily_roll_snapshots": {},
             "group_rolls": {},
+            "group_roll_seen_at": {},
             "collection": {},
             "pig_progress": {},
             "draw_state": {},
@@ -159,6 +173,7 @@ class PigDataManager:
             "unrolled_roast_attempts": {},
             "roast_reservations": {},
             "group_daily_active_users": {},
+            "group_daily_active_at": {},
             "roast_refill_requests": {},
         }
 
@@ -200,6 +215,7 @@ class PigDataManager:
             "history",
             "daily_roll_snapshots",
             "group_rolls",
+            "group_roll_seen_at",
             "collection",
             "pig_progress",
             "draw_state",
@@ -209,6 +225,7 @@ class PigDataManager:
             "unrolled_roast_attempts",
             "roast_reservations",
             "group_daily_active_users",
+            "group_daily_active_at",
             "roast_refill_requests",
         ):
             if not isinstance(data.get(key), dict):
@@ -424,6 +441,13 @@ class PigDataManager:
         updated = current | {str(user_id) for user_id in user_ids if user_id}
         if updated == current:
             return False
+        active_at = self.data.setdefault("group_daily_active_at", {}).setdefault(
+            date_str,
+            {},
+        ).setdefault(str(group_id), {})
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        for user_id in updated - current:
+            active_at.setdefault(user_id, now_iso)
         self.data["group_daily_active_users"][date_str][str(group_id)] = sorted(updated)
         return True
 
@@ -569,20 +593,50 @@ class PigDataManager:
 
     def _ensure_writable(self):
         if self._load_failed:
-            raise RuntimeError("pig_data.json 读取失败，已拒绝写入以避免覆盖旧数据。请先修复数据文件或恢复备份。")
+            raise LocalStoreUnavailableError(
+                "pig_data.json 读取失败，已拒绝写入以避免覆盖旧数据。请先修复数据文件或恢复备份。"
+            )
 
     def _backup_paths(self) -> list[Path]:
         return [self.file.with_name(f"{self.file.name}.bak{'' if index == 0 else f'.{index}'}") for index in range(DATA_BACKUP_COUNT + 1)]
 
+    def _restore_backup_rotation_clock(self) -> None:
+        """按现有主备份时间恢复降频窗口，避免重启反复把轮换时间清零。"""
+
+        primary_backup = self._backup_paths()[0]
+        if not primary_backup.exists():
+            return
+        try:
+            backup_age = max(0.0, time.time() - primary_backup.stat().st_mtime)
+        except OSError:
+            return
+        self._last_backup_rotation_monotonic -= min(
+            backup_age,
+            DATA_BACKUP_MIN_INTERVAL_SECONDS,
+        )
+
     def _rotate_backups(self) -> None:
-        """每次成功写入前保留滚动备份；从损坏文件恢复时跳过一次，避免把坏主文件覆盖好备份。"""
+        """按时间或写入次数轮换备份；主文件本身仍在每次业务变更时原子落盘。"""
+
         if self._skip_backup_rotation_once:
+            # 从备份恢复时主文件仍是坏数据，绝不能把它推进现有好备份链。
             self._skip_backup_rotation_once = False
+            self._writes_since_backup_rotation = 0
+            self._last_backup_rotation_monotonic = time.monotonic()
             return
         if not self.file.exists():
             return
 
         backup_paths = self._backup_paths()
+        self._writes_since_backup_rotation += 1
+        elapsed = time.monotonic() - self._last_backup_rotation_monotonic
+        if (
+            backup_paths[0].exists()
+            and self._writes_since_backup_rotation < DATA_BACKUP_MAX_WRITES
+            and elapsed < DATA_BACKUP_MIN_INTERVAL_SECONDS
+        ):
+            return
+
         for index in range(len(backup_paths) - 1, -1, -1):
             source = self.file if index == 0 else backup_paths[index - 1]
             target = backup_paths[index]
@@ -591,6 +645,8 @@ class PigDataManager:
             if target.exists():
                 target.unlink()
             shutil.copy2(source, target)
+        self._writes_since_backup_rotation = 0
+        self._last_backup_rotation_monotonic = time.monotonic()
 
     def _preserve_broken_file(self) -> None:
         """把无法读取的主文件另存为 broken 备份，方便人工排查和恢复。"""
@@ -740,9 +796,11 @@ class PigDataManager:
             copies_after_roll=result.copies,
             collection_size_after_roll=collection_size,
         )
-        self.data.setdefault("daily_roll_snapshots", {}).setdefault(date_str, {})[user_id] = (
-            self._snapshot_to_raw(snapshot)
-        )
+        raw_snapshot = self._snapshot_to_raw(snapshot)
+        # Local 没有 DailyRoll 数据库行，必须在首次创建时单独保存时间，日报才能
+        # 区分截止点前后的抽取；资源补全只能继承这个时间，不能重新生成。
+        raw_snapshot["created_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.data.setdefault("daily_roll_snapshots", {}).setdefault(date_str, {})[user_id] = raw_snapshot
         return replace(result, snapshot=snapshot)
 
     async def complete_daily_roll_snapshot(
@@ -796,7 +854,11 @@ class PigDataManager:
                     raise ValueError("每日抽取资源快照已由首次客户端写入")
                 return True
 
-            day_snapshots[normalized_user_id] = self._snapshot_to_raw(snapshot)
+            serialized = self._snapshot_to_raw(snapshot)
+            raw_existing = day_snapshots.get(normalized_user_id)
+            if isinstance(raw_existing, dict) and raw_existing.get("created_at"):
+                serialized["created_at"] = raw_existing["created_at"]
+            day_snapshots[normalized_user_id] = serialized
             await self._atomic_save()
             return True
 
@@ -809,6 +871,15 @@ class PigDataManager:
         group_roll_map = day_rolls.setdefault(group_id, {})
         changed = group_roll_map.get(user_id) != pig_id
         group_roll_map[user_id] = pig_id
+        if changed:
+            seen_at = self.data.setdefault("group_roll_seen_at", {}).setdefault(
+                date_str,
+                {},
+            ).setdefault(group_id, {})
+            seen_at.setdefault(
+                user_id,
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            )
         return self._mark_group_active_users_locked(date_str, group_id, [user_id]) or changed
 
     # ================================ P1A抽猪成长状态 ================================ #
@@ -1304,9 +1375,26 @@ class PigDataManager:
             if self._mark_group_active_users_locked(target_date, str(group_id), user_ids):
                 await self._atomic_save()
 
-    def get_group_active_user_ids(self, group_id: str, date_str: Optional[str] = None) -> set[str]:
+    def get_group_active_user_ids(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
+    ) -> set[str]:
         target_date = date_str or rollpig_date_str()
-        return set(self._group_active_users_locked(target_date, str(group_id)))
+        users = set(self._group_active_users_locked(target_date, str(group_id)))
+        cutoff = _parse_utc_datetime(cutoff_at)
+        if cutoff is None:
+            return users
+        active_at = self.data.get("group_daily_active_at", {}).get(
+            target_date,
+            {},
+        ).get(str(group_id), {})
+        return {
+            user_id
+            for user_id in users
+            if _timestamp_not_after_cutoff(active_at.get(user_id), cutoff)
+        }
 
     async def prepare_group_roast_refill(
         self,
@@ -1568,6 +1656,11 @@ class PigDataManager:
             for d in group_dates_to_del:
                 del group_rolls[d]
 
+            group_roll_seen_at = self.data.get("group_roll_seen_at", {})
+            for d in list(group_roll_seen_at):
+                if _is_valid_date(d) and (today - datetime.date.fromisoformat(d)).days > days_to_keep:
+                    del group_roll_seen_at[d]
+
             active_users = self.data.get("group_daily_active_users", {})
             active_dates_to_del = [
                 d for d in active_users
@@ -1576,6 +1669,11 @@ class PigDataManager:
             ]
             for d in active_dates_to_del:
                 del active_users[d]
+
+            group_daily_active_at = self.data.get("group_daily_active_at", {})
+            for d in list(group_daily_active_at):
+                if _is_valid_date(d) and (today - datetime.date.fromisoformat(d)).days > days_to_keep:
+                    del group_daily_active_at[d]
 
             refill_requests = self.data.get("roast_refill_requests", {})
             refill_ids_to_del = [
@@ -1834,12 +1932,20 @@ class PigDataManager:
         date_str: Optional[str] = None,
         group_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> list:
         """获取指定日期（默认今天）的所有烤群友事件。"""
         if not date_str:
             date_str = rollpig_date_str()
         events = self.data.get("daily_events", {}).get(date_str, [])
         result = [dict(event) for event in events if isinstance(event, dict)]
+        cutoff = _parse_utc_datetime(cutoff_at)
+        if cutoff is not None:
+            result = [
+                event
+                for event in result
+                if _timestamp_not_after_cutoff(event.get("created_at"), cutoff)
+            ]
         if group_id:
             result = [event for event in result if str(event.get("group_id") or "") == str(group_id)]
         if user_id:
@@ -1903,11 +2009,251 @@ class PigDataManager:
             roasted_7d=self.count_success_roasted(user_id, days=7),
         )
 
-    def get_group_rolls(self, group_id: str, date_str: Optional[str] = None) -> dict:
+    # ================================ 日报本地资料快照 ================================ #
+
+    def _daily_roll_created_at_locked(self, date_str: str, user_id: str) -> str:
+        """读取本地抽取时间；升级前快照回退到最早的群内显形时间。"""
+
+        raw = self.data.get("daily_roll_snapshots", {}).get(date_str, {}).get(user_id)
+        if isinstance(raw, dict) and raw.get("created_at"):
+            return str(raw["created_at"])
+
+        timestamps: list[tuple[datetime.datetime, str]] = []
+        day_seen = self.data.get("group_roll_seen_at", {}).get(date_str, {})
+        if isinstance(day_seen, dict):
+            for group_seen in day_seen.values():
+                if not isinstance(group_seen, dict):
+                    continue
+                value = str(group_seen.get(user_id) or "")
+                parsed = _parse_utc_datetime(value)
+                if parsed is not None:
+                    timestamps.append((parsed, value))
+        return min(timestamps, default=(None, ""), key=lambda item: item[0])[1]
+
+    def _daily_roll_not_after_cutoff_locked(
+        self,
+        date_str: str,
+        user_id: str,
+        *,
+        report_date: datetime.date,
+        cutoff: datetime.datetime,
+    ) -> bool:
+        """判断一条用户全局抽取是否属于本期日报快照。"""
+
+        if not _is_valid_date(date_str):
+            return False
+        roll_date = datetime.date.fromisoformat(date_str)
+        if roll_date != report_date:
+            return roll_date < report_date
+        created_at = self._daily_roll_created_at_locked(date_str, user_id)
+        return _timestamp_not_after_cutoff(created_at, cutoff)
+
+    def _copies_at_cutoff_locked(
+        self,
+        user_id: str,
+        pig_id: str,
+        *,
+        report_date: datetime.date,
+        cutoff: datetime.datetime,
+    ) -> int:
+        """利用截止点后的首次 previous_copies 还原当时的累计抽取数。"""
+
+        raw_progress = self.data.get("pig_progress", {}).get(user_id, {})
+        raw_item = raw_progress.get(pig_id, {}) if isinstance(raw_progress, dict) else {}
+        current_copies = _safe_int(raw_item.get("copies"), 0) if isinstance(raw_item, dict) else 0
+        future_previous: list[int] = []
+        for date_str, day_snapshots in self.data.get("daily_roll_snapshots", {}).items():
+            if not isinstance(day_snapshots, dict):
+                continue
+            raw = day_snapshots.get(user_id)
+            if not isinstance(raw, dict) or str(raw.get("pig_id") or "") != pig_id:
+                continue
+            if self._daily_roll_not_after_cutoff_locked(
+                str(date_str),
+                user_id,
+                report_date=report_date,
+                cutoff=cutoff,
+            ):
+                continue
+            previous_copies = _optional_nonnegative_int(raw.get("previous_copies"))
+            if previous_copies is not None:
+                future_previous.append(previous_copies)
+        return min(future_previous, default=current_copies)
+
+    def _build_daily_report_profiles_locked(
+        self,
+        *,
+        date_str: str,
+        cutoff_at: str,
+        user_ids: tuple[str, ...],
+    ) -> tuple[DailyReportProfileSnapshot, ...]:
+        """从同一份锁定数据构建整群资料，过程中不重复扫描事件账本。"""
+
+        cutoff = _parse_utc_datetime(cutoff_at)
+        if cutoff is None or not _is_valid_date(date_str):
+            raise ValueError("日报日期或截止时间无效")
+        report_date = datetime.date.fromisoformat(date_str)
+        history = self.data.get("history", {})
+        snapshots = self.data.get("daily_roll_snapshots", {})
+        progress_by_user = self.data.get("pig_progress", {})
+        collection_by_user = self.data.get("collection", {})
+        start_date = report_date - datetime.timedelta(days=13)
+        result: list[DailyReportProfileSnapshot] = []
+
+        for user_id in dict.fromkeys(str(item) for item in user_ids if item):
+            raw_progress = progress_by_user.get(user_id, {})
+            raw_progress = raw_progress if isinstance(raw_progress, dict) else {}
+            raw_collection = collection_by_user.get(user_id, [])
+            catalog_ids = (
+                {str(pig_id) for pig_id in raw_collection}
+                if isinstance(raw_collection, list)
+                else set()
+            )
+            catalog_ids.update(str(pig_id) for pig_id in raw_progress)
+
+            visible_catalog_ids: set[str] = set()
+            obtained_times: list[tuple[datetime.datetime, str]] = []
+            for pig_id in catalog_ids:
+                raw_item = raw_progress.get(pig_id, {})
+                obtained_at = (
+                    str(raw_item.get("first_obtained_at") or "")
+                    if isinstance(raw_item, dict)
+                    else ""
+                )
+                parsed_obtained_at = _parse_utc_datetime(obtained_at)
+                if parsed_obtained_at is not None and parsed_obtained_at > cutoff:
+                    continue
+                visible_catalog_ids.add(pig_id)
+                if parsed_obtained_at is not None:
+                    obtained_times.append((parsed_obtained_at, obtained_at))
+
+            day_history = history.get(date_str, {}) if isinstance(history, dict) else {}
+            daily_pig_id = (
+                str(day_history.get(user_id) or "")
+                if isinstance(day_history, dict)
+                else ""
+            )
+            daily_visible = bool(daily_pig_id) and self._daily_roll_not_after_cutoff_locked(
+                date_str,
+                user_id,
+                report_date=report_date,
+                cutoff=cutoff,
+            )
+            raw_daily = (
+                snapshots.get(date_str, {}).get(user_id)
+                if isinstance(snapshots, dict)
+                and isinstance(snapshots.get(date_str), dict)
+                else None
+            )
+            daily_copies = (
+                _optional_nonnegative_int(raw_daily.get("copies_after_roll"))
+                if daily_visible and isinstance(raw_daily, dict)
+                else None
+            )
+            daily_achieved_at = (
+                self._daily_roll_created_at_locked(date_str, user_id)
+                if daily_visible
+                else ""
+            )
+
+            recent_pig_id = ""
+            if isinstance(history, dict):
+                recent_dates = sorted(
+                    (str(item) for item in history if _is_valid_date(str(item))),
+                    reverse=True,
+                )
+                for recent_date in recent_dates:
+                    recent_day = datetime.date.fromisoformat(recent_date)
+                    if not start_date <= recent_day <= report_date:
+                        continue
+                    rows = history.get(recent_date)
+                    candidate = str(rows.get(user_id) or "") if isinstance(rows, dict) else ""
+                    if candidate and self._daily_roll_not_after_cutoff_locked(
+                        recent_date,
+                        user_id,
+                        report_date=report_date,
+                        cutoff=cutoff,
+                    ):
+                        recent_pig_id = candidate
+                        break
+
+            recent_copies = (
+                self._copies_at_cutoff_locked(
+                    user_id,
+                    recent_pig_id,
+                    report_date=report_date,
+                    cutoff=cutoff,
+                )
+                if recent_pig_id
+                else 0
+            )
+            result.append(
+                DailyReportProfileSnapshot(
+                    user_id=user_id,
+                    daily_pig_id=daily_pig_id if daily_visible else "",
+                    daily_ex_level=(
+                        expert_level_from_copies(daily_copies)
+                        if daily_copies is not None
+                        else None
+                    ),
+                    daily_achieved_at=daily_achieved_at,
+                    catalog_count=len(visible_catalog_ids),
+                    catalog_achieved_at=max(
+                        obtained_times,
+                        default=(None, ""),
+                        key=lambda item: item[0],
+                    )[1],
+                    recent_pig_id=recent_pig_id,
+                    recent_ex_level=(
+                        expert_level_from_copies(recent_copies)
+                        if recent_pig_id
+                        else None
+                    ),
+                )
+            )
+        return tuple(result)
+
+    async def get_daily_report_profiles(
+        self,
+        *,
+        date_str: str,
+        cutoff_at: str,
+        user_ids: tuple[str, ...],
+    ) -> tuple[DailyReportProfileSnapshot, ...]:
+        """锁定本地账本后在线程中一次性生成日报排行快照。"""
+
+        # 所有本地写入都遵循同一把 asyncio.Lock。持锁期间工作线程只读取 data，
+        # 既能获得一致快照，也不会占用 NoneBot 的事件循环执行聚合。
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._build_daily_report_profiles_locked,
+                date_str=date_str,
+                cutoff_at=cutoff_at,
+                user_ids=user_ids,
+            )
+
+    def get_group_rolls(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
+    ) -> dict:
         """获取指定群在某天登记过的今日形态。"""
         if not date_str:
             date_str = rollpig_date_str()
-        return dict(self.data.get("group_rolls", {}).get(date_str, {}).get(group_id, {}))
+        rolls = dict(self.data.get("group_rolls", {}).get(date_str, {}).get(group_id, {}))
+        cutoff = _parse_utc_datetime(cutoff_at)
+        if cutoff is None:
+            return rolls
+        seen_at = self.data.get("group_roll_seen_at", {}).get(
+            date_str,
+            {},
+        ).get(group_id, {})
+        return {
+            user_id: pig_id
+            for user_id, pig_id in rolls.items()
+            if _timestamp_not_after_cutoff(seen_at.get(user_id), cutoff)
+        }
 
     def get_active_group_ids(self, date_str: Optional[str] = None) -> set[str]:
         """获取指定日期内有抽猪或烧烤活动的群号集合。"""
@@ -1925,104 +2271,6 @@ class PigDataManager:
             if group_id
         }
         return event_groups | roll_groups
-
-    def get_daily_summary(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> dict:
-        """
-        汇总指定日期的烤群友数据，返回:
-        {
-            "total": int,
-            "most_roasted_id": str | None,      # 被烤最多的 UID
-            "most_roasted_name": str,
-            "most_roasted_count": int,
-            "most_active_id": str | None,        # 烤人最多的 UID
-            "most_active_name": str,
-            "most_active_count": int,
-            "escape_king_id": str | None,        # 逃脱最多的 UID
-            "escape_king_name": str,
-            "escape_king_count": int,
-            "backfire_king_id": str | None,      # 反噬最多的 UID
-            "backfire_king_name": str,
-            "backfire_king_count": int,
-        }
-        """
-        roll_stats = self._get_roll_stats(date_str, group_id=group_id)
-        events = self.get_daily_events(date_str, group_id=group_id)
-        if not events and roll_stats.get("roll_count", 0) == 0:
-            return {"total": 0, **roll_stats}
-
-        from collections import Counter
-        roasted_counter: Counter = Counter()       # 被烤次数
-        attacker_counter: Counter = Counter()      # 发起烤次数
-        escape_counter: Counter = Counter()        # 逃脱次数
-        backfire_counter: Counter = Counter()      # 反噬次数
-        name_map: dict = {}
-
-        for e in events:
-            a_id = e.get("attacker", "")
-            t_id = e.get("target", "")
-            if e.get("attacker_name"):
-                name_map[a_id] = e["attacker_name"]
-            if e.get("target_name"):
-                name_map[t_id] = e["target_name"]
-
-            etype = e.get("type", "")
-            if etype == "success":
-                attacker_counter[a_id] += 1
-                if a_id and t_id and a_id != t_id:
-                    roasted_counter[t_id] += 1
-            elif etype == "self_roast":
-                attacker_counter[a_id] += 1
-            elif etype == "escape":
-                escape_counter[t_id] += 1
-                attacker_counter[a_id] += 1
-            elif etype in ("backfire", "bot_backfire"):
-                backfire_counter[a_id] += 1
-                attacker_counter[a_id] += 1
-
-        def _top(counter: Counter):
-            if not counter:
-                return None, "", 0
-            uid, count = counter.most_common(1)[0]
-            return uid, name_map.get(uid, uid), count
-
-        mr_id, mr_name, mr_count = _top(roasted_counter)
-        ma_id, ma_name, ma_count = _top(attacker_counter)
-        ek_id, ek_name, ek_count = _top(escape_counter)
-        bk_id, bk_name, bk_count = _top(backfire_counter)
-
-        return {
-            "total": len(events),
-            "most_roasted_id": mr_id, "most_roasted_name": mr_name, "most_roasted_count": mr_count,
-            "most_active_id": ma_id, "most_active_name": ma_name, "most_active_count": ma_count,
-            "escape_king_id": ek_id, "escape_king_name": ek_name, "escape_king_count": ek_count,
-            "backfire_king_id": bk_id, "backfire_king_name": bk_name, "backfire_king_count": bk_count,
-            **roll_stats,
-        }
-
-    def _get_roll_stats(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> dict:
-        """从 history 中统计今日抽猪信息。"""
-        from collections import Counter
-        if not date_str:
-            date_str = rollpig_date_str()
-        if group_id:
-            today_rolls = self.get_group_rolls(group_id, date_str)
-        else:
-            today_rolls = self.data.get("history", {}).get(date_str, {})
-        if not today_rolls:
-            return {"roll_count": 0}
-
-        pig_counter: Counter = Counter(today_rolls.values())
-        top_pig_id, top_pig_count = pig_counter.most_common(1)[0]
-
-        # 统计人类形态的用户
-        human_ids = [uid for uid, pid in today_rolls.items() if pid == "human"]
-
-        return {
-            "roll_count": len(today_rolls),
-            "top_pig_id": top_pig_id,
-            "top_pig_count": top_pig_count,
-            "human_count": len(human_ids),
-        }
 
     # ---- 被烤最多 → 次日保护 ----
 
@@ -2091,6 +2339,28 @@ def _safe_int(value, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_utc_datetime(value: object) -> Optional[datetime.datetime]:
+    """解析本地快照时间；旧数据无时间时由调用方继续按兼容记录处理。"""
+
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _timestamp_not_after_cutoff(value: object, cutoff: datetime.datetime) -> bool:
+    """旧记录缺少首次时间时继续保留；新记录严格排除截止点之后的活动。"""
+
+    parsed = _parse_utc_datetime(value)
+    return parsed is None or parsed <= cutoff
 
 
 def _optional_nonnegative_int(value: object) -> Optional[int]:

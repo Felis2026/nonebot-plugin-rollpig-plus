@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from typing import Optional
 
 import httpx
@@ -12,6 +13,10 @@ from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
     DailyEventQueryResult,
+    DailyReportDeliveryClaim,
+    DailyReportDeliveryClaimResult,
+    DailyReportDeliveryTransitionResult,
+    DailyReportProfileSnapshot,
     DailyRollResult,
     DailyRollSnapshot,
     DrawState,
@@ -39,6 +44,15 @@ class CloudReservationUnsupportedError(CloudStoreError):
 
 class CloudRoastRefillUnsupportedError(CloudStoreError):
     """旧版 Cloud 没有补货接口时抛出，不影响其他 RollPig 功能。"""
+
+
+class CloudDailyReportUnsupportedError(CloudStoreError):
+    """旧版 Cloud 缺少日报扩展接口时抛出，由调用场景决定隐藏榜单或停止投递。"""
+
+
+DAILY_REPORT_PROFILE_BATCH_SIZE = 2048
+DAILY_REPORT_CLAIM_BATCH_SIZE = 256
+DAILY_REPORT_BATCH_RETRY_SECONDS = 30
 
 
 class CloudStore(RollpigStore):
@@ -119,6 +133,17 @@ class CloudStore(RollpigStore):
             cause = error.__cause__
             if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in {404, 405}:
                 raise CloudRoastRefillUnsupportedError(str(error)) from error
+            raise
+
+    async def _daily_report_request(self, method: str, path: str, **kwargs):
+        """日报投递不允许旧 Cloud 静默降级，否则多个实例会重复发送同一个群。"""
+
+        try:
+            return await self._request(method, path, **kwargs)
+        except CloudStoreError as error:
+            cause = error.__cause__
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in {404, 405}:
+                raise CloudDailyReportUnsupportedError(str(error)) from error
             raise
 
     @staticmethod
@@ -384,11 +409,20 @@ class CloudStore(RollpigStore):
             },
         )
 
-    async def get_group_rolls(self, group_id: str, date_str: Optional[str] = None) -> dict[str, str]:
+    async def get_group_rolls(
+        self,
+        group_id: str,
+        date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
+    ) -> dict[str, str]:
         payload = await self._request(
             "GET",
             "/v1/group-rolls",
-            params={"group_id": group_id, "date_str": date_str or rollpig_date_str()},
+            params={
+                "group_id": group_id,
+                "date_str": date_str or rollpig_date_str(),
+                "cutoff_at": cutoff_at,
+            },
             fallback={"items": []},
         )
         items = payload.get("items", []) if payload else []
@@ -525,6 +559,7 @@ class CloudStore(RollpigStore):
         date_str: Optional[str] = None,
         group_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> DailyEventQueryResult:
         try:
             payload = await self._request(
@@ -534,6 +569,7 @@ class CloudStore(RollpigStore):
                     "date_str": date_str or rollpig_date_str(),
                     "group_id": group_id,
                     "user_id": user_id,
+                    "cutoff_at": cutoff_at,
                 },
             )
         except CloudStoreError:
@@ -548,6 +584,7 @@ class CloudStore(RollpigStore):
         date_str: Optional[str] = None,
         group_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> list[dict]:
         """保留日报旧语义：严格模式查询失败必须抛错，避免误写空保护名单。"""
 
@@ -558,6 +595,7 @@ class CloudStore(RollpigStore):
                 "date_str": date_str or rollpig_date_str(),
                 "group_id": group_id,
                 "user_id": user_id,
+                "cutoff_at": cutoff_at,
             },
             # 非严格模式继续沿用旧版安全读降级；严格模式会忽略 fallback 并抛错，
             # 由日报任务跳过当前群，不能把查询失败当成真实的零事件。
@@ -603,6 +641,166 @@ class CloudStore(RollpigStore):
             fallback={"protected": False},
         )
         return bool(payload.get("protected")) if payload else False
+
+    # ================================ 猪圈日报投递 ================================ #
+
+    async def get_daily_report_profiles(
+        self,
+        *,
+        group_id: str,
+        date_str: str,
+        cutoff_at: str,
+        user_ids: tuple[str, ...],
+    ) -> tuple[DailyReportProfileSnapshot, ...]:
+        """批量读取整群候选用户的 EX 与图鉴资料，禁止退化为逐用户请求。"""
+
+        items: list[dict] = []
+        for index in range(0, len(user_ids), DAILY_REPORT_PROFILE_BATCH_SIZE):
+            payload = await self._daily_report_request(
+                "POST",
+                "/v1/daily-reports/profiles",
+                json_body={
+                    "group_id": group_id,
+                    "date_str": date_str,
+                    "cutoff_at": cutoff_at,
+                    "user_ids": list(
+                        user_ids[index : index + DAILY_REPORT_PROFILE_BATCH_SIZE]
+                    ),
+                },
+            )
+            items.extend(
+                item
+                for item in (payload or {}).get("items", [])
+                if isinstance(item, dict)
+            )
+        return tuple(
+            DailyReportProfileSnapshot(
+                user_id=str(item.get("user_id") or ""),
+                daily_pig_id=str(item.get("daily_pig_id") or ""),
+                daily_ex_level=(
+                    int(item["daily_ex_level"])
+                    if item.get("daily_ex_level") is not None
+                    else None
+                ),
+                daily_achieved_at=str(item.get("daily_achieved_at") or ""),
+                catalog_count=(
+                    int(item["catalog_count"])
+                    if item.get("catalog_count") is not None
+                    else None
+                ),
+                catalog_achieved_at=str(item.get("catalog_achieved_at") or ""),
+                recent_pig_id=str(item.get("recent_pig_id") or ""),
+                recent_ex_level=(
+                    int(item["recent_ex_level"])
+                    if item.get("recent_ex_level") is not None
+                    else None
+                ),
+            )
+            for item in items
+            if item.get("user_id")
+        )
+
+    async def claim_daily_report_deliveries(
+        self,
+        *,
+        instance_id: str,
+        delivery_bots: dict[str, str],
+        date_str: str,
+        cutoff_at: str,
+    ) -> DailyReportDeliveryClaimResult:
+        candidate_items = sorted(delivery_bots.items())
+        payload_items: list[dict] = []
+        next_claim_times: list[str] = []
+        completed_candidates = 0
+        for index in range(0, len(candidate_items), DAILY_REPORT_CLAIM_BATCH_SIZE):
+            batch_items = candidate_items[index : index + DAILY_REPORT_CLAIM_BATCH_SIZE]
+            try:
+                payload = await self._daily_report_request(
+                    "POST",
+                    "/v1/daily-reports/claim",
+                    json_body={
+                        "date_str": date_str,
+                        "cutoff_at": cutoff_at,
+                        "instance_id": instance_id,
+                        "candidates": [
+                            {
+                                "group_id": group_id,
+                                "delivery_bot_id": delivery_bot_id,
+                            }
+                            for group_id, delivery_bot_id in batch_items
+                        ],
+                    },
+                )
+            except CloudStoreError as error:
+                if completed_candidates == 0:
+                    raise
+                # 前序批次已经在 Cloud 建立租约，必须先交给 jobs 完成投递；同时
+                # 返回短重试时间，让尚未请求的群仍能在当晚窗口内继续领取。
+                next_claim_times.append(
+                    (
+                        dt.datetime.now(dt.timezone.utc)
+                        + dt.timedelta(seconds=DAILY_REPORT_BATCH_RETRY_SECONDS)
+                    ).isoformat()
+                )
+                logger.warning(
+                    "rollpig cloud 日报分批领取中断，已保留前序领取结果并等待重试: "
+                    f"completed_candidates={completed_candidates} error={error}"
+                )
+                break
+            completed_candidates += len(batch_items)
+            payload_items.extend(
+                item
+                for item in (payload or {}).get("items", [])
+                if isinstance(item, dict)
+            )
+            next_claim_at = str((payload or {}).get("next_claim_at") or "")
+            if next_claim_at:
+                next_claim_times.append(next_claim_at)
+        return DailyReportDeliveryClaimResult(
+            claims=tuple(
+                DailyReportDeliveryClaim(
+                    date_str=str(item.get("date_str") or date_str),
+                    group_id=str(item.get("group_id") or ""),
+                    delivery_bot_id=str(item.get("delivery_bot_id") or ""),
+                    cutoff_at=str(item.get("cutoff_at") or cutoff_at),
+                    claim_token=str(item.get("claim_token") or ""),
+                    status=str(item.get("status") or "claimed"),
+                    attempt_count=max(1, int(item.get("attempt_count") or 1)),
+                )
+                for item in payload_items
+                if item.get("group_id")
+                and item.get("claim_token")
+            ),
+            # 同一 Cloud 的时间格式一致，ISO 8601 字符串可直接按时间排序。
+            next_claim_at=min(next_claim_times, default=""),
+        )
+
+    async def transition_daily_report_delivery(
+        self,
+        claim: DailyReportDeliveryClaim,
+        action: str,
+        *,
+        message_id: str = "",
+        error: str = "",
+    ) -> DailyReportDeliveryTransitionResult:
+        payload = await self._daily_report_request(
+            "POST",
+            "/v1/daily-reports/transition",
+            json_body={
+                "date_str": claim.date_str,
+                "group_id": claim.group_id,
+                "claim_token": claim.claim_token,
+                "action": action,
+                "message_id": message_id,
+                "error": error,
+            },
+        )
+        return DailyReportDeliveryTransitionResult(
+            ok=bool((payload or {}).get("ok")),
+            status=str((payload or {}).get("status") or ""),
+            attempt_count=max(0, int((payload or {}).get("attempt_count") or 0)),
+            next_attempt_at=str((payload or {}).get("next_attempt_at") or ""),
+        )
 
     async def prune_history(self, days_to_keep: int = 14) -> None:
         return None
@@ -795,11 +993,16 @@ class CloudStore(RollpigStore):
         self,
         group_id: str,
         date_str: Optional[str] = None,
+        cutoff_at: Optional[str] = None,
     ) -> set[str]:
         payload = await self._refill_request(
             "GET",
             "/v1/group-roast-refills/active-users",
-            params={"group_id": group_id, "date_str": date_str or rollpig_date_str()},
+            params={
+                "group_id": group_id,
+                "date_str": date_str or rollpig_date_str(),
+                "cutoff_at": cutoff_at,
+            },
         )
         return {str(user_id) for user_id in payload.get("user_ids", []) if user_id}
 

@@ -23,6 +23,18 @@ rendering stable in offline or Docker environments.
 - License: **SIL Open Font License, Version 1.1**. A copy is provided at
   `LICENSES/OFL-1.1.txt`.
 
+## RollPig Daily Serif subsets
+
+- Source: [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk)
+- Bundled path: `nonebot_plugin_rollpig_plus/resource/fonts/RollPigDailySerif-*.subset.otf`
+- Usage: fixed masthead, section labels, and ranking titles on the pigpen daily
+  report card; user names and other dynamic text continue to use Source Han Sans.
+- Change note: the Regular, Bold, and Black Noto Serif SC sources are subsetted
+  and renamed to `RollPig Daily Serif`; the retained character list is shipped
+  alongside the fonts so future fixed labels can rebuild the same subsets.
+- License: **SIL Open Font License, Version 1.1**. A copy is provided at
+  `LICENSES/OFL-1.1.txt`.
+
 ## ZCOOL KuaiLe Regular
 
 - Source: [google/fonts](https://github.com/google/fonts/tree/main/ofl/zcoolkuaile)

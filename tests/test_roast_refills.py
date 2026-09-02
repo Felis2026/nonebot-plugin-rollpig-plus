@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import nonebot
 from nonebot.adapters.onebot.v11 import NoticeEvent
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.plugin import get_plugin
 
 try:
@@ -337,7 +338,11 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_reactors_distinguishes_unsupported_and_transient_errors(self):
         unsupported_bot = SimpleNamespace(
-            call_api=AsyncMock(side_effect=RuntimeError("unknown action: fetch_emoji_like"))
+            call_api=AsyncMock(side_effect=ActionFailed(
+                status="failed",
+                retcode=1404,
+                message="unknown action: fetch_emoji_like",
+            ))
         )
         with self.assertRaises(roast_refill.RoastRefillReactionError) as unsupported:
             await roast_refill.fetch_refill_reactors(unsupported_bot, "message-1")
@@ -350,6 +355,14 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
             await roast_refill.fetch_refill_reactors(transient_bot, "message-1")
         self.assertFalse(transient.exception.capability_unsupported)
         self.assertFalse(transient.exception.message_missing)
+
+        ambiguous_bot = SimpleNamespace(
+            call_api=AsyncMock(side_effect=RuntimeError("upstream proxy reported unsupported encoding"))
+        )
+        with self.assertRaises(roast_refill.RoastRefillReactionError) as ambiguous:
+            await roast_refill.fetch_refill_reactors(ambiguous_bot, "message-1")
+        self.assertFalse(ambiguous.exception.capability_unsupported)
+        self.assertFalse(ambiguous.exception.message_missing)
 
     async def test_group_member_filter_reads_current_member_ids(self):
         bot = SimpleNamespace(call_api=AsyncMock(return_value=[

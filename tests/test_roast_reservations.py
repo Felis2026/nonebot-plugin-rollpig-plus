@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -27,7 +28,7 @@ from nonebot_plugin_rollpig_plus import helpers
 from nonebot_plugin_rollpig_plus import reservation_delivery
 from nonebot_plugin_rollpig_plus import reservation_flow
 from nonebot_plugin_rollpig_plus import texts as texts_module
-from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
+from nonebot_plugin_rollpig_plus.data_manager import LocalStoreUnavailableError, PigDataManager
 from nonebot_plugin_rollpig_plus.handlers import collection as collection_handler
 from nonebot_plugin_rollpig_plus.handlers import control as control_handler
 from nonebot_plugin_rollpig_plus.handlers import refill as refill_handler
@@ -124,8 +125,8 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertTrue(await _matches(control_handler.cmd_daily_summary_switch, Message("/小猪日报 开启")))
-        self.assertFalse(await _matches(control_handler.cmd_daily_summary_switch, Message("/小猪日报开启")))
+        self.assertTrue(await _matches(control_handler.cmd_daily_report_switch, Message("/小猪日报 开启")))
+        self.assertFalse(await _matches(control_handler.cmd_daily_report_switch, Message("/小猪日报开启")))
 
         # 用户明确要求这三个既有文本参数命令继续兼容黏连写法。
         self.assertTrue(await _matches(roll_handler.cmd_roll, Message("/随机小猪3")))
@@ -140,6 +141,69 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(matcher=matcher):
                 self.assertIsNone(_command_rule(matcher).force_whitespace)
+
+
+class StoreErrorGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_write_protection_reaches_user_without_swallowing_other_runtime_errors(self):
+        matcher = SimpleNamespace(finish=AsyncMock(side_effect=RuntimeError("matcher finished")))
+
+        @helpers.guard_store_errors(matcher)
+        async def local_failure():
+            raise LocalStoreUnavailableError("broken local data")
+
+        with self.assertRaisesRegex(RuntimeError, "matcher finished"):
+            await local_failure()
+        self.assertIn("本地账本读取失败", str(matcher.finish.await_args.args[0]))
+
+        @helpers.guard_store_errors(matcher)
+        async def programming_failure():
+            raise RuntimeError("unexpected bug")
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected bug"):
+            await programming_failure()
+
+
+class LocalBackupRotationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.data_file = Path(self.temp_dir.name) / "pig_data.json"
+        self.data_file_patch = patch.object(data_manager_module, "DATA_FILE", self.data_file)
+        self.data_file_patch.start()
+        self.addCleanup(self.data_file_patch.stop)
+
+    @staticmethod
+    def _marker(path: Path) -> int | None:
+        return json.loads(path.read_text(encoding="utf-8")).get("test_marker")
+
+    def test_main_file_saves_every_write_while_backups_rotate_by_count_or_time(self) -> None:
+        manager = PigDataManager()
+        primary_backup = self.data_file.with_name(f"{self.data_file.name}.bak")
+        second_backup = self.data_file.with_name(f"{self.data_file.name}.bak.1")
+
+        manager.data["test_marker"] = 0
+        manager._sync_save()
+        self.assertIsNone(self._marker(primary_backup))
+
+        for marker in range(1, data_manager_module.DATA_BACKUP_MAX_WRITES):
+            manager.data["test_marker"] = marker
+            manager._sync_save()
+            self.assertEqual(self._marker(self.data_file), marker)
+            self.assertIsNone(self._marker(primary_backup))
+
+        manager.data["test_marker"] = data_manager_module.DATA_BACKUP_MAX_WRITES
+        manager._sync_save()
+        self.assertEqual(self._marker(self.data_file), data_manager_module.DATA_BACKUP_MAX_WRITES)
+        self.assertEqual(self._marker(primary_backup), data_manager_module.DATA_BACKUP_MAX_WRITES - 1)
+        self.assertIsNone(self._marker(second_backup))
+
+        manager._last_backup_rotation_monotonic -= (
+            data_manager_module.DATA_BACKUP_MIN_INTERVAL_SECONDS + 1
+        )
+        manager.data["test_marker"] = 11
+        manager._sync_save()
+        self.assertEqual(self._marker(primary_backup), data_manager_module.DATA_BACKUP_MAX_WRITES)
+        self.assertEqual(self._marker(second_backup), data_manager_module.DATA_BACKUP_MAX_WRITES - 1)
 
 
 class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):

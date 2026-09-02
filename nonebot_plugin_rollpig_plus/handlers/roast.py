@@ -60,7 +60,7 @@ from ..helpers import (
 
 
 def _register_preparation_owner(preparation, current_bot_id: str) -> None:
-    """只要返回的已有预约仍归当前 Bot 负责，就恢复本地 owner 轮询状态。"""
+    """若已有预约归当前 Bot 负责，则恢复轮询。"""
 
     reservation = preparation.reservation
     if reservation and reservation.delivery_bot_id == str(current_bot_id):
@@ -68,7 +68,7 @@ def _register_preparation_owner(preparation, current_bot_id: str) -> None:
 
 
 def _classify_roast_target(attacker_id: str, target_id: str, bot_id: str) -> str:
-    """先区分用法错误、自身与 Bot；只有 member 才进入未抽猪处罚流程。"""
+    """分类目标类型：missing / self / bot / member。"""
 
     if not target_id:
         return "missing"
@@ -80,12 +80,12 @@ def _classify_roast_target(attacker_id: str, target_id: str, bot_id: str) -> str
 
 
 async def _finish_unrolled_attacker_attempt(matcher, event: GroupMessageEvent, attacker_name: str, force_mode):
-    """记录未抽猪先烤次数；首次警告，第二次起临时熟食反噬且不创建今日猪。"""
+    """处理未抽猪玩家的烤群友惩罚（首次警告，二次反噬）。"""
 
     try:
         attempt = await store.record_unrolled_roast_attempt(str(event.user_id))
     except CloudReservationUnsupportedError:
-        # 新插件连接旧 Cloud 时没有持久化计数能力，保守降级为警告，不允许进入正常烧烤。
+        # 旧 Cloud 无法计数时降级为警告。
         await matcher.finish(MessageSegment.reply(event.message_id) + random.choice(UNROLLED_ROAST_WARNING_TEXTS))
         return
 
@@ -109,7 +109,7 @@ async def _load_attacker_pig_or_finish(
     attacker_name: str,
     force_mode,
 ):
-    """区分真正未抽猪与本机资源落后，避免把资源故障计成违规。"""
+    """获取发起者今日小猪，未抽猪或资源缺失时结束流程。"""
 
     attacker_pig_id = await store.get_daily_roll(str(event.user_id))
     if not attacker_pig_id:

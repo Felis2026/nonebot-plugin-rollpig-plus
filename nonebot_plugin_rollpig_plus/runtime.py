@@ -42,18 +42,19 @@ def rollpig_date_str(offset_days: int = 0) -> str:
 # 这里仅暴露“可选群启用检查器”接口，宿主项目若有控制台/控制面，
 # 可以把自己的群开关逻辑挂进来；没有则保持默认放行。
 _group_enable_checker: Optional[Callable[[str], bool]] = None
-_daily_summary_checker: Optional[Callable[[str], bool]] = None
+_daily_report_checker: Optional[Callable[[str], bool]] = None
 
 
 # ================================ 内置日报群控制器 ================================ #
 # rollpig_daily_summary_enabled 只作为“未显式设置的群”的默认值。
 # 若宿主项目注册了外部日报控制器，命令会直接读写外部控制器；否则使用本地 localstore。
-_DAILY_SUMMARY_SWITCH_FILE = localstore.get_plugin_data_file("daily_summary_groups.json")
-_daily_summary_switch_lock = asyncio.Lock()
-_daily_summary_enabled_groups: set[str] = set()
-_daily_summary_disabled_groups: set[str] = set()
-_daily_summary_setter: Optional[Callable[[str, bool], object]] = None
-_daily_summary_source_name = "插件本地控制"
+# 沿用旧文件名，避免升级后丢失既有群开关；代码侧统一使用 daily_report 命名。
+_DAILY_REPORT_SWITCH_FILE = localstore.get_plugin_data_file("daily_summary_groups.json")
+_daily_report_switch_lock = asyncio.Lock()
+_daily_report_enabled_groups: set[str] = set()
+_daily_report_disabled_groups: set[str] = set()
+_daily_report_setter: Optional[Callable[[str, bool], object]] = None
+_daily_report_source_name = "插件本地控制"
 
 
 def _normalize_group_id(group_id: str | int | None) -> str:
@@ -70,67 +71,67 @@ def _coerce_group_id_set(value: object) -> set[str]:
     return {group_id for item in value if (group_id := _normalize_group_id(item))}
 
 
-def _load_daily_summary_switches() -> None:
+def _load_daily_report_switches() -> None:
     """启动时读取公开版内置日报群开关；读取失败时按空覆盖表处理。"""
 
-    global _daily_summary_enabled_groups, _daily_summary_disabled_groups
-    if not _DAILY_SUMMARY_SWITCH_FILE.exists():
+    global _daily_report_enabled_groups, _daily_report_disabled_groups
+    if not _DAILY_REPORT_SWITCH_FILE.exists():
         return
 
     try:
-        data = json.loads(_DAILY_SUMMARY_SWITCH_FILE.read_text(encoding="utf-8-sig"))
+        data = json.loads(_DAILY_REPORT_SWITCH_FILE.read_text(encoding="utf-8-sig"))
         if not isinstance(data, dict):
             raise ValueError("daily_summary_groups.json 顶层必须是 object")
     except Exception as error:
-        logger.warning(f"读取日报群开关失败，已按空配置处理: {_DAILY_SUMMARY_SWITCH_FILE}: {error}")
+        logger.warning(f"读取日报群开关失败，已按空配置处理: {_DAILY_REPORT_SWITCH_FILE}: {error}")
         return
 
-    _daily_summary_enabled_groups = _coerce_group_id_set(data.get("enabled_group_ids"))
-    _daily_summary_disabled_groups = _coerce_group_id_set(data.get("disabled_group_ids"))
+    _daily_report_enabled_groups = _coerce_group_id_set(data.get("enabled_group_ids"))
+    _daily_report_disabled_groups = _coerce_group_id_set(data.get("disabled_group_ids"))
     # 同一群如果因为手工改文件同时出现在两边，开启优先，避免“开了却不生效”的困惑。
-    _daily_summary_disabled_groups.difference_update(_daily_summary_enabled_groups)
+    _daily_report_disabled_groups.difference_update(_daily_report_enabled_groups)
 
 
-def _save_daily_summary_switches_sync() -> None:
+def _save_daily_report_switches_sync() -> None:
     """原子写入公开版本地日报群开关文件；写一半崩溃时不会破坏旧文件。"""
 
-    _DAILY_SUMMARY_SWITCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _DAILY_REPORT_SWITCH_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "enabled_group_ids": sorted(_daily_summary_enabled_groups),
-        "disabled_group_ids": sorted(_daily_summary_disabled_groups),
+        "enabled_group_ids": sorted(_daily_report_enabled_groups),
+        "disabled_group_ids": sorted(_daily_report_disabled_groups),
     }
-    tmp_file = _DAILY_SUMMARY_SWITCH_FILE.with_suffix(_DAILY_SUMMARY_SWITCH_FILE.suffix + ".tmp")
+    tmp_file = _DAILY_REPORT_SWITCH_FILE.with_suffix(_DAILY_REPORT_SWITCH_FILE.suffix + ".tmp")
     tmp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_file.replace(_DAILY_SUMMARY_SWITCH_FILE)
+    tmp_file.replace(_DAILY_REPORT_SWITCH_FILE)
 
 
-def _get_local_daily_summary_status(group_id: str | int) -> Optional[bool]:
+def _get_local_daily_report_status(group_id: str | int) -> Optional[bool]:
     """读取公开版本地日报覆盖状态；未显式设置时返回 None。"""
 
     normalized_group_id = _normalize_group_id(group_id)
     if not normalized_group_id:
         return None
-    if normalized_group_id in _daily_summary_enabled_groups:
+    if normalized_group_id in _daily_report_enabled_groups:
         return True
-    if normalized_group_id in _daily_summary_disabled_groups:
+    if normalized_group_id in _daily_report_disabled_groups:
         return False
     return None
 
 
-async def _set_local_daily_summary_enabled(group_id: str, enabled: bool) -> None:
+async def _set_local_daily_report_enabled(group_id: str, enabled: bool) -> None:
     """写入公开版本地日报群开关；仅在没有外部控制器时使用。"""
 
-    async with _daily_summary_switch_lock:
+    async with _daily_report_switch_lock:
         if enabled:
-            _daily_summary_enabled_groups.add(group_id)
-            _daily_summary_disabled_groups.discard(group_id)
+            _daily_report_enabled_groups.add(group_id)
+            _daily_report_disabled_groups.discard(group_id)
         else:
-            _daily_summary_disabled_groups.add(group_id)
-            _daily_summary_enabled_groups.discard(group_id)
-        await asyncio.to_thread(_save_daily_summary_switches_sync)
+            _daily_report_disabled_groups.add(group_id)
+            _daily_report_enabled_groups.discard(group_id)
+        await asyncio.to_thread(_save_daily_report_switches_sync)
 
 
-def is_daily_summary_default_enabled() -> bool:
+def is_daily_report_default_enabled() -> bool:
     """读取日报默认状态；配置非法或读取失败时按默认关闭处理。"""
 
     try:
@@ -140,7 +141,7 @@ def is_daily_summary_default_enabled() -> bool:
         return False
 
 
-def set_daily_summary_controller(
+def set_daily_report_controller(
     checker: Optional[Callable[[str], bool]],
     setter: Optional[Callable[[str, bool], object]] = None,
     *,
@@ -148,55 +149,63 @@ def set_daily_summary_controller(
 ) -> None:
     """注册外部日报控制器；checker/ setter 同源，避免 V2 admin console 与本地状态分裂。"""
 
-    global _daily_summary_checker, _daily_summary_setter, _daily_summary_source_name
-    _daily_summary_checker = checker
-    _daily_summary_setter = setter
-    _daily_summary_source_name = source_name if checker is not None else "插件本地控制"
+    global _daily_report_checker, _daily_report_setter, _daily_report_source_name
+    _daily_report_checker = checker
+    _daily_report_setter = setter
+    _daily_report_source_name = source_name if checker is not None else "插件本地控制"
 
 
-def set_daily_summary_checker(checker: Optional[Callable[[str], bool]]) -> None:
-    """兼容旧桥接代码的只读日报检查器；新接入应优先使用 set_daily_summary_controller。"""
+def set_daily_report_checker(checker: Optional[Callable[[str], bool]]) -> None:
+    """兼容只读日报桥接；新接入应优先使用 set_daily_report_controller。"""
 
-    set_daily_summary_controller(checker, None)
+    set_daily_report_controller(checker, None)
 
 
-def get_daily_summary_group_status(group_id: str | int) -> tuple[bool, str]:
+def get_daily_report_group_status(group_id: str | int) -> tuple[bool, str]:
     """返回单群日报实际状态与来源说明。"""
 
     normalized_group_id = _normalize_group_id(group_id)
     if not normalized_group_id:
         return False, "无效群号"
 
-    if _daily_summary_checker is not None:
-        return _check_optional_group_switch(_daily_summary_checker, normalized_group_id, switch_name="日报开关"), _daily_summary_source_name
+    if _daily_report_checker is not None:
+        return (
+            _check_optional_group_switch(
+                _daily_report_checker,
+                normalized_group_id,
+                switch_name="日报开关",
+            ),
+            _daily_report_source_name,
+        )
 
-    local_status = _get_local_daily_summary_status(normalized_group_id)
+    local_status = _get_local_daily_report_status(normalized_group_id)
     if local_status is not None:
         return local_status, "插件本地开启" if local_status else "插件本地关闭"
 
-    default_enabled = is_daily_summary_default_enabled()
+    default_enabled = is_daily_report_default_enabled()
     return default_enabled, "全局默认开启" if default_enabled else "全局默认关闭"
 
 
-async def set_daily_summary_group_enabled(group_id: str | int, enabled: bool) -> None:
+async def set_daily_report_group_enabled(group_id: str | int, enabled: bool) -> None:
     """设置单个群的日报状态；外部控制器存在时直接写外部控制器，否则写插件本地存储。"""
 
     normalized_group_id = _normalize_group_id(group_id)
     if not normalized_group_id:
         raise ValueError("群号不能为空")
 
-    if _daily_summary_checker is not None:
-        if _daily_summary_setter is None:
+    if _daily_report_checker is not None:
+        if _daily_report_setter is None:
             raise RuntimeError("当前日报开关由外部控制器接管，但未提供命令写入接口")
-        result = _daily_summary_setter(normalized_group_id, enabled)
+        result = _daily_report_setter(normalized_group_id, enabled)
         if hasattr(result, "__await__"):
             await result
         return
 
-    await _set_local_daily_summary_enabled(normalized_group_id, enabled)
+    await _set_local_daily_report_enabled(normalized_group_id, enabled)
 
 
-_load_daily_summary_switches()
+_load_daily_report_switches()
+
 
 def resolve_roast_cooldown_seconds() -> int:
     """解析普通烤群友 CD（秒），支持通过配置覆盖。"""
@@ -262,12 +271,21 @@ def is_group_rollpig_enabled(group_id: str) -> bool:
     return _check_optional_group_switch(_group_enable_checker, group_id, switch_name="群启用")
 
 
-def is_daily_summary_enabled(group_id: str) -> bool:
+def is_daily_report_enabled(group_id: str) -> bool:
     """判断当前群是否启用日报推送。
 
     若宿主接入外部控制器，则只读外部控制器；否则使用插件本地控制和全局默认值。
     确保 console 与公开版 localstore 不会出现两套状态同时生效。
     """
 
-    enabled, _source = get_daily_summary_group_status(group_id)
+    enabled, _source = get_daily_report_group_status(group_id)
     return enabled
+
+
+# 公开配置键和旧版 V2 桥接仍使用 daily_summary；保留函数别名避免升级破坏宿主接入。
+is_daily_summary_default_enabled = is_daily_report_default_enabled
+set_daily_summary_controller = set_daily_report_controller
+set_daily_summary_checker = set_daily_report_checker
+get_daily_summary_group_status = get_daily_report_group_status
+set_daily_summary_group_enabled = set_daily_report_group_enabled
+is_daily_summary_enabled = is_daily_report_enabled
