@@ -23,6 +23,7 @@ if get_plugin("nonebot_plugin_rollpig_plus") is None:
 from nonebot_plugin_rollpig_plus import jobs
 from nonebot_plugin_rollpig_plus import data_manager as data_manager_module
 from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
+from nonebot_plugin_rollpig_plus.store import local_json as local_json_module
 from nonebot_plugin_rollpig_plus.store.base import RollpigStore
 from nonebot_plugin_rollpig_plus.store.cloud import (
     CloudDailyReportUnsupportedError,
@@ -265,6 +266,59 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(claim_result, DailyReportDeliveryClaimResult())
         self.assertFalse(transition)
+
+    async def test_local_release_retries_without_reclaiming_completed_groups(self) -> None:
+        date_str = jobs.rollpig_date_str()
+        local_store = LocalJsonStore(lambda: None)  # type: ignore[arg-type]
+        candidates = {"100": "bot-a", "200": "bot-a"}
+
+        first = await local_store.claim_daily_report_deliveries(
+            instance_id="instance-a",
+            delivery_bots=candidates,
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        sent_claim, retry_claim = first.claims
+        self.assertTrue(
+            await local_store.transition_daily_report_delivery(sent_claim, "sending")
+        )
+        self.assertTrue(
+            await local_store.transition_daily_report_delivery(sent_claim, "sent")
+        )
+        with patch.object(local_json_module, "LOCAL_DAILY_REPORT_RETRY_SECONDS", 0):
+            released = await local_store.transition_daily_report_delivery(
+                retry_claim,
+                "release",
+            )
+
+        self.assertTrue(released)
+        self.assertTrue(released.next_attempt_at)
+        self.assertIsNotNone(
+            jobs._daily_report_retry_delay(date_str, [released.next_attempt_at])
+        )
+
+        second = await local_store.claim_daily_report_deliveries(
+            instance_id="instance-a",
+            delivery_bots=candidates,
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        self.assertEqual([claim.group_id for claim in second.claims], ["200"])
+        self.assertEqual(second.claims[0].attempt_count, 2)
+        self.assertTrue(
+            await local_store.transition_daily_report_delivery(second.claims[0], "sending")
+        )
+        self.assertTrue(
+            await local_store.transition_daily_report_delivery(second.claims[0], "sent")
+        )
+
+        completed = await local_store.claim_daily_report_deliveries(
+            instance_id="instance-a",
+            delivery_bots=candidates,
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        self.assertEqual(completed.claims, ())
 
     async def test_group_report_writes_protection_before_returning_coupon(self) -> None:
         summary_store = SimpleNamespace(

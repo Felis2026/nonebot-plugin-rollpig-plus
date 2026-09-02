@@ -162,7 +162,7 @@ class DailyEventQueryResult:
 
 @dataclass(frozen=True)
 class DailyReportDeliveryClaim:
-    """某实例从 Cloud 原子领取的一份群日报；claim_token 绑定全部状态迁移。"""
+    """某实例从 Store 领取的一份群日报；claim_token 绑定全部状态迁移。"""
 
     date_str: str
     group_id: str
