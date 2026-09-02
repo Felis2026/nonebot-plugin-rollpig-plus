@@ -673,7 +673,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 jobs,
                 "_daily_report_deadline_reached",
-                side_effect=[False, True],
+                side_effect=[False, False, True],
             ),
             patch.object(
                 jobs,
@@ -708,6 +708,66 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call.kwargs.get("error") for call in transitions[2:]],
             ["delivery_deadline_passed", "delivery_deadline_passed"],
+        )
+
+    async def test_rendering_past_deadline_releases_before_sending(self) -> None:
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(),
+        )
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"100"}),
+            claim_daily_report_deliveries=AsyncMock(
+                return_value=DailyReportDeliveryClaimResult(claims=(claim,))
+            ),
+            transition_daily_report_delivery=AsyncMock(return_value=True),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "rollpig_date_str", return_value="2026-08-26"),
+            patch.object(jobs.random, "randint", return_value=0),
+            patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(
+                jobs,
+                "_daily_report_deadline_reached",
+                side_effect=[False, True],
+            ),
+            patch.object(
+                jobs,
+                "resolve_daily_report_bots",
+                new=AsyncMock(return_value={"100": bot}),
+            ),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            await jobs.daily_report_job()
+
+        bot.send_group_msg.assert_not_awaited()
+        self.assertEqual(
+            [call.args[1] for call in mocked_store.transition_daily_report_delivery.await_args_list],
+            ["release"],
+        )
+        self.assertEqual(
+            mocked_store.transition_daily_report_delivery.await_args.kwargs["error"],
+            "delivery_deadline_passed_after_render",
         )
 
     async def test_failure_before_sending_is_reclaimed_at_cloud_retry_time(self) -> None:

@@ -679,6 +679,26 @@ async def _deliver_daily_report_claim(
             report,
             cutoff_time=cutoff_time,
         )
+        # 渲染可能耗时较长；在提交发送意图前再次确认时间和开关，避免卡片
+        # 已经跨过硬截止点或管理员刚关闭日报后仍发送出去。
+        if _daily_report_deadline_reached(claim.date_str):
+            await _transition_daily_report_safely(
+                claim,
+                "release",
+                error="delivery_deadline_passed_after_render",
+            )
+            logger.info(f"[猪圈日报] 渲染完成时已超过投递截止，释放日报: group={group_id}")
+            return report_built, False, ""
+        if not is_group_rollpig_enabled(group_id) or not is_daily_report_enabled(group_id):
+            transition = await _transition_daily_report_safely(
+                claim,
+                "skip",
+                error="daily_report_disabled_after_render",
+            )
+            if not transition:
+                logger.warning(f"[猪圈日报] 关闭开关后的日报跳过状态未确认: group={group_id}")
+            logger.info(f"[猪圈日报] 渲染完成时群开关已关闭，跳过日报: group={group_id}")
+            return report_built, False, ""
         if not await store.transition_daily_report_delivery(claim, "sending"):
             raise CloudStoreError("日报发送意图未获 Cloud 确认")
         sending_started = True
