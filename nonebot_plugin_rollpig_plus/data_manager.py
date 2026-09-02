@@ -15,6 +15,7 @@ from .runtime import rollpig_date_str, rollpig_today, resolve_roast_cooldown_sec
 from .store.models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyReportProfileSnapshot,
     DailyRollResult,
     DailyRollSnapshot,
     DrawState,
@@ -28,6 +29,7 @@ from .store.models import (
     RoastReservationParticipant,
     RoastReservationPrepareResult,
     UnrolledRoastAttemptResult,
+    expert_level_from_copies,
     roast_refill_threshold,
 )
 
@@ -794,9 +796,11 @@ class PigDataManager:
             copies_after_roll=result.copies,
             collection_size_after_roll=collection_size,
         )
-        self.data.setdefault("daily_roll_snapshots", {}).setdefault(date_str, {})[user_id] = (
-            self._snapshot_to_raw(snapshot)
-        )
+        raw_snapshot = self._snapshot_to_raw(snapshot)
+        # Local 没有 DailyRoll 数据库行，必须在首次创建时单独保存时间，日报才能
+        # 区分截止点前后的抽取；资源补全只能继承这个时间，不能重新生成。
+        raw_snapshot["created_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.data.setdefault("daily_roll_snapshots", {}).setdefault(date_str, {})[user_id] = raw_snapshot
         return replace(result, snapshot=snapshot)
 
     async def complete_daily_roll_snapshot(
@@ -850,7 +854,11 @@ class PigDataManager:
                     raise ValueError("每日抽取资源快照已由首次客户端写入")
                 return True
 
-            day_snapshots[normalized_user_id] = self._snapshot_to_raw(snapshot)
+            serialized = self._snapshot_to_raw(snapshot)
+            raw_existing = day_snapshots.get(normalized_user_id)
+            if isinstance(raw_existing, dict) and raw_existing.get("created_at"):
+                serialized["created_at"] = raw_existing["created_at"]
+            day_snapshots[normalized_user_id] = serialized
             await self._atomic_save()
             return True
 
@@ -2000,6 +2008,229 @@ class PigDataManager:
             recent_rolls=self.get_recent_rolls(user_id, days=days),
             roasted_7d=self.count_success_roasted(user_id, days=7),
         )
+
+    # ================================ 日报本地资料快照 ================================ #
+
+    def _daily_roll_created_at_locked(self, date_str: str, user_id: str) -> str:
+        """读取本地抽取时间；升级前快照回退到最早的群内显形时间。"""
+
+        raw = self.data.get("daily_roll_snapshots", {}).get(date_str, {}).get(user_id)
+        if isinstance(raw, dict) and raw.get("created_at"):
+            return str(raw["created_at"])
+
+        timestamps: list[tuple[datetime.datetime, str]] = []
+        day_seen = self.data.get("group_roll_seen_at", {}).get(date_str, {})
+        if isinstance(day_seen, dict):
+            for group_seen in day_seen.values():
+                if not isinstance(group_seen, dict):
+                    continue
+                value = str(group_seen.get(user_id) or "")
+                parsed = _parse_utc_datetime(value)
+                if parsed is not None:
+                    timestamps.append((parsed, value))
+        return min(timestamps, default=(None, ""), key=lambda item: item[0])[1]
+
+    def _daily_roll_not_after_cutoff_locked(
+        self,
+        date_str: str,
+        user_id: str,
+        *,
+        report_date: datetime.date,
+        cutoff: datetime.datetime,
+    ) -> bool:
+        """判断一条用户全局抽取是否属于本期日报快照。"""
+
+        if not _is_valid_date(date_str):
+            return False
+        roll_date = datetime.date.fromisoformat(date_str)
+        if roll_date != report_date:
+            return roll_date < report_date
+        created_at = self._daily_roll_created_at_locked(date_str, user_id)
+        return _timestamp_not_after_cutoff(created_at, cutoff)
+
+    def _copies_at_cutoff_locked(
+        self,
+        user_id: str,
+        pig_id: str,
+        *,
+        report_date: datetime.date,
+        cutoff: datetime.datetime,
+    ) -> int:
+        """利用截止点后的首次 previous_copies 还原当时的累计抽取数。"""
+
+        raw_progress = self.data.get("pig_progress", {}).get(user_id, {})
+        raw_item = raw_progress.get(pig_id, {}) if isinstance(raw_progress, dict) else {}
+        current_copies = _safe_int(raw_item.get("copies"), 0) if isinstance(raw_item, dict) else 0
+        future_previous: list[int] = []
+        for date_str, day_snapshots in self.data.get("daily_roll_snapshots", {}).items():
+            if not isinstance(day_snapshots, dict):
+                continue
+            raw = day_snapshots.get(user_id)
+            if not isinstance(raw, dict) or str(raw.get("pig_id") or "") != pig_id:
+                continue
+            if self._daily_roll_not_after_cutoff_locked(
+                str(date_str),
+                user_id,
+                report_date=report_date,
+                cutoff=cutoff,
+            ):
+                continue
+            previous_copies = _optional_nonnegative_int(raw.get("previous_copies"))
+            if previous_copies is not None:
+                future_previous.append(previous_copies)
+        return min(future_previous, default=current_copies)
+
+    def _build_daily_report_profiles_locked(
+        self,
+        *,
+        date_str: str,
+        cutoff_at: str,
+        user_ids: tuple[str, ...],
+    ) -> tuple[DailyReportProfileSnapshot, ...]:
+        """从同一份锁定数据构建整群资料，过程中不重复扫描事件账本。"""
+
+        cutoff = _parse_utc_datetime(cutoff_at)
+        if cutoff is None or not _is_valid_date(date_str):
+            raise ValueError("日报日期或截止时间无效")
+        report_date = datetime.date.fromisoformat(date_str)
+        history = self.data.get("history", {})
+        snapshots = self.data.get("daily_roll_snapshots", {})
+        progress_by_user = self.data.get("pig_progress", {})
+        collection_by_user = self.data.get("collection", {})
+        start_date = report_date - datetime.timedelta(days=13)
+        result: list[DailyReportProfileSnapshot] = []
+
+        for user_id in dict.fromkeys(str(item) for item in user_ids if item):
+            raw_progress = progress_by_user.get(user_id, {})
+            raw_progress = raw_progress if isinstance(raw_progress, dict) else {}
+            raw_collection = collection_by_user.get(user_id, [])
+            catalog_ids = (
+                {str(pig_id) for pig_id in raw_collection}
+                if isinstance(raw_collection, list)
+                else set()
+            )
+            catalog_ids.update(str(pig_id) for pig_id in raw_progress)
+
+            visible_catalog_ids: set[str] = set()
+            obtained_times: list[tuple[datetime.datetime, str]] = []
+            for pig_id in catalog_ids:
+                raw_item = raw_progress.get(pig_id, {})
+                obtained_at = (
+                    str(raw_item.get("first_obtained_at") or "")
+                    if isinstance(raw_item, dict)
+                    else ""
+                )
+                parsed_obtained_at = _parse_utc_datetime(obtained_at)
+                if parsed_obtained_at is not None and parsed_obtained_at > cutoff:
+                    continue
+                visible_catalog_ids.add(pig_id)
+                if parsed_obtained_at is not None:
+                    obtained_times.append((parsed_obtained_at, obtained_at))
+
+            day_history = history.get(date_str, {}) if isinstance(history, dict) else {}
+            daily_pig_id = (
+                str(day_history.get(user_id) or "")
+                if isinstance(day_history, dict)
+                else ""
+            )
+            daily_visible = bool(daily_pig_id) and self._daily_roll_not_after_cutoff_locked(
+                date_str,
+                user_id,
+                report_date=report_date,
+                cutoff=cutoff,
+            )
+            raw_daily = (
+                snapshots.get(date_str, {}).get(user_id)
+                if isinstance(snapshots, dict)
+                and isinstance(snapshots.get(date_str), dict)
+                else None
+            )
+            daily_copies = (
+                _optional_nonnegative_int(raw_daily.get("copies_after_roll"))
+                if daily_visible and isinstance(raw_daily, dict)
+                else None
+            )
+            daily_achieved_at = (
+                self._daily_roll_created_at_locked(date_str, user_id)
+                if daily_visible
+                else ""
+            )
+
+            recent_pig_id = ""
+            if isinstance(history, dict):
+                recent_dates = sorted(
+                    (str(item) for item in history if _is_valid_date(str(item))),
+                    reverse=True,
+                )
+                for recent_date in recent_dates:
+                    recent_day = datetime.date.fromisoformat(recent_date)
+                    if not start_date <= recent_day <= report_date:
+                        continue
+                    rows = history.get(recent_date)
+                    candidate = str(rows.get(user_id) or "") if isinstance(rows, dict) else ""
+                    if candidate and self._daily_roll_not_after_cutoff_locked(
+                        recent_date,
+                        user_id,
+                        report_date=report_date,
+                        cutoff=cutoff,
+                    ):
+                        recent_pig_id = candidate
+                        break
+
+            recent_copies = (
+                self._copies_at_cutoff_locked(
+                    user_id,
+                    recent_pig_id,
+                    report_date=report_date,
+                    cutoff=cutoff,
+                )
+                if recent_pig_id
+                else 0
+            )
+            result.append(
+                DailyReportProfileSnapshot(
+                    user_id=user_id,
+                    daily_pig_id=daily_pig_id if daily_visible else "",
+                    daily_ex_level=(
+                        expert_level_from_copies(daily_copies)
+                        if daily_copies is not None
+                        else None
+                    ),
+                    daily_achieved_at=daily_achieved_at,
+                    catalog_count=len(visible_catalog_ids),
+                    catalog_achieved_at=max(
+                        obtained_times,
+                        default=(None, ""),
+                        key=lambda item: item[0],
+                    )[1],
+                    recent_pig_id=recent_pig_id,
+                    recent_ex_level=(
+                        expert_level_from_copies(recent_copies)
+                        if recent_pig_id
+                        else None
+                    ),
+                )
+            )
+        return tuple(result)
+
+    async def get_daily_report_profiles(
+        self,
+        *,
+        date_str: str,
+        cutoff_at: str,
+        user_ids: tuple[str, ...],
+    ) -> tuple[DailyReportProfileSnapshot, ...]:
+        """锁定本地账本后在线程中一次性生成日报排行快照。"""
+
+        # 所有本地写入都遵循同一把 asyncio.Lock。持锁期间工作线程只读取 data，
+        # 既能获得一致快照，也不会占用 NoneBot 的事件循环执行聚合。
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._build_daily_report_profiles_locked,
+                date_str=date_str,
+                cutoff_at=cutoff_at,
+                user_ids=user_ids,
+            )
 
     def get_group_rolls(
         self,

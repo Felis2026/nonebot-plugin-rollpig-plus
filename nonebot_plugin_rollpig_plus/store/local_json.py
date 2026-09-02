@@ -10,6 +10,7 @@ from .models import (
     DailyReportDeliveryClaim,
     DailyReportDeliveryClaimResult,
     DailyReportDeliveryTransitionResult,
+    DailyReportProfileSnapshot,
     DailyRollResult,
     DailyRollSnapshot,
     DrawState,
@@ -167,6 +168,21 @@ class LocalJsonStore(RollpigStore):
         return self.manager.is_protected(group_id, user_id, date_str=date_str)
 
     # ================================ 猪圈日报投递 ================================ #
+
+    async def get_daily_report_profiles(
+        self,
+        *,
+        group_id: str,
+        date_str: str,
+        cutoff_at: str,
+        user_ids: tuple[str, ...],
+    ) -> tuple[DailyReportProfileSnapshot, ...]:
+        # 本地排行资料来自用户全局成长；group_id 只决定参赛范围，由 jobs 传入 user_ids。
+        return await self.manager.get_daily_report_profiles(
+            date_str=date_str,
+            cutoff_at=cutoff_at,
+            user_ids=user_ids,
+        )
 
     async def claim_daily_report_deliveries(
         self,

@@ -291,17 +291,6 @@ def _resolved_profile_pig(pig_id: str, expert_level: int) -> tuple[str, str]:
     return str(pig.get("name") or pig_id), str(image_path.resolve()) if image_path else ""
 
 
-def _catalog_achieved_at(progress: dict) -> str:
-    """图鉴数量首次达到当前值的时间等于最后一只新猪的首次获得时间。"""
-
-    timestamps = [
-        str(item.first_obtained_at)
-        for item in progress.values()
-        if item.first_obtained_at
-    ]
-    return max(timestamps, default="")
-
-
 async def build_daily_user_profiles(
     report_store: RollpigStore,
     *,
@@ -312,7 +301,7 @@ async def build_daily_user_profiles(
     group_rolls: dict[str, str],
     member_names: dict[str, str],
 ) -> dict[str, DailyUserReportProfile]:
-    """补齐昵称、EX 与图鉴资料；Cloud 使用群级批量请求而不是逐用户补查。"""
+    """补齐昵称、EX 与图鉴资料；Local 与 Cloud 都使用整群批量快照。"""
 
     profiles = {
         user_id: DailyUserReportProfile(
@@ -321,90 +310,50 @@ async def build_daily_user_profiles(
         )
         for user_id in report.participant_ids
     }
-    if not isinstance(report_store, LocalJsonStore):
-        try:
-            snapshots = await report_store.get_daily_report_profiles(
-                group_id=group_id,
-                date_str=date_str,
-                cutoff_at=cutoff_at,
-                user_ids=report.participant_ids,
-            )
-        except CloudDailyReportUnsupportedError:
-            # 仅当 Cloud 已支持日报领取、但尚未提供批量资料接口时才会走到这里。
-            # 不能逐用户补查，否则千人群会把一次日报放大成数百个请求；真正的
-            # 旧 Cloud 会在领取阶段停止日报，避免多个实例各自降级后重复发送。
-            logger.info(
-                f"[猪圈日报] 当前 Cloud 不支持批量排行资料，已隐藏 EX 与图鉴榜: "
-                f"group={group_id}"
-            )
-            return profiles
-
-        snapshot_by_user = {item.user_id: item for item in snapshots}
-        for user_id in report.participant_ids:
-            snapshot = snapshot_by_user.get(user_id)
-            if snapshot is None:
-                continue
-
-            daily_pig_id = str(group_rolls.get(user_id) or "")
-            daily_matches = bool(
-                daily_pig_id and snapshot.daily_pig_id == daily_pig_id
-            )
-            daily_level = snapshot.daily_ex_level if daily_matches else None
-            daily_name, daily_image = (
-                _resolved_profile_pig(daily_pig_id, daily_level or 0)
-                if daily_pig_id
-                else ("", "")
-            )
-            recent_name, recent_image = (
-                _resolved_profile_pig(
-                    snapshot.recent_pig_id,
-                    snapshot.recent_ex_level or 0,
-                )
-                if snapshot.recent_pig_id
-                else ("", "")
-            )
-            profiles[user_id] = DailyUserReportProfile(
-                user_id=user_id,
-                display_name=member_names.get(user_id, ""),
-                daily_pig_id=daily_pig_id,
-                daily_pig_name=daily_name,
-                daily_ex_level=daily_level,
-                daily_image_name=daily_image,
-                daily_achieved_at=(snapshot.daily_achieved_at if daily_matches else ""),
-                catalog_count=snapshot.catalog_count,
-                catalog_achieved_at=snapshot.catalog_achieved_at,
-                recent_pig_id=snapshot.recent_pig_id,
-                recent_pig_name=recent_name,
-                recent_image_name=recent_image,
-            )
+    try:
+        snapshots = await report_store.get_daily_report_profiles(
+            group_id=group_id,
+            date_str=date_str,
+            cutoff_at=cutoff_at,
+            user_ids=report.participant_ids,
+        )
+    except CloudDailyReportUnsupportedError:
+        # 仅当 Cloud 已支持日报领取、但尚未提供批量资料接口时才会走到这里。
+        # 不能逐用户补查，否则千人群会把一次日报放大成数百个请求；真正的
+        # 旧 Cloud 会在领取阶段停止日报，避免多个实例各自降级后重复发送。
+        logger.info(
+            f"[猪圈日报] 当前 Cloud 不支持批量排行资料，已隐藏 EX 与图鉴榜: "
+            f"group={group_id}"
+        )
+        return profiles
+    except Exception as error:
+        if not isinstance(report_store, LocalJsonStore):
+            raise
+        logger.warning(f"[猪圈日报] 本地排行资料读取失败，已隐藏相关排行: group={group_id} error={error}")
         return profiles
 
+    snapshot_by_user = {item.user_id: item for item in snapshots}
     for user_id in report.participant_ids:
-        try:
-            catalog = await report_store.get_catalog_snapshot(user_id, days=14)
-        except Exception as error:
-            logger.warning(f"[猪圈日报] 本地用户图鉴读取失败，已隐藏相关排行项: user={user_id} error={error}")
+        snapshot = snapshot_by_user.get(user_id)
+        if snapshot is None:
             continue
 
         daily_pig_id = str(group_rolls.get(user_id) or "")
-        daily_level = (
-            catalog.draw_state.expert_level_of(daily_pig_id)
-            if daily_pig_id
-            else None
+        daily_matches = bool(
+            daily_pig_id and snapshot.daily_pig_id == daily_pig_id
         )
+        daily_level = snapshot.daily_ex_level if daily_matches else None
         daily_name, daily_image = (
             _resolved_profile_pig(daily_pig_id, daily_level or 0)
             if daily_pig_id
             else ("", "")
         )
-
-        recent_pig_id = ""
-        if catalog.recent_rolls:
-            _recent_date, recent_pig_id = max(catalog.recent_rolls.items())
-        recent_level = catalog.draw_state.expert_level_of(recent_pig_id) if recent_pig_id else 0
         recent_name, recent_image = (
-            _resolved_profile_pig(recent_pig_id, recent_level)
-            if recent_pig_id
+            _resolved_profile_pig(
+                snapshot.recent_pig_id,
+                snapshot.recent_ex_level or 0,
+            )
+            if snapshot.recent_pig_id
             else ("", "")
         )
         profiles[user_id] = DailyUserReportProfile(
@@ -414,9 +363,10 @@ async def build_daily_user_profiles(
             daily_pig_name=daily_name,
             daily_ex_level=daily_level,
             daily_image_name=daily_image,
-            catalog_count=len(set(catalog.draw_state.pig_ids)),
-            catalog_achieved_at=_catalog_achieved_at(catalog.draw_state.progress),
-            recent_pig_id=recent_pig_id,
+            daily_achieved_at=(snapshot.daily_achieved_at if daily_matches else ""),
+            catalog_count=snapshot.catalog_count,
+            catalog_achieved_at=snapshot.catalog_achieved_at,
+            recent_pig_id=snapshot.recent_pig_id,
             recent_pig_name=recent_name,
             recent_image_name=recent_image,
         )

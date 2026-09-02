@@ -198,7 +198,7 @@ class DailyReportDeliveryTransitionResult:
 
 @dataclass(frozen=True)
 class DailyReportProfileSnapshot:
-    """Cloud 在日报固定截止点批量返回的用户排行资料。"""
+    """Store 在日报固定截止点批量返回的用户排行资料。"""
 
     user_id: str
     daily_pig_id: str = ""

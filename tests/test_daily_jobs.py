@@ -26,6 +26,7 @@ from nonebot_plugin_rollpig_plus.store.cloud import (
     CloudDailyReportUnsupportedError,
     CloudStore,
 )
+from nonebot_plugin_rollpig_plus.store.local_json import LocalJsonStore
 from nonebot_plugin_rollpig_plus.store.models import (
     DailyReportDeliveryClaim,
     DailyReportDeliveryClaimResult,
@@ -142,6 +143,98 @@ class DailySnapshotCutoffTests(unittest.TestCase):
                 ],
                 ["before", "legacy"],
             )
+
+
+class LocalDailyReportProfileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_profiles_are_batched_in_worker_and_frozen_at_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_file = Path(temp_dir) / "pig_data.json"
+            with patch.object(data_manager_module, "DATA_FILE", data_file):
+                manager = PigDataManager()
+
+        manager.data["history"] = {
+            "2026-08-25": {"before": "pig-a", "late": "pig-old"},
+            "2026-08-26": {"before": "pig-a", "late": "pig-new"},
+            "2026-08-27": {"before": "pig-a"},
+        }
+        manager.data["daily_roll_snapshots"] = {
+            "2026-08-25": {
+                "before": {
+                    "pig_id": "pig-a",
+                    "previous_copies": 0,
+                    "copies_after_roll": 1,
+                    "created_at": "2026-08-25T10:00:00+00:00",
+                },
+                "late": {
+                    "pig_id": "pig-old",
+                    "previous_copies": 0,
+                    "copies_after_roll": 1,
+                    "created_at": "2026-08-25T10:00:00+00:00",
+                },
+            },
+            "2026-08-26": {
+                "before": {
+                    "pig_id": "pig-a",
+                    "previous_copies": 1,
+                    "copies_after_roll": 2,
+                    "created_at": "2026-08-26T15:44:00+00:00",
+                },
+                "late": {
+                    "pig_id": "pig-new",
+                    "previous_copies": 0,
+                    "copies_after_roll": 1,
+                    "created_at": "2026-08-26T15:46:00+00:00",
+                },
+            },
+            "2026-08-27": {
+                "before": {
+                    "pig_id": "pig-a",
+                    "previous_copies": 2,
+                    "copies_after_roll": 3,
+                    "created_at": "2026-08-26T16:01:00+00:00",
+                }
+            },
+        }
+        manager.data["collection"] = {
+            "before": ["pig-a", "pig-future"],
+            "late": ["pig-old", "pig-new"],
+        }
+        manager.data["pig_progress"] = {
+            "before": {
+                "pig-a": {"copies": 3, "first_obtained_at": "2026-08-25T10:00:00+00:00"},
+                "pig-future": {"copies": 1, "first_obtained_at": "2026-08-26T16:01:00+00:00"},
+            },
+            "late": {
+                "pig-old": {"copies": 1, "first_obtained_at": "2026-08-25T10:00:00+00:00"},
+                "pig-new": {"copies": 1, "first_obtained_at": "2026-08-26T15:46:00+00:00"},
+            },
+        }
+        local_store = LocalJsonStore(lambda: manager)
+
+        async def run_inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with patch.object(
+            data_manager_module.asyncio,
+            "to_thread",
+            new=AsyncMock(side_effect=run_inline),
+        ) as to_thread:
+            profiles = await local_store.get_daily_report_profiles(
+                group_id="100",
+                date_str="2026-08-26",
+                cutoff_at="2026-08-26T23:45:00+08:00",
+                user_ids=("before", "late"),
+            )
+
+        by_user = {item.user_id: item for item in profiles}
+        self.assertEqual(by_user["before"].daily_pig_id, "pig-a")
+        self.assertEqual(by_user["before"].daily_ex_level, 1)
+        self.assertEqual(by_user["before"].recent_ex_level, 1)
+        self.assertEqual(by_user["before"].catalog_count, 1)
+        self.assertEqual(by_user["late"].daily_pig_id, "")
+        self.assertEqual(by_user["late"].recent_pig_id, "pig-old")
+        self.assertEqual(by_user["late"].catalog_count, 1)
+        to_thread.assert_awaited_once()
 
 
 class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -579,6 +672,49 @@ class CloudDailyReportContractTests(unittest.IsolatedAsyncioTestCase):
             [{"group_id": "100", "delivery_bot_id": "bot-a"}],
         )
         self.assertEqual(requests[2][1]["action"], "sending")
+
+    async def test_later_claim_batch_failure_preserves_acquired_claims(self) -> None:
+        requests: list[dict] = []
+        date_str = jobs.rollpig_date_str()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads((await request.aread()).decode("utf-8"))
+            requests.append(payload)
+            if len(requests) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {
+                                "date_str": date_str,
+                                "group_id": "000",
+                                "delivery_bot_id": "bot-a",
+                                "cutoff_at": "2026-08-31T15:45:00",
+                                "claim_token": "claim-first-batch",
+                                "status": "claimed",
+                                "attempt_count": 1,
+                            }
+                        ]
+                    },
+                )
+            raise httpx.ConnectError("second batch offline", request=request)
+
+        cloud_store = self._create_store(handler)
+        try:
+            result = await cloud_store.claim_daily_report_deliveries(
+                instance_id="instance-a",
+                delivery_bots={f"{index:03}": "bot-a" for index in range(257)},
+                date_str=date_str,
+                cutoff_at=f"{date_str}T23:45:00+08:00",
+            )
+        finally:
+            await cloud_store.close()
+
+        self.assertEqual([len(item["candidates"]) for item in requests], [256, 1])
+        self.assertEqual(len(result.claims), 1)
+        self.assertEqual(result.claims[0].claim_token, "claim-first-batch")
+        self.assertTrue(result.next_claim_at)
+        self.assertIsNotNone(jobs._daily_report_retry_delay(date_str, [result.next_claim_at]))
 
     async def test_missing_daily_report_routes_raise_scoped_compatibility_error(self) -> None:
         for status_code in (404, 405):

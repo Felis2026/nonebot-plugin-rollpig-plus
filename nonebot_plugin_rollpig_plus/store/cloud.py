@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from typing import Optional
 
 import httpx
@@ -51,6 +52,7 @@ class CloudDailyReportUnsupportedError(CloudStoreError):
 
 DAILY_REPORT_PROFILE_BATCH_SIZE = 2048
 DAILY_REPORT_CLAIM_BATCH_SIZE = 256
+DAILY_REPORT_BATCH_RETRY_SECONDS = 30
 
 
 class CloudStore(RollpigStore):
@@ -709,25 +711,43 @@ class CloudStore(RollpigStore):
         candidate_items = sorted(delivery_bots.items())
         payload_items: list[dict] = []
         next_claim_times: list[str] = []
+        completed_candidates = 0
         for index in range(0, len(candidate_items), DAILY_REPORT_CLAIM_BATCH_SIZE):
-            payload = await self._daily_report_request(
-                "POST",
-                "/v1/daily-reports/claim",
-                json_body={
-                    "date_str": date_str,
-                    "cutoff_at": cutoff_at,
-                    "instance_id": instance_id,
-                    "candidates": [
-                        {
-                            "group_id": group_id,
-                            "delivery_bot_id": delivery_bot_id,
-                        }
-                        for group_id, delivery_bot_id in candidate_items[
-                            index : index + DAILY_REPORT_CLAIM_BATCH_SIZE
-                        ]
-                    ],
-                },
-            )
+            batch_items = candidate_items[index : index + DAILY_REPORT_CLAIM_BATCH_SIZE]
+            try:
+                payload = await self._daily_report_request(
+                    "POST",
+                    "/v1/daily-reports/claim",
+                    json_body={
+                        "date_str": date_str,
+                        "cutoff_at": cutoff_at,
+                        "instance_id": instance_id,
+                        "candidates": [
+                            {
+                                "group_id": group_id,
+                                "delivery_bot_id": delivery_bot_id,
+                            }
+                            for group_id, delivery_bot_id in batch_items
+                        ],
+                    },
+                )
+            except CloudStoreError as error:
+                if completed_candidates == 0:
+                    raise
+                # 前序批次已经在 Cloud 建立租约，必须先交给 jobs 完成投递；同时
+                # 返回短重试时间，让尚未请求的群仍能在当晚窗口内继续领取。
+                next_claim_times.append(
+                    (
+                        dt.datetime.now(dt.timezone.utc)
+                        + dt.timedelta(seconds=DAILY_REPORT_BATCH_RETRY_SECONDS)
+                    ).isoformat()
+                )
+                logger.warning(
+                    "rollpig cloud 日报分批领取中断，已保留前序领取结果并等待重试: "
+                    f"completed_candidates={completed_candidates} error={error}"
+                )
+                break
+            completed_candidates += len(batch_items)
             payload_items.extend(
                 item
                 for item in (payload or {}).get("items", [])

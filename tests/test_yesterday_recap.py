@@ -78,6 +78,8 @@ class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
             ),
             (True, 0, 1, 1),
         )
+        created_at = self.manager.data["daily_roll_snapshots"][DATE]["user"].get("created_at")
+        self.assertTrue(created_at)
 
         completed = replace(
             result.snapshot,
@@ -89,6 +91,10 @@ class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(await self.manager.complete_daily_roll_snapshot("user", completed))
         self.assertTrue(await self.manager.complete_daily_roll_snapshot("user", completed))
+        self.assertEqual(
+            self.manager.data["daily_roll_snapshots"][DATE]["user"].get("created_at"),
+            created_at,
+        )
 
         with self.assertRaises(ValueError):
             await self.manager.complete_daily_roll_snapshot(
