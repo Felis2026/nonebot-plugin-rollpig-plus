@@ -442,6 +442,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_recovery_runs_without_random_delay(self) -> None:
         with (
+            patch.object(jobs, "get_bots", return_value={"bot-a": object()}),
             patch.object(
                 jobs,
                 "_daily_report_startup_recovery_date",
@@ -456,6 +457,28 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             report_date="2026-09-03",
             random_delay_enabled=False,
         )
+
+    async def test_startup_recovery_waits_for_late_bot_connection(self) -> None:
+        with (
+            patch.object(jobs, "get_bots", return_value={}),
+            patch.object(jobs, "schedule_daily_report_recovery") as schedule_recovery,
+        ):
+            await jobs.startup_daily_report_recovery()
+
+        schedule_recovery.assert_not_called()
+
+    async def test_bot_connection_restarts_recovery_in_safe_window(self) -> None:
+        with (
+            patch.object(
+                jobs,
+                "_daily_report_startup_recovery_date",
+                return_value="2026-09-03",
+            ),
+            patch.object(jobs, "schedule_daily_report_recovery") as schedule_recovery,
+        ):
+            await jobs.bot_connect_daily_report_recovery(SimpleNamespace(self_id="bot-a"))
+
+        schedule_recovery.assert_called_once_with("2026-09-03")
 
     async def test_group_report_writes_protection_before_returning_coupon(self) -> None:
         summary_store = SimpleNamespace(
@@ -1139,6 +1162,16 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
             self_id="bot-a",
             send_group_msg=AsyncMock(return_value={"message_id": 123}),
         )
+        call_order: list[str] = []
+
+        async def mark_report_sent(*args, **kwargs):
+            call_order.append("report")
+
+        async def settle_protections(*args, **kwargs):
+            call_order.append("protection")
+
+        bot.send_group_msg.side_effect = mark_report_sent
+
         mocked_store = SimpleNamespace(
             get_active_group_ids=AsyncMock(return_value={"100", "200"}),
             query_daily_events=AsyncMock(
@@ -1150,7 +1183,7 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
                     available=True,
                 )
             ),
-            replace_group_protections=AsyncMock(),
+            replace_group_protections=AsyncMock(side_effect=settle_protections),
             claim_daily_report_deliveries=AsyncMock(
                 return_value=DailyReportDeliveryClaimResult(claims=(claim,))
             ),
@@ -1188,6 +1221,7 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
             await jobs.daily_report_job()
 
         bot.send_group_msg.assert_awaited_once()
+        self.assertEqual(call_order, ["report", "protection"])
         mocked_store.replace_group_protections.assert_awaited_once_with(
             "200", ["user-b"], "2026-08-27"
         )
