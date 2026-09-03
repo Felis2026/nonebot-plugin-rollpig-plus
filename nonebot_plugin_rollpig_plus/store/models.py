@@ -6,7 +6,9 @@ from typing import Any, Optional
 
 MAX_EXPERT_LEVEL = 5
 ROAST_REFILL_THRESHOLD_POLICY = "capped-v1"
+ROAST_REFILL_VOTE_WEIGHT_POLICY = "group-manager-double-v1"
 ROAST_REFILL_THRESHOLD_STEPS = ((25, 8), (35, 12), (45, 16), (55, 20))
+ROAST_REFILL_MIN_DISTINCT_VOTERS = 2
 LEGACY_ROAST_REFILL_RATIOS = (25, 35, 45, 55, 65)
 
 
@@ -288,6 +290,7 @@ class GroupRoastRefillPrepareResult:
     status: str
     request: Optional[GroupRoastRefillRequest] = None
     active_user_ids: tuple[str, ...] = ()
+    vote_weight_policy: str = ""
 
 
 @dataclass(frozen=True)
@@ -297,3 +300,4 @@ class GroupRoastRefillCompleteResult:
     request: Optional[GroupRoastRefillRequest] = None
     valid_voter_ids: tuple[str, ...] = ()
     benefited_user_ids: tuple[str, ...] = ()
+    effective_votes: int = 0

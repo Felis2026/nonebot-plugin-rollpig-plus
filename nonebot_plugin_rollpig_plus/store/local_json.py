@@ -338,6 +338,7 @@ class LocalJsonStore(RollpigStore):
         message_id: str,
         voter_ids: list[str],
         excluded_user_ids: list[str],
+        manager_voter_ids: Optional[list[str]] = None,
         max_charges: int = 2,
         now_ts: Optional[float] = None,
     ) -> GroupRoastRefillCompleteResult:
@@ -346,6 +347,7 @@ class LocalJsonStore(RollpigStore):
             message_id=message_id,
             voter_ids=voter_ids,
             excluded_user_ids=excluded_user_ids,
+            manager_voter_ids=manager_voter_ids,
             max_charges=max_charges,
             now_ts=now_ts,
         )

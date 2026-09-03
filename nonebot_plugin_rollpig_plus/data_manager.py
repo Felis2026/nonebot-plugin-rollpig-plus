@@ -32,6 +32,8 @@ from .store.models import (
     RoastReservationParticipant,
     RoastReservationPrepareResult,
     UnrolledRoastAttemptResult,
+    ROAST_REFILL_MIN_DISTINCT_VOTERS,
+    ROAST_REFILL_VOTE_WEIGHT_POLICY,
     expert_level_from_copies,
     roast_refill_threshold,
 )
@@ -1477,7 +1479,11 @@ class PigDataManager:
                 if raw.get("status") == "voting":
                     if changed:
                         await self._atomic_save()
-                    return GroupRoastRefillPrepareResult("existing", self._refill_from_raw(raw))
+                    return GroupRoastRefillPrepareResult(
+                        "existing",
+                        self._refill_from_raw(raw),
+                        vote_weight_policy=ROAST_REFILL_VOTE_WEIGHT_POLICY,
+                    )
 
             active_user_set = self._group_active_users_locked(target_date, str(group_id))
             if eligible_user_ids is not None:
@@ -1489,7 +1495,11 @@ class PigDataManager:
             if len(active_user_ids) < 3:
                 if changed:
                     await self._atomic_save()
-                return GroupRoastRefillPrepareResult("insufficient_active", active_user_ids=active_user_ids)
+                return GroupRoastRefillPrepareResult(
+                    "insufficient_active",
+                    active_user_ids=active_user_ids,
+                    vote_weight_policy=ROAST_REFILL_VOTE_WEIGHT_POLICY,
+                )
 
             success_count = sum(
                 1
@@ -1522,7 +1532,12 @@ class PigDataManager:
             }
             self.data["roast_refill_requests"][request_id] = raw
             await self._atomic_save()
-            return GroupRoastRefillPrepareResult("created", self._refill_from_raw(raw), active_user_ids)
+            return GroupRoastRefillPrepareResult(
+                "created",
+                self._refill_from_raw(raw),
+                active_user_ids,
+                vote_weight_policy=ROAST_REFILL_VOTE_WEIGHT_POLICY,
+            )
 
     async def bind_group_roast_refill_message(
         self,
@@ -1595,6 +1610,7 @@ class PigDataManager:
         message_id: str,
         voter_ids: list[str],
         excluded_user_ids: list[str],
+        manager_voter_ids: Optional[list[str]] = None,
         max_charges: int = DEFAULT_ROAST_CHARGE_MAX,
         now_ts: Optional[float] = None,
     ) -> GroupRoastRefillCompleteResult:
@@ -1624,12 +1640,23 @@ class PigDataManager:
             active_user_ids = self._group_active_users_locked(str(raw.get("date_str")), str(raw.get("group_id")))
             excluded = {str(user_id) for user_id in excluded_user_ids if user_id}
             valid_voters = tuple(sorted(({str(user_id) for user_id in voter_ids if user_id} & active_user_ids) - excluded))
-            if len(valid_voters) < max(2, _safe_int(raw.get("required_votes"), 2)):
+            valid_voter_set = set(valid_voters)
+            valid_manager_voters = valid_voter_set & {
+                str(user_id) for user_id in (manager_voter_ids or []) if user_id
+            }
+            effective_votes = len(valid_voters) + len(valid_manager_voters)
+            required_votes = max(2, _safe_int(raw.get("required_votes"), 2))
+            # 管理员双票只能降低票数门槛所需的人数，不能让单人独自通过集体表决。
+            if (
+                len(valid_voters) < ROAST_REFILL_MIN_DISTINCT_VOTERS
+                or effective_votes < required_votes
+            ):
                 return GroupRoastRefillCompleteResult(
                     False,
                     "pending",
                     self._refill_from_raw(raw),
                     valid_voter_ids=valid_voters,
+                    effective_votes=effective_votes,
                 )
 
             benefited = tuple(sorted(active_user_ids - excluded))
@@ -1653,6 +1680,7 @@ class PigDataManager:
                 request,
                 valid_voter_ids=valid_voters,
                 benefited_user_ids=benefited,
+                effective_votes=effective_votes,
             )
 
     async def mark_group_roll_seen(

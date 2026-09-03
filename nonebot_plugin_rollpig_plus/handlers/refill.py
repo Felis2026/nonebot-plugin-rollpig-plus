@@ -12,7 +12,6 @@ from ..helpers import (
     get_event_user_name,
     guard_group_enabled,
     guard_store_errors,
-    is_superuser_user,
 )
 from ..roast_refill import (
     RoastRefillReactionError,
@@ -33,10 +32,14 @@ from ..store.cloud import CloudRoastRefillUnsupportedError
 from ..store.models import (
     GroupRoastRefillPrepareResult,
     GroupRoastRefillRequest,
+    ROAST_REFILL_VOTE_WEIGHT_POLICY,
     legacy_roast_refill_threshold,
     roast_refill_threshold,
 )
-from ..texts import ROAST_REFILL_INSUFFICIENT_ACTIVE_TEXTS, ROAST_REFILL_PERMISSION_DENIED_TEXTS
+from ..texts import (
+    ROAST_REFILL_INACTIVE_INITIATOR_TEXTS,
+    ROAST_REFILL_INSUFFICIENT_ACTIVE_TEXTS,
+)
 
 
 cmd_roast_refill = on_command(
@@ -51,12 +54,10 @@ roast_refill_notice = on_notice(block=False, priority=5)
 ROAST_REFILL_BIND_RETRY_DELAYS = (0.25, 0.75)
 
 
-def _can_start_refill(event: GroupMessageEvent) -> bool:
-    """检查是否具备发起补货投票权限（群主、管理员或 SUPERUSER）。"""
+def _can_start_refill(user_id: str, eligible_user_ids: set[str] | frozenset[str]) -> bool:
+    """仅允许本群当日有效活跃用户创建新的补货申请。"""
 
-    if is_superuser_user(str(event.user_id)):
-        return True
-    return getattr(event.sender, "role", "") in {"owner", "admin"}
+    return str(user_id) in eligible_user_ids
 
 
 # ================================ 申请恢复与成员校验 ================================ #
@@ -136,7 +137,7 @@ async def _reconcile_after_bind(bot: Bot, request: GroupRoastRefillRequest) -> b
 
 def _preparation_matches_members(
     preparation: GroupRoastRefillPrepareResult,
-    eligible_user_ids: set[str],
+    eligible_user_ids: set[str] | frozenset[str],
 ) -> bool:
     """校验补货门槛快照与当前活跃成员是否一致。"""
 
@@ -190,7 +191,11 @@ async def _describe_existing_refill(
     if result.completed:
         return None
     if result.status == "pending":
-        return format_existing_refill(request, len(result.valid_voter_ids))
+        return format_existing_refill(
+            request,
+            supporters=len(result.valid_voter_ids),
+            votes=result.effective_votes,
+        )
     if result.status == "unbound":
         return "补货申请正在生成，请稍后再查看票数。"
     if result.status == "group_disabled":
@@ -209,12 +214,6 @@ async def _(bot: Bot, event: Event):
     if not isinstance(event, GroupMessageEvent):
         await cmd_roast_refill.finish("烤箱补货只能在群聊中发起。")
         return
-    if not _can_start_refill(event):
-        await cmd_roast_refill.finish(
-            MessageSegment.reply(event.message_id) + random.choice(ROAST_REFILL_PERMISSION_DENIED_TEXTS)
-        )
-        return
-
     group_id = str(event.group_id)
     date_str = rollpig_date_str()
 
@@ -244,7 +243,7 @@ async def _(bot: Bot, event: Event):
     # ================================ 当前群成员门槛 ================================ #
 
     try:
-        _, eligible_user_ids = await get_refill_eligible_users(bot, group_id, date_str)
+        eligibility = await get_refill_eligible_users(bot, group_id, date_str)
     except RoastRefillReactionError as error:
         logger.warning(f"rollpig 烤箱补货群成员核对失败: group={group_id} error={error}")
         await cmd_roast_refill.finish(
@@ -252,9 +251,16 @@ async def _(bot: Bot, event: Event):
         )
         return
 
+    eligible_user_ids = eligibility.eligible_user_ids
     if len(eligible_user_ids) < 3:
         await cmd_roast_refill.finish(
             MessageSegment.reply(event.message_id) + random.choice(ROAST_REFILL_INSUFFICIENT_ACTIVE_TEXTS)
+        )
+        return
+    if not _can_start_refill(str(event.user_id), eligible_user_ids):
+        await cmd_roast_refill.finish(
+            MessageSegment.reply(event.message_id)
+            + random.choice(ROAST_REFILL_INACTIVE_INITIATOR_TEXTS)
         )
         return
 
@@ -307,7 +313,13 @@ async def _(bot: Bot, event: Event):
     try:
         send_result = await bot.send_group_msg(
             group_id=event.group_id,
-            message=build_refill_created_message(request, resolve_roast_charge_max()),
+            message=build_refill_created_message(
+                request,
+                resolve_roast_charge_max(),
+                manager_double_vote=(
+                    preparation.vote_weight_policy == ROAST_REFILL_VOTE_WEIGHT_POLICY
+                ),
+            ),
         )
     except Exception as error:
         await _fail_unusable_request(request.request_id, "", "send_failed")
