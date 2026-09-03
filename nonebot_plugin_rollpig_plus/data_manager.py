@@ -15,6 +15,9 @@ from .runtime import rollpig_date_str, rollpig_today, resolve_roast_cooldown_sec
 from .store.models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyReportDeliveryClaim,
+    DailyReportDeliveryClaimResult,
+    DailyReportDeliveryTransitionResult,
     DailyReportProfileSnapshot,
     DailyRollResult,
     DailyRollSnapshot,
@@ -141,6 +144,7 @@ class PigDataManager:
     - group_daily_active_users: {date: {group_id: [user_id, ...]}} ← 群日活玩家
     - group_daily_active_at: {date: {group_id: {user_id: ISO时间}}} ← 群日活首次登记时间
     - roast_refill_requests: {request_id: request} ← 烤箱补货投票及结果
+    - daily_report_deliveries: {date: {group_id: delivery}} ← Local 日报投递恢复状态
 
     写操作通过 asyncio.Lock 串行化，文件使用原子替换（.tmp → rename）防止 JSON 损坏。
     """
@@ -175,6 +179,7 @@ class PigDataManager:
             "group_daily_active_users": {},
             "group_daily_active_at": {},
             "roast_refill_requests": {},
+            "daily_report_deliveries": {},
         }
 
     def _load(self) -> dict:
@@ -227,6 +232,7 @@ class PigDataManager:
             "group_daily_active_users",
             "group_daily_active_at",
             "roast_refill_requests",
+            "daily_report_deliveries",
         ):
             if not isinstance(data.get(key), dict):
                 data[key] = {}
@@ -372,6 +378,57 @@ class PigDataManager:
             ):
                 reservation["status"] = "sending"
                 migrated = True
+
+        # ================================ Local 日报投递恢复 ================================ #
+        # claimed 说明尚未提交发送意图，重启后可以安全重领；sending 可能已经发出
+        # QQ 消息，只能冻结为 uncertain，避免进程重启后重复发送同一份日报。
+        daily_report_deliveries = data.get("daily_report_deliveries", {})
+        normalized_deliveries: dict[str, dict[str, dict]] = {}
+        valid_delivery_statuses = {
+            "pending",
+            "claimed",
+            "sending",
+            "sent",
+            "skipped",
+            "uncertain",
+            "failed",
+        }
+        for date_str, group_map in daily_report_deliveries.items():
+            if not _is_valid_date(str(date_str)) or not isinstance(group_map, dict):
+                continue
+            normalized_group_map: dict[str, dict] = {}
+            for group_id, raw in group_map.items():
+                if not group_id or not isinstance(raw, dict):
+                    continue
+                status = str(raw.get("status") or "pending")
+                if status not in valid_delivery_statuses:
+                    status = "pending"
+                elif status == "claimed":
+                    status = "pending"
+                elif status == "sending":
+                    status = "uncertain"
+                next_attempt_at = str(raw.get("next_attempt_at") or "")
+                if next_attempt_at:
+                    try:
+                        datetime.datetime.fromisoformat(next_attempt_at.replace("Z", "+00:00"))
+                    except ValueError:
+                        next_attempt_at = ""
+                normalized_group_map[str(group_id)] = {
+                    "status": status,
+                    "attempt_count": max(0, _safe_int(raw.get("attempt_count"), 0)),
+                    "delivery_bot_id": str(raw.get("delivery_bot_id") or ""),
+                    "cutoff_at": str(raw.get("cutoff_at") or ""),
+                    "claim_token": "" if status == "pending" else str(raw.get("claim_token") or ""),
+                    "next_attempt_at": next_attempt_at if status == "pending" else "",
+                    "message_id": str(raw.get("message_id") or ""),
+                    "last_error": str(raw.get("last_error") or ""),
+                    "updated_at": str(raw.get("updated_at") or ""),
+                }
+            if normalized_group_map:
+                normalized_deliveries[str(date_str)] = normalized_group_map
+        if normalized_deliveries != daily_report_deliveries:
+            data["daily_report_deliveries"] = normalized_deliveries
+            migrated = True
         if migrated:
             logger.info("pig_data.json 数据结构已自动迁移/补全，开始落盘...")
             if persist:
@@ -2230,6 +2287,164 @@ class PigDataManager:
                 date_str=date_str,
                 cutoff_at=cutoff_at,
                 user_ids=user_ids,
+            )
+
+    # ================================ Local 日报投递状态 ================================ #
+
+    async def claim_local_daily_report_deliveries(
+        self,
+        *,
+        instance_id: str,
+        delivery_bots: dict[str, str],
+        date_str: str,
+        cutoff_at: str,
+        max_attempts: int,
+    ) -> DailyReportDeliveryClaimResult:
+        """持久化领取 Local 日报；返回前必须先把 claim 写入本地账本。"""
+
+        terminal_statuses = {"sent", "skipped", "uncertain", "failed"}
+        async with self._lock:
+            deliveries = self.data.setdefault("daily_report_deliveries", {})
+            changed = False
+            for stored_date in tuple(deliveries):
+                if stored_date != date_str:
+                    deliveries.pop(stored_date, None)
+                    changed = True
+            day_map = deliveries.setdefault(date_str, {})
+            now = datetime.datetime.now(datetime.timezone.utc)
+            claims: list[DailyReportDeliveryClaim] = []
+            next_claim_times: list[datetime.datetime] = []
+
+            for group_id, delivery_bot_id in sorted(delivery_bots.items()):
+                raw = day_map.setdefault(str(group_id), {})
+                status = str(raw.get("status") or "pending")
+                attempt_count = max(0, _safe_int(raw.get("attempt_count"), 0))
+                if status in terminal_statuses:
+                    continue
+                if attempt_count >= max_attempts:
+                    raw.update(
+                        status="failed",
+                        next_attempt_at="",
+                        updated_at=now.isoformat(),
+                    )
+                    changed = True
+                    continue
+                if status in {"claimed", "sending"}:
+                    continue
+
+                next_attempt_at_raw = str(raw.get("next_attempt_at") or "")
+                if next_attempt_at_raw:
+                    try:
+                        next_attempt_at = datetime.datetime.fromisoformat(
+                            next_attempt_at_raw.replace("Z", "+00:00")
+                        )
+                        if next_attempt_at.tzinfo is None:
+                            next_attempt_at = next_attempt_at.replace(
+                                tzinfo=datetime.timezone.utc
+                            )
+                        next_attempt_at = next_attempt_at.astimezone(datetime.timezone.utc)
+                    except ValueError:
+                        next_attempt_at = None
+                    if next_attempt_at is not None and next_attempt_at > now:
+                        next_claim_times.append(next_attempt_at)
+                        continue
+
+                attempt_count += 1
+                claim_token = (
+                    f"local:{instance_id}:{date_str}:{group_id}:{attempt_count}"
+                )
+                raw.update(
+                    status="claimed",
+                    attempt_count=attempt_count,
+                    delivery_bot_id=str(delivery_bot_id),
+                    cutoff_at=cutoff_at,
+                    claim_token=claim_token,
+                    next_attempt_at="",
+                    updated_at=now.isoformat(),
+                )
+                changed = True
+                claims.append(
+                    DailyReportDeliveryClaim(
+                        date_str=date_str,
+                        group_id=str(group_id),
+                        delivery_bot_id=str(delivery_bot_id),
+                        cutoff_at=cutoff_at,
+                        claim_token=claim_token,
+                        attempt_count=attempt_count,
+                    )
+                )
+
+            if changed:
+                await self._atomic_save()
+            return DailyReportDeliveryClaimResult(
+                claims=tuple(claims),
+                next_claim_at=(
+                    min(next_claim_times).isoformat()
+                    if next_claim_times
+                    else ""
+                ),
+            )
+
+    async def transition_local_daily_report_delivery(
+        self,
+        claim: DailyReportDeliveryClaim,
+        action: str,
+        *,
+        retry_seconds: int,
+        max_attempts: int,
+        message_id: str = "",
+        error: str = "",
+    ) -> DailyReportDeliveryTransitionResult:
+        """原子保存 Local 日报状态；sending 必须先落盘再允许调用 QQ 发送。"""
+
+        async with self._lock:
+            raw = (
+                self.data.setdefault("daily_report_deliveries", {})
+                .get(claim.date_str, {})
+                .get(claim.group_id)
+            )
+            if not isinstance(raw, dict) or raw.get("claim_token") != claim.claim_token:
+                return DailyReportDeliveryTransitionResult(ok=False)
+
+            status = str(raw.get("status") or "")
+            attempt_count = max(0, _safe_int(raw.get("attempt_count"), 0))
+            allowed_actions = {
+                "claimed": {"sending", "release", "uncertain", "skip"},
+                "sending": {"sent", "uncertain"},
+            }.get(status, set())
+            if action not in allowed_actions:
+                return DailyReportDeliveryTransitionResult(
+                    ok=False,
+                    status=status,
+                    attempt_count=attempt_count,
+                )
+
+            now = datetime.datetime.now(datetime.timezone.utc)
+            next_attempt_at = ""
+            if action == "release":
+                if attempt_count >= max_attempts:
+                    next_status = "failed"
+                else:
+                    next_status = "pending"
+                    next_attempt_at = (
+                        now + datetime.timedelta(seconds=max(0, retry_seconds))
+                    ).isoformat()
+            else:
+                next_status = "skipped" if action == "skip" else action
+
+            raw.update(
+                status=next_status,
+                next_attempt_at=next_attempt_at,
+                message_id=str(message_id or "")[:128],
+                last_error=str(error or "")[:1000],
+                updated_at=now.isoformat(),
+            )
+            await self._atomic_save()
+            return DailyReportDeliveryTransitionResult(
+                ok=True,
+                status=next_status,
+                attempt_count=attempt_count,
+                next_attempt_at=next_attempt_at,
             )
 
     def get_group_rolls(
