@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import datetime as dt
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
 from .base import RollpigStore
@@ -32,29 +29,12 @@ if TYPE_CHECKING:
 
 
 LOCAL_DAILY_REPORT_RETRY_SECONDS = 30
-_LOCAL_DAILY_REPORT_TERMINAL_STATUSES = frozenset({"sent", "skipped", "uncertain"})
-
-
-@dataclass
-class _LocalDailyReportDelivery:
-    """Local 单实例内的一份日报投递状态；用于同一任务内退避和防重。"""
-
-    status: str = "pending"
-    attempt_count: int = 0
-    delivery_bot_id: str = ""
-    cutoff_at: str = ""
-    claim_token: str = ""
-    next_attempt_at: dt.datetime | None = None
+LOCAL_DAILY_REPORT_MAX_ATTEMPTS = 4
 
 
 class LocalJsonStore(RollpigStore):
     def __init__(self, manager_factory: Callable[[], "PigDataManager"]):
         self._manager_factory = manager_factory
-        self._daily_report_lock = asyncio.Lock()
-        self._daily_report_deliveries: dict[
-            tuple[str, str],
-            _LocalDailyReportDelivery,
-        ] = {}
 
     @property
     def manager(self) -> "PigDataManager":
@@ -216,57 +196,15 @@ class LocalJsonStore(RollpigStore):
         date_str: str,
         cutoff_at: str,
     ) -> DailyReportDeliveryClaimResult:
-        # Local 只支持单进程协调，但同一轮任务仍会因构建失败进入重领循环；
-        # 已发送与不确定状态必须留在内存中，不能在退避后被重复领取。
-        async with self._daily_report_lock:
-            for key in tuple(self._daily_report_deliveries):
-                if key[0] != date_str:
-                    self._daily_report_deliveries.pop(key, None)
-
-            now = dt.datetime.now(dt.timezone.utc)
-            claims: list[DailyReportDeliveryClaim] = []
-            next_claim_times: list[dt.datetime] = []
-            for group_id, delivery_bot_id in sorted(delivery_bots.items()):
-                key = (date_str, group_id)
-                delivery = self._daily_report_deliveries.setdefault(
-                    key,
-                    _LocalDailyReportDelivery(),
-                )
-                if delivery.status in _LOCAL_DAILY_REPORT_TERMINAL_STATUSES:
-                    continue
-                if delivery.status in {"claimed", "sending"}:
-                    continue
-                if delivery.next_attempt_at is not None and delivery.next_attempt_at > now:
-                    next_claim_times.append(delivery.next_attempt_at)
-                    continue
-
-                delivery.attempt_count += 1
-                delivery.status = "claimed"
-                delivery.delivery_bot_id = delivery_bot_id
-                delivery.cutoff_at = cutoff_at
-                delivery.claim_token = (
-                    f"local:{instance_id}:{date_str}:{group_id}:{delivery.attempt_count}"
-                )
-                delivery.next_attempt_at = None
-                claims.append(
-                    DailyReportDeliveryClaim(
-                        date_str=date_str,
-                        group_id=group_id,
-                        delivery_bot_id=delivery_bot_id,
-                        cutoff_at=cutoff_at,
-                        claim_token=delivery.claim_token,
-                        attempt_count=delivery.attempt_count,
-                    )
-                )
-
-            return DailyReportDeliveryClaimResult(
-                claims=tuple(claims),
-                next_claim_at=(
-                    min(next_claim_times).isoformat()
-                    if next_claim_times
-                    else ""
-                ),
-            )
+        # Local 仍只协调单进程，但领取状态必须先落盘，才能在安全窗口内
+        # 从进程重启中恢复，并避免已经进入 sending 的日报重复发送。
+        return await self.manager.claim_local_daily_report_deliveries(
+            instance_id=instance_id,
+            delivery_bots=delivery_bots,
+            date_str=date_str,
+            cutoff_at=cutoff_at,
+            max_attempts=LOCAL_DAILY_REPORT_MAX_ATTEMPTS,
+        )
 
     async def transition_daily_report_delivery(
         self,
@@ -276,42 +214,14 @@ class LocalJsonStore(RollpigStore):
         message_id: str = "",
         error: str = "",
     ) -> DailyReportDeliveryTransitionResult:
-        async with self._daily_report_lock:
-            delivery = self._daily_report_deliveries.get((claim.date_str, claim.group_id))
-            if delivery is None or delivery.claim_token != claim.claim_token:
-                return DailyReportDeliveryTransitionResult(ok=False)
-
-            allowed_actions = {
-                "claimed": {"sending", "release", "uncertain", "skip"},
-                "sending": {"sent", "uncertain"},
-            }.get(delivery.status, set())
-            if action not in allowed_actions:
-                return DailyReportDeliveryTransitionResult(
-                    ok=False,
-                    status=delivery.status,
-                    attempt_count=delivery.attempt_count,
-                )
-
-            if action == "release":
-                delivery.status = "pending"
-                delivery.next_attempt_at = (
-                    dt.datetime.now(dt.timezone.utc)
-                    + dt.timedelta(seconds=LOCAL_DAILY_REPORT_RETRY_SECONDS)
-                )
-                return DailyReportDeliveryTransitionResult(
-                    ok=True,
-                    status=delivery.status,
-                    attempt_count=delivery.attempt_count,
-                    next_attempt_at=delivery.next_attempt_at.isoformat(),
-                )
-
-            delivery.status = "skipped" if action == "skip" else action
-            delivery.next_attempt_at = None
-            return DailyReportDeliveryTransitionResult(
-                ok=True,
-                status=delivery.status,
-                attempt_count=delivery.attempt_count,
-            )
+        return await self.manager.transition_local_daily_report_delivery(
+            claim,
+            action,
+            retry_seconds=LOCAL_DAILY_REPORT_RETRY_SECONDS,
+            max_attempts=LOCAL_DAILY_REPORT_MAX_ATTEMPTS,
+            message_id=message_id,
+            error=error,
+        )
 
     async def prune_history(self, days_to_keep: int = 14) -> None:
         await self.manager.clean_old_history(days_to_keep=days_to_keep)
@@ -428,6 +338,7 @@ class LocalJsonStore(RollpigStore):
         message_id: str,
         voter_ids: list[str],
         excluded_user_ids: list[str],
+        manager_voter_ids: Optional[list[str]] = None,
         max_charges: int = 2,
         now_ts: Optional[float] = None,
     ) -> GroupRoastRefillCompleteResult:
@@ -436,6 +347,7 @@ class LocalJsonStore(RollpigStore):
             message_id=message_id,
             voter_ids=voter_ids,
             excluded_user_ids=excluded_user_ids,
+            manager_voter_ids=manager_voter_ids,
             max_charges=max_charges,
             now_ts=now_ts,
         )

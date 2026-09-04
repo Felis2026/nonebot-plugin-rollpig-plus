@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import tempfile
@@ -242,6 +243,18 @@ class LocalDailyReportProfileTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def _create_local_store(
+        self,
+        data_file: Path | None = None,
+    ) -> tuple[LocalJsonStore, Path]:
+        if data_file is None:
+            temp_dir = tempfile.TemporaryDirectory()
+            self.addCleanup(temp_dir.cleanup)
+            data_file = Path(temp_dir.name) / "pig_data.json"
+        with patch.object(data_manager_module, "DATA_FILE", data_file):
+            manager = PigDataManager()
+        return LocalJsonStore(lambda: manager), data_file
+
     async def test_base_store_defaults_keep_legacy_backends_compatible(self) -> None:
         self.assertNotIn("claim_daily_report_deliveries", RollpigStore.__abstractmethods__)
         self.assertNotIn("transition_daily_report_delivery", RollpigStore.__abstractmethods__)
@@ -264,13 +277,12 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             ),
             "sending",
         )
-
         self.assertEqual(claim_result, DailyReportDeliveryClaimResult())
         self.assertFalse(transition)
 
     async def test_local_release_retries_without_reclaiming_completed_groups(self) -> None:
         date_str = jobs.rollpig_date_str()
-        local_store = LocalJsonStore(lambda: None)  # type: ignore[arg-type]
+        local_store, _ = self._create_local_store()
         candidates = {"100": "bot-a", "200": "bot-a"}
 
         first = await local_store.claim_daily_report_deliveries(
@@ -320,6 +332,186 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             cutoff_at=f"{date_str}T23:45:00+08:00",
         )
         self.assertEqual(completed.claims, ())
+
+    async def test_local_release_stops_after_four_attempts(self) -> None:
+        date_str = jobs.rollpig_date_str()
+        local_store, _ = self._create_local_store()
+        candidates = {"100": "bot-a"}
+
+        with patch.object(local_json_module, "LOCAL_DAILY_REPORT_RETRY_SECONDS", 0):
+            for attempt in range(1, 5):
+                result = await local_store.claim_daily_report_deliveries(
+                    instance_id="instance-a",
+                    delivery_bots=candidates,
+                    date_str=date_str,
+                    cutoff_at=f"{date_str}T23:45:00+08:00",
+                )
+                self.assertEqual(len(result.claims), 1)
+                self.assertEqual(result.claims[0].attempt_count, attempt)
+                released = await local_store.transition_daily_report_delivery(
+                    result.claims[0],
+                    "release",
+                )
+
+        self.assertTrue(released)
+        self.assertEqual(released.status, "failed")
+        self.assertEqual(released.attempt_count, 4)
+        self.assertEqual(released.next_attempt_at, "")
+        exhausted = await local_store.claim_daily_report_deliveries(
+            instance_id="instance-a",
+            delivery_bots=candidates,
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        self.assertEqual(exhausted.claims, ())
+
+    async def test_local_claim_is_recovered_after_process_restart(self) -> None:
+        date_str = jobs.rollpig_date_str()
+        first_store, data_file = self._create_local_store()
+        first = await first_store.claim_daily_report_deliveries(
+            instance_id="instance-a",
+            delivery_bots={"100": "bot-a"},
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        self.assertEqual(first.claims[0].attempt_count, 1)
+
+        # 新建 Manager 模拟进程重启；claimed 尚未提交发送意图，可以安全重领。
+        restarted_store, _ = self._create_local_store(data_file)
+        recovered = await restarted_store.claim_daily_report_deliveries(
+            instance_id="instance-b",
+            delivery_bots={"100": "bot-b"},
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+
+        self.assertEqual(len(recovered.claims), 1)
+        self.assertEqual(recovered.claims[0].attempt_count, 2)
+        self.assertEqual(recovered.claims[0].delivery_bot_id, "bot-b")
+
+    async def test_local_sending_state_freezes_as_uncertain_after_restart(self) -> None:
+        date_str = jobs.rollpig_date_str()
+        first_store, data_file = self._create_local_store()
+        first = await first_store.claim_daily_report_deliveries(
+            instance_id="instance-a",
+            delivery_bots={"100": "bot-a"},
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        self.assertTrue(
+            await first_store.transition_daily_report_delivery(
+                first.claims[0],
+                "sending",
+            )
+        )
+
+        restarted_store, _ = self._create_local_store(data_file)
+        recovered = await restarted_store.claim_daily_report_deliveries(
+            instance_id="instance-b",
+            delivery_bots={"100": "bot-b"},
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+
+        self.assertEqual(recovered.claims, ())
+        self.assertEqual(
+            restarted_store.manager.data["daily_report_deliveries"][date_str]["100"]["status"],
+            "uncertain",
+        )
+
+    def test_startup_recovery_date_only_covers_safe_delivery_window(self) -> None:
+        timezone = jobs.ROLLPIG_TIMEZONE
+        self.assertEqual(
+            jobs._daily_report_startup_recovery_date(
+                dt.datetime(2026, 9, 3, 23, 50, tzinfo=timezone)
+            ),
+            "2026-09-03",
+        )
+        self.assertEqual(
+            jobs._daily_report_startup_recovery_date(
+                dt.datetime(2026, 9, 4, 0, 5, tzinfo=timezone)
+            ),
+            "2026-09-03",
+        )
+        self.assertEqual(
+            jobs._daily_report_startup_recovery_date(
+                dt.datetime(2026, 9, 4, 12, 0, tzinfo=timezone)
+            ),
+            "",
+        )
+
+    async def test_startup_recovery_runs_without_random_delay(self) -> None:
+        with (
+            patch.object(jobs, "get_bots", return_value={"bot-a": object()}),
+            patch.object(
+                jobs,
+                "_daily_report_startup_recovery_date",
+                return_value="2026-09-03",
+            ),
+            patch.object(jobs, "daily_report_job", new=AsyncMock()) as report_job,
+        ):
+            await jobs.startup_daily_report_recovery()
+            await asyncio.sleep(0)
+
+        report_job.assert_awaited_once_with(
+            report_date="2026-09-03",
+            random_delay_enabled=False,
+        )
+
+    async def test_startup_recovery_waits_for_late_bot_connection(self) -> None:
+        with (
+            patch.object(jobs, "get_bots", return_value={}),
+            patch.object(jobs, "schedule_daily_report_recovery") as schedule_recovery,
+        ):
+            await jobs.startup_daily_report_recovery()
+
+        schedule_recovery.assert_not_called()
+
+    async def test_bot_connection_restarts_recovery_in_safe_window(self) -> None:
+        with (
+            patch.object(
+                jobs,
+                "_daily_report_startup_recovery_date",
+                return_value="2026-09-03",
+            ),
+            patch.object(jobs, "schedule_daily_report_recovery") as schedule_recovery,
+        ):
+            await jobs.bot_connect_daily_report_recovery(SimpleNamespace(self_id="bot-a"))
+
+        schedule_recovery.assert_called_once_with("2026-09-03")
+
+    async def test_bot_connection_during_recovery_queues_one_route_refresh(self) -> None:
+        report_date = "2026-09-03"
+        first_run_started = asyncio.Event()
+        finish_first_run = asyncio.Event()
+        call_count = 0
+
+        async def run_report(**kwargs) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_run_started.set()
+                await finish_first_run.wait()
+
+        jobs.daily_report_recovery_dates.clear()
+        jobs.pending_daily_report_recovery_dates.clear()
+        existing_tasks = set(jobs.background_daily_report_tasks)
+        with patch.object(jobs, "daily_report_job", side_effect=run_report):
+            jobs.schedule_daily_report_recovery(report_date)
+            recovery_task = next(
+                iter(jobs.background_daily_report_tasks - existing_tasks)
+            )
+            await first_run_started.wait()
+
+            # 第二个 Bot 在首轮恢复尚未结束时连接；这次触发不能被日期去重吞掉。
+            jobs.schedule_daily_report_recovery(report_date)
+            jobs.schedule_daily_report_recovery(report_date)
+            finish_first_run.set()
+            await recovery_task
+
+        self.assertEqual(call_count, 2)
+        self.assertNotIn(report_date, jobs.daily_report_recovery_dates)
+        self.assertNotIn(report_date, jobs.pending_daily_report_recovery_dates)
 
     async def test_group_report_writes_protection_before_returning_coupon(self) -> None:
         summary_store = SimpleNamespace(
@@ -1003,6 +1195,16 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
             self_id="bot-a",
             send_group_msg=AsyncMock(return_value={"message_id": 123}),
         )
+        call_order: list[str] = []
+
+        async def mark_report_sent(*args, **kwargs):
+            call_order.append("report")
+
+        async def settle_protections(*args, **kwargs):
+            call_order.append("protection")
+
+        bot.send_group_msg.side_effect = mark_report_sent
+
         mocked_store = SimpleNamespace(
             get_active_group_ids=AsyncMock(return_value={"100", "200"}),
             query_daily_events=AsyncMock(
@@ -1014,7 +1216,7 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
                     available=True,
                 )
             ),
-            replace_group_protections=AsyncMock(),
+            replace_group_protections=AsyncMock(side_effect=settle_protections),
             claim_daily_report_deliveries=AsyncMock(
                 return_value=DailyReportDeliveryClaimResult(claims=(claim,))
             ),
@@ -1052,8 +1254,90 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
             await jobs.daily_report_job()
 
         bot.send_group_msg.assert_awaited_once()
+        self.assertEqual(call_order, ["report", "protection"])
         mocked_store.replace_group_protections.assert_awaited_once_with(
             "200", ["user-b"], "2026-08-27"
+        )
+
+    async def test_settlement_starts_during_report_retry_and_is_awaited(self) -> None:
+        retry_wait_started = asyncio.Event()
+        release_retry_wait = asyncio.Event()
+        report_retry_finished = asyncio.Event()
+        settlement_started = asyncio.Event()
+        release_settlement = asyncio.Event()
+        retry_delay_calls = 0
+
+        async def controlled_sleep(delay: float) -> None:
+            if delay == 0:
+                return
+            retry_wait_started.set()
+            await release_retry_wait.wait()
+
+        def report_retry_delay(*args, **kwargs) -> float | None:
+            nonlocal retry_delay_calls
+            retry_delay_calls += 1
+            if retry_delay_calls == 1:
+                return 1.0
+            report_retry_finished.set()
+            return None
+
+        async def settle_protections(*args, **kwargs) -> None:
+            settlement_started.set()
+            await release_settlement.wait()
+
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"100", "200"}),
+            claim_daily_report_deliveries=AsyncMock(
+                return_value=DailyReportDeliveryClaimResult(claims=())
+            ),
+        )
+        bot = SimpleNamespace(self_id="bot-a")
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs.asyncio, "sleep", new=controlled_sleep),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(
+                jobs,
+                "is_daily_report_enabled",
+                side_effect=lambda group_id: group_id == "100",
+            ),
+            patch.object(jobs, "_daily_report_retry_delay", side_effect=report_retry_delay),
+            patch.object(
+                jobs,
+                "resolve_daily_report_bots",
+                new=AsyncMock(return_value={"100": bot}),
+            ),
+            patch.object(
+                jobs,
+                "settle_daily_protections_safely",
+                new=AsyncMock(side_effect=settle_protections),
+            ) as settle_safely,
+        ):
+            report_task = asyncio.create_task(
+                jobs.daily_report_job(
+                    report_date="2026-08-26",
+                    random_delay_enabled=False,
+                )
+            )
+            await asyncio.wait_for(retry_wait_started.wait(), timeout=1)
+            await asyncio.wait_for(settlement_started.wait(), timeout=1)
+
+            settle_safely.assert_awaited_once()
+            self.assertFalse(report_task.done())
+
+            release_retry_wait.set()
+            await asyncio.wait_for(report_retry_finished.wait(), timeout=1)
+            self.assertFalse(report_task.done())
+
+            release_settlement.set()
+            await asyncio.wait_for(report_task, timeout=1)
+
+        settle_safely.assert_awaited_once_with(
+            ["200"],
+            date_str="2026-08-26",
+            protect_date="2026-08-27",
+            cutoff_at="2026-08-26T23:45:00+08:00",
         )
 
     async def test_settlement_skipped_when_events_unavailable(self) -> None:
@@ -1080,7 +1364,7 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
         mocked_store.replace_group_protections.assert_not_awaited()
 
     async def test_settlement_continues_after_group_failure(self) -> None:
-        # 单群写入失败只损失该群保护，不能阻断其余群结算。
+        # 单群重试耗尽只损失该群保护，不能阻断其余群结算。
         events = (
             self._roast_event("200", "user-a", "user-b"),
             self._roast_event("200", "user-c", "user-b"),
@@ -1093,8 +1377,93 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
                 return_value=DailyEventQueryResult(items=events, available=True)
             ),
             replace_group_protections=AsyncMock(
-                side_effect=[RuntimeError("cloud write failed"), None]
+                side_effect=[
+                    RuntimeError("cloud write failed 1"),
+                    RuntimeError("cloud write failed 2"),
+                    RuntimeError("cloud write failed 3"),
+                    None,
+                ]
             ),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "PROTECTION_SETTLEMENT_RETRY_DELAYS", (0.0, 0.0, 0.0)),
+        ):
+            await jobs.settle_daily_protections(
+                ["200", "300"],
+                date_str="2026-08-26",
+                protect_date="2026-08-27",
+                cutoff_at="2026-08-26T23:45:00+08:00",
+            )
+
+        self.assertEqual(mocked_store.replace_group_protections.await_count, 4)
+        final_call = mocked_store.replace_group_protections.await_args_list[-1]
+        self.assertEqual(final_call.args, ("300", ["user-e"], "2026-08-27"))
+
+    async def test_settlement_retries_group_write_until_success(self) -> None:
+        mocked_store = SimpleNamespace(
+            query_daily_events=AsyncMock(
+                return_value=DailyEventQueryResult(
+                    items=(
+                        self._roast_event("200", "user-a", "user-b"),
+                        self._roast_event("200", "user-c", "user-b"),
+                    ),
+                    available=True,
+                )
+            ),
+            replace_group_protections=AsyncMock(
+                side_effect=[RuntimeError("temporary failure"), None]
+            ),
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "PROTECTION_SETTLEMENT_RETRY_DELAYS", (0.0, 0.0, 0.0)),
+        ):
+            await jobs.settle_daily_protections(
+                ["200"],
+                date_str="2026-08-26",
+                protect_date="2026-08-27",
+                cutoff_at="2026-08-26T23:45:00+08:00",
+            )
+
+        self.assertEqual(mocked_store.replace_group_protections.await_count, 2)
+
+    async def test_settlement_event_query_failure_is_isolated(self) -> None:
+        mocked_store = SimpleNamespace(
+            query_daily_events=AsyncMock(side_effect=RuntimeError("event store damaged")),
+            replace_group_protections=AsyncMock(),
+        )
+
+        with patch.object(jobs, "store", mocked_store):
+            await jobs.settle_daily_protections(
+                ["200"],
+                date_str="2026-08-26",
+                protect_date="2026-08-27",
+                cutoff_at="2026-08-26T23:45:00+08:00",
+            )
+
+        mocked_store.replace_group_protections.assert_not_awaited()
+
+    async def test_unexpected_settlement_failure_does_not_block_report_delivery(self) -> None:
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(return_value={"message_id": 123}),
+        )
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"100", "200"}),
+            claim_daily_report_deliveries=AsyncMock(
+                return_value=DailyReportDeliveryClaimResult(claims=(claim,))
+            ),
+            transition_daily_report_delivery=AsyncMock(return_value=True),
         )
 
         with (
@@ -1103,13 +1472,36 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
             patch.object(jobs.random, "randint", return_value=0),
             patch.object(jobs.asyncio, "sleep", new=AsyncMock()),
             patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
-            patch.object(jobs, "is_daily_report_enabled", return_value=False),
+            patch.object(
+                jobs,
+                "is_daily_report_enabled",
+                side_effect=lambda group_id: group_id == "100",
+            ),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
+            patch.object(
+                jobs,
+                "settle_daily_protections",
+                new=AsyncMock(side_effect=RuntimeError("unexpected settlement error")),
+            ),
+            patch.object(
+                jobs,
+                "resolve_daily_report_bots",
+                new=AsyncMock(return_value={"100": bot}),
+            ),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
         ):
             await jobs.daily_report_job()
 
-        self.assertEqual(mocked_store.replace_group_protections.await_count, 2)
-        second_call = mocked_store.replace_group_protections.await_args_list[1]
-        self.assertEqual(second_call.args, ("300", ["user-e"], "2026-08-27"))
+        bot.send_group_msg.assert_awaited_once()
 
     async def test_no_settlement_query_when_all_groups_deliver(self) -> None:
         # 回归保障：所有活跃群都开日报时不产生额外事件查询与保护写入。

@@ -479,6 +479,30 @@ class DailyReportCardRendererTests(unittest.TestCase):
         name_font = self.renderer.fonts.get("body", fitted_size, 2)
         self.assertLessEqual(name_font.getlength(fitted_name), 656)
 
+    def test_ranking_name_keeps_full_value_and_shrinks_before_truncating(self) -> None:
+        display_name = "本群指定首席掌勺人"
+        report = replace(
+            _full_report(),
+            rankings=(
+                replace(
+                    _full_report().rankings[0],
+                    entries=(
+                        replace(
+                            _full_report().rankings[0].entries[0],
+                            display_name=display_name,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        data = build_daily_report_card_data(report)
+        self.assertEqual(data.rankings[0].entries[0].name, display_name)
+
+        fitted, size = self.renderer._fit_text_size(display_name, 160, 22, 16, 2)
+        self.assertEqual(fitted, display_name)
+        self.assertLess(size, 22)
+
     def test_coupon_uses_full_middle_column_before_truncating_name(self) -> None:
         name = "这是一位昵称特别特别长的群友"
 

@@ -339,6 +339,7 @@ class RollpigStore(ABC):
         message_id: str,
         voter_ids: list[str],
         excluded_user_ids: list[str],
+        manager_voter_ids: Optional[list[str]] = None,
         max_charges: int = 2,
         now_ts: Optional[float] = None,
     ) -> GroupRoastRefillCompleteResult:

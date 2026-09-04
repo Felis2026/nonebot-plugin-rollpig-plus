@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nonebot-plugin-rollpig-plus"
-version = "0.13.0"
+version = "0.13.1"
 description = "围绕「今日小猪」的 NoneBot 群聊收集、成长与互动插件"
 authors = ["Bear_lele <lele2587342146@gmail.com>", "Felis <3397152010@qq.com>"]
 license = "MIT"

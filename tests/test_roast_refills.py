@@ -27,6 +27,7 @@ from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
 from nonebot_plugin_rollpig_plus.handlers import refill as refill_handler
 from nonebot_plugin_rollpig_plus.store.models import (
     ROAST_REFILL_THRESHOLD_POLICY,
+    ROAST_REFILL_VOTE_WEIGHT_POLICY,
     legacy_roast_refill_threshold,
     roast_refill_threshold,
 )
@@ -185,6 +186,36 @@ class LocalRoastRefillTests(unittest.IsolatedAsyncioTestCase):
         next_round = await self._prepare(now_ts=NOW_TS + 61)
         self.assertEqual((next_round.request.success_count_before, next_round.request.required_ratio), (1, 35))
 
+    async def test_manager_vote_counts_twice_but_cannot_pass_alone(self):
+        await self._mark("100", "admin", "member", "c", "d", "e", "f", "g", "h", "i", "j")
+        created = await self._prepare()
+        request = await self.manager.bind_group_roast_refill_message(
+            created.request.request_id,
+            "message-1",
+            now_ts=NOW_TS,
+        )
+
+        alone = await self.manager.complete_group_roast_refill(
+            request_id=request.request_id,
+            message_id="message-1",
+            voter_ids=["admin"],
+            manager_voter_ids=["admin"],
+            excluded_user_ids=[],
+            now_ts=NOW_TS + 30,
+        )
+        completed = await self.manager.complete_group_roast_refill(
+            request_id=request.request_id,
+            message_id="message-1",
+            voter_ids=["admin", "member"],
+            manager_voter_ids=["admin", "not-a-voter"],
+            excluded_user_ids=[],
+            now_ts=NOW_TS + 60,
+        )
+
+        self.assertEqual((alone.completed, alone.effective_votes), (False, 2))
+        self.assertEqual((completed.completed, completed.effective_votes), (True, 3))
+        self.assertEqual(set(completed.valid_voter_ids), {"admin", "member"})
+
     async def test_complete_requires_a_bound_nonempty_poll_message(self):
         await self._mark("100", "a", "b", "c", "d", "e")
         created = await self._prepare()
@@ -280,7 +311,28 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
                 max_charges=4,
             )
         self.assertIn("4 / 4", created)
+        self.assertIn("管理员每人按 2 头有效支持计算", created)
         self.assertIn("4 / 4", succeeded)
+
+    def test_refill_created_text_does_not_promise_double_votes_to_old_cloud(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="member",
+            initiator_name="普通小猪",
+            delivery_bot_id="bot",
+            required_votes=3,
+        )
+        with patch.object(roast_refill.random, "choice", side_effect=lambda choices: choices[0]):
+            text = roast_refill.format_refill_created(
+                request,
+                max_charges=4,
+                manager_double_vote=False,
+            )
+
+        self.assertIn("当前 Cloud 按每名有效支持者 1 头计算", text)
+        self.assertNotIn("管理员每人按 2 头有效支持计算", text)
 
     def test_refill_created_message_places_image_before_text(self):
         request = GroupRoastRefillRequest(
@@ -364,12 +416,15 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ambiguous.exception.capability_unsupported)
         self.assertFalse(ambiguous.exception.message_missing)
 
-    async def test_group_member_filter_reads_current_member_ids(self):
+    async def test_group_member_filter_reads_current_member_roles(self):
         bot = SimpleNamespace(call_api=AsyncMock(return_value=[
-            {"user_id": 10001},
-            {"user_id": "10002"},
+            {"user_id": 10001, "role": "owner"},
+            {"user_id": "10002", "role": "member"},
         ]))
-        self.assertEqual(await roast_refill.fetch_refill_group_members(bot, "100"), {"10001", "10002"})
+        self.assertEqual(
+            await roast_refill.fetch_refill_group_members(bot, "100"),
+            {"10001": "owner", "10002": "member"},
+        )
 
     def test_notice_only_accepts_qq_continue_marker(self):
         self.assertTrue(roast_refill.is_refill_notice(SimpleNamespace(
@@ -393,12 +448,11 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertTrue(roast_refill.is_refill_notice(parsed))
 
-    def test_permission_allows_owner_admin_and_superuser_only(self):
-        with patch.object(refill_handler, "is_superuser_user", side_effect=lambda user_id: user_id == "su"):
-            for role in ("owner", "admin"):
-                self.assertTrue(refill_handler._can_start_refill(SimpleNamespace(user_id="u", sender=SimpleNamespace(role=role))))
-            self.assertTrue(refill_handler._can_start_refill(SimpleNamespace(user_id="su", sender=SimpleNamespace(role="member"))))
-            self.assertFalse(refill_handler._can_start_refill(SimpleNamespace(user_id="u", sender=SimpleNamespace(role="member"))))
+    def test_any_active_member_can_start_but_inactive_member_cannot(self):
+        eligible_user_ids = frozenset({"owner", "admin", "member"})
+        for user_id in eligible_user_ids:
+            self.assertTrue(refill_handler._can_start_refill(user_id, eligible_user_ids))
+        self.assertFalse(refill_handler._can_start_refill("inactive", eligible_user_ids))
 
     async def test_cross_date_lookup_matches_original_poll_message(self):
         current = GroupRoastRefillRequest(
@@ -566,6 +620,7 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
             request=GroupRoastRefillRequest(**{**request.__dict__, "status": "succeeded"}),
             valid_voter_ids=("a", "b"),
             benefited_user_ids=("a", "b", "c"),
+            effective_votes=2,
         )
         async def call_api(api_name, **kwargs):
             if api_name == "fetch_emoji_like":
@@ -612,6 +667,7 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         bot.send_group_msg.assert_awaited_once()
         complete_kwargs = mocked_store.complete_group_roast_refill.await_args_list[0].kwargs
         self.assertEqual(set(complete_kwargs["voter_ids"]), {"a", "b"})
+        self.assertEqual(complete_kwargs["manager_voter_ids"], [])
         self.assertEqual(complete_kwargs["excluded_user_ids"], ["bot", "left"])
         self.assertEqual(complete_kwargs["max_charges"], 4)
 
@@ -633,6 +689,7 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
             GroupRoastRefillRequest(**{**request.__dict__, "status": "succeeded"}),
             valid_voter_ids=("a", "b"),
             benefited_user_ids=("a", "b", "c"),
+            effective_votes=2,
         )
 
         async def call_api(api_name, **kwargs):
@@ -667,6 +724,7 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(text)
         complete_kwargs = mocked_store.complete_group_roast_refill.await_args.kwargs
         self.assertEqual(complete_kwargs["voter_ids"], ["a", "b"])
+        self.assertEqual(complete_kwargs["manager_voter_ids"], [])
         self.assertEqual(complete_kwargs["excluded_user_ids"], ["bot", "left"])
         bot.send_group_msg.assert_awaited_once()
 
@@ -832,6 +890,70 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.call_api.await_args.args[0], "fetch_emoji_like")
         mocked_store.complete_group_roast_refill.assert_not_called()
 
+    async def test_two_manager_reactors_are_checked_for_four_vote_threshold(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="member",
+            initiator_name="普通小猪",
+            delivery_bot_id="bot",
+            message_id="message-1",
+            active_count_snapshot=10,
+            required_votes=4,
+        )
+
+        async def call_api(api_name, **kwargs):
+            if api_name == "fetch_emoji_like":
+                return {
+                    "emojiLikesList": [
+                        {"tinyId": "bot"},
+                        {"tinyId": "owner"},
+                        {"tinyId": "admin"},
+                    ],
+                    "cookie": "",
+                    "isLastPage": True,
+                }
+            if api_name == "get_group_member_list":
+                return [
+                    {"user_id": "bot", "role": "member"},
+                    {"user_id": "owner", "role": "owner"},
+                    {"user_id": "admin", "role": "admin"},
+                ]
+            raise AssertionError(api_name)
+
+        bot = SimpleNamespace(
+            self_id="bot",
+            call_api=AsyncMock(side_effect=call_api),
+            send_group_msg=AsyncMock(),
+        )
+        event = SimpleNamespace(
+            notice_type="group_msg_emoji_like",
+            group_id=100,
+            message_id="message-1",
+            likes=[{"emoji_id": "424", "count": 3}],
+        )
+        completed = GroupRoastRefillCompleteResult(
+            True,
+            "succeeded",
+            GroupRoastRefillRequest(**{**request.__dict__, "status": "succeeded"}),
+            valid_voter_ids=("admin", "owner"),
+            benefited_user_ids=("admin", "owner"),
+            effective_votes=4,
+        )
+        with patch.object(roast_refill, "store") as mocked_store:
+            mocked_store.get_group_roast_refill = AsyncMock(return_value=request)
+            mocked_store.get_group_active_user_ids = AsyncMock(
+                return_value={"bot", "owner", "admin"}
+            )
+            mocked_store.complete_group_roast_refill = AsyncMock(return_value=completed)
+            await roast_refill.process_refill_notice(bot, event)
+
+        complete_kwargs = mocked_store.complete_group_roast_refill.await_args.kwargs
+        self.assertEqual(complete_kwargs["voter_ids"], ["admin", "owner"])
+        self.assertEqual(complete_kwargs["manager_voter_ids"], ["admin", "owner"])
+        bot.send_group_msg.assert_awaited_once()
+
     async def test_disabled_group_does_not_settle_refill_notice(self):
         request = GroupRoastRefillRequest(
             request_id="request",
@@ -942,24 +1064,57 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CloudRoastRefillUnsupportedError):
             await cloud_store._refill_request("POST", "/v1/group-roast-refills/prepare")
 
-    async def test_cloud_complete_forwards_configured_charge_max(self):
+    async def test_cloud_complete_forwards_vote_weights_and_configured_charge_max(self):
         cloud_store = object.__new__(CloudStore)
-        cloud_store._request = AsyncMock(return_value={"completed": False, "status": "pending"})
+        cloud_store._request = AsyncMock(return_value={
+            "completed": False,
+            "status": "pending",
+            "valid_voter_ids": ["admin", "member"],
+            "effective_votes": 3,
+        })
 
-        await cloud_store.complete_group_roast_refill(
+        result = await cloud_store.complete_group_roast_refill(
             request_id="request",
             message_id="message-1",
-            voter_ids=["a", "b"],
+            voter_ids=["admin", "member"],
+            manager_voter_ids=["admin"],
             excluded_user_ids=["bot"],
             max_charges=4,
         )
 
         request_kwargs = cloud_store._request.await_args.kwargs
         self.assertEqual(request_kwargs["json_body"]["max_charges"], 4)
+        self.assertEqual(request_kwargs["json_body"]["manager_voter_ids"], ["admin"])
+        self.assertEqual(
+            request_kwargs["json_body"]["vote_weight_policy"],
+            ROAST_REFILL_VOTE_WEIGHT_POLICY,
+        )
+        self.assertEqual(result.effective_votes, 3)
+
+    async def test_old_cloud_complete_falls_back_to_one_vote_per_user(self):
+        cloud_store = object.__new__(CloudStore)
+        cloud_store._request = AsyncMock(return_value={
+            "completed": False,
+            "status": "pending",
+            "valid_voter_ids": ["admin", "member"],
+        })
+
+        result = await cloud_store.complete_group_roast_refill(
+            request_id="request",
+            message_id="message-1",
+            voter_ids=["admin", "member"],
+            manager_voter_ids=["admin"],
+            excluded_user_ids=[],
+        )
+
+        self.assertEqual(result.effective_votes, 2)
 
     async def test_cloud_prepare_forwards_current_member_eligibility(self):
         cloud_store = object.__new__(CloudStore)
-        cloud_store._request = AsyncMock(return_value={"status": "insufficient_active"})
+        cloud_store._request = AsyncMock(return_value={
+            "status": "insufficient_active",
+            "vote_weight_policy": ROAST_REFILL_VOTE_WEIGHT_POLICY,
+        })
 
         await cloud_store.prepare_group_roast_refill(
             group_id="100",
@@ -978,4 +1133,8 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             request_kwargs["json_body"]["threshold_policy"],
             ROAST_REFILL_THRESHOLD_POLICY,
+        )
+        self.assertEqual(
+            request_kwargs["json_body"]["vote_weight_policy"],
+            ROAST_REFILL_VOTE_WEIGHT_POLICY,
         )

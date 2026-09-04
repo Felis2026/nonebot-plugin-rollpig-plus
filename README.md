@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.13.0-ff69b4" alt="Version 0.13.0">
+    <img src="https://img.shields.io/badge/Version-0.13.1-ff69b4" alt="Version 0.13.1">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -23,7 +23,10 @@
 </div>
 
 > RollPig Plus 最初基于 [Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig) 开发。  
-> 在保留「每天抽一只小猪」核心功能的基础上，继续扩展了图鉴成长、EX Lv.、烤群友、日报、云端资源与多 Bot 同步等能力。
+> 本项目在保留「每天抽一只小猪」核心功能的基础上，继续扩展了图鉴成长、EX Lv.、烤群友、日报、EX 差分资源与多 Bot 状态同步等能力。
+
+> 原版 [RollPig](https://github.com/Bearlele/nonebot-plugin-rollpig) 现已完成重构并支持 GIF 小猪，同时接入 RollPig 公共资源同步，可持续获取每月更新的完整小猪资源。
+> 如果只需要轻量的「今日小猪 / 随机小猪 / 找猪」体验，可以直接使用原版。
 
 ## ✨ 效果预览
 
@@ -135,13 +138,15 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 
 #### 烤箱补货
 
-- 群主、管理员或 SUPERUSER 可以发起。
+- 本群当日有效活跃用户均可发起；未参与当天 RollPig 的成员不能创建新申请。
 - 投票持续 `10` 分钟。
 - 至少需要 `3` 名本群当日活跃用户。
+- 群主和管理员每人计 `2` 票，普通成员计 `1` 票；无论票数多少，至少需要 `2` 名不同用户支持。
 - 达标后，为成功时本群全部今日活跃用户恢复普通烧烤次数至配额上限。
 - 当天成功次数越多，门槛依次按活跃人数的 `25% / 35% / 45% / 55%` 计算。
 - 对应票数上限为 `8 / 12 / 16 / 20`，至少需要 `2` 票。
 - 第四次成功后门槛不再继续提高；失败不会增加下一次门槛。
+- Cloud 模式使用管理员双票需要 RollPig Cloud `0.6.1+`；旧 Cloud 仍可完成补货，但按一人一票计票。
 
 </details>
 
@@ -164,7 +169,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪；目标未抽猪时自动进入预约流程。 |
 | `随机烤猪` | 从当前群已有记录中随机选择目标烤。 |
 | `加急生火 @目标` | 使用加急模式烤群友。 |
-| `烤箱补货` | 管理员发起群体烧烤次数补货投票。 |
+| `烤箱补货` | 当日活跃用户发起群体烧烤次数补货投票。 |
 | `小猪日报 状态` | 查看当前群日报状态。 |
 | `小猪日报 开启` / `小猪日报 关闭` | 群主或管理员控制当前群日报。 |
 | `同步小猪资源` | SUPERUSER 手动触发资源同步。 |
@@ -273,34 +278,53 @@ Cloud 模式用于同步今日小猪、图鉴成长、烧烤充能等核心状�
 
 也可以填写自己的本地或私有资源包。
 
-### 更换昨日回顾卡字体
+### 更换卡片字体
 
-昨日回顾卡的标题与正文可以分别替换字体。默认标题使用内置 ZCOOL 快乐体，正文使用插件已有的思源黑体；不配置也能直接使用。
+| 使用位置 | 配置项 | 默认字体 |
+| --- | --- | --- |
+| 普通小猪卡片、猪圈日报动态正文 | `rollpig_card_font_path` | 思源黑体 |
+| 昨日回顾卡标题 | `rollpig_yesterday_card_title_font_path` | ZCOOL 快乐体 |
+| 昨日回顾卡正文 | `rollpig_yesterday_card_body_font_path` | 思源黑体 |
 
-例如，想把正文换成霞鹜文楷 TC Bold，可以从 [lxgw/LxgwWenKaiTC](https://github.com/lxgw/LxgwWenKaiTC) 下载字体文件，放进 Bot 运行目录下的 `fonts/`：
+猪圈日报已内置固定标题所需的 Noto Serif SC 子集。若希望昵称、事件和排行也使用同款宋体，可下载完整的 [Noto Serif SC Bold](https://github.com/notofonts/noto-cjk)。
+
+昨日回顾卡也可以使用[霞鹜文楷](https://github.com/lxgw/LxgwWenKaiTC)等自定义字体。
+
+将字体文件放入 Bot 运行目录：
 
 ```text
+fonts/NotoSerifCJKsc-Bold.otf
 fonts/LXGWWenKaiTC-Bold.ttf
 ```
 
-再写入 `rollpig_config.json`：
+在 `rollpig_config.json` 中填写：
 
 ```json
 {
   "rollpig": {
+    "rollpig_card_font_path": "fonts/NotoSerifCJKsc-Bold.otf",
     "rollpig_yesterday_card_title_font_path": null,
     "rollpig_yesterday_card_body_font_path": "fonts/LXGWWenKaiTC-Bold.ttf"
   }
 }
 ```
 
-两个配置都支持绝对路径；相对路径按 Bot 运行目录解析。留空、设为 `null`，或者字体文件无法读取时，会分别回退到内置标题字体和思源黑体，不影响昨日小猪使用。
+字体配置支持绝对路径；相对路径按 Bot 运行目录解析。留空、设为 `null` 或字体文件不可用时，会自动使用对应的默认字体。
 
 <details>
-<summary><strong>展开查看霞鹜文楷正文效果</strong></summary>
+<summary><strong>展开查看猪圈日报效果</strong></summary>
 
 <p align="center">
-  <img src="docs/assets/preview-yesterday-custom-font.png" width="420" alt="昨日回顾卡使用霞鹜文楷正文的效果">
+  <img src="docs/assets/preview-daily.jpg" width="500" alt="猪圈日报完整内容预览">
+</p>
+
+</details>
+
+<details>
+<summary><strong>展开查看昨日回顾卡字体效果</strong></summary>
+
+<p align="center">
+  <img src="docs/assets/preview-yesterday-custom-font.png" width="420" alt="昨日回顾卡使用自定义字体的效果">
 </p>
 
 </details>
@@ -320,6 +344,7 @@ fonts/LXGWWenKaiTC-Bold.ttf
 | `rollpig_resource_sync_interval_hours` | `24` | 自动检查资源更新间隔。 |
 | `rollpig_roast_library_manifest_url` | RollPig Resources | 共享烤猪文案源；设为 `""` / `null` 可关闭。 |
 | `rollpig_daily_summary_enabled` | `false` | 未单独设置的群是否默认启用日报。 |
+| `rollpig_card_font_path` | `null` | 普通小猪卡片与猪圈日报动态正文的字体；可设置完整 Noto Serif SC Bold 还原日报设计字体。 |
 | `rollpig_yesterday_card_title_font_path` | `null` | 昨日回顾卡标题字体；留空使用内置 ZCOOL 快乐体。 |
 | `rollpig_yesterday_card_body_font_path` | `null` | 昨日回顾卡正文字体；留空使用内置思源黑体。 |
 | `rollpig_catalog_enabled` | `true` | 是否启用图片版小猪图鉴。 |
@@ -373,7 +398,7 @@ Cloud 主要负责把需要一致性的成长与互动状态放到统一后端�
 
 ---
 
-## 🔄 和原版 RollPig 怎么选
+## 🔄 与 RollPig 差异
 
 | | 原版 RollPig | RollPig Plus |
 | --- | --- | --- |

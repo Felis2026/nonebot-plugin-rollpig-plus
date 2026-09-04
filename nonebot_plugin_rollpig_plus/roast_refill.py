@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,11 @@ from nonebot.log import logger
 
 from .runtime import ROLLPIG_TIMEZONE, is_group_rollpig_enabled, resolve_roast_charge_max
 from .store import store
-from .store.models import GroupRoastRefillCompleteResult, GroupRoastRefillRequest
+from .store.models import (
+    ROAST_REFILL_MIN_DISTINCT_VOTERS,
+    GroupRoastRefillCompleteResult,
+    GroupRoastRefillRequest,
+)
 from .texts import (
     ROAST_REFILL_CREATED_TEXTS,
     ROAST_REFILL_EXISTING_TEXTS,
@@ -27,6 +32,15 @@ ROAST_REFILL_EMOJI_TYPE = 1
 ROAST_REFILL_FETCH_PAGE_SIZE = 100
 ROAST_REFILL_FETCH_MAX_PAGES = 20
 ROAST_REFILL_IMAGE_PATH = Path(__file__).parent / "resource" / "refill.jpg"
+
+
+@dataclass(frozen=True)
+class RefillEligibility:
+    """保存本轮日活、在群有效用户及其中的群管理账号。"""
+
+    active_user_ids: frozenset[str]
+    eligible_user_ids: frozenset[str]
+    manager_user_ids: frozenset[str]
 
 
 class RoastRefillReactionError(RuntimeError):
@@ -193,8 +207,8 @@ async def fetch_refill_reactors(bot: Bot, message_id: str) -> set[str]:
     return user_ids
 
 
-async def fetch_refill_group_members(bot: Bot, group_id: str) -> set[str]:
-    """读取当前群成员，防止已退群用户遗留的续标识继续计票。"""
+async def fetch_refill_group_members(bot: Bot, group_id: str) -> dict[str, str]:
+    """读取当前群成员及角色，供退群过滤和管理员双票共同使用。"""
 
     try:
         response = await bot.call_api("get_group_member_list", group_id=int(group_id))
@@ -207,13 +221,14 @@ async def fetch_refill_group_members(bot: Bot, group_id: str) -> set[str]:
         members = response
     if not isinstance(members, list):
         raise RoastRefillReactionError("get_group_member_list 返回格式无效")
-    return {
-        str(user_id)
-        for item in members
-        if isinstance(item, dict)
-        for user_id in (item.get("user_id") or item.get("userId") or item.get("uin"),)
-        if user_id
-    }
+    member_roles: dict[str, str] = {}
+    for item in members:
+        if not isinstance(item, dict):
+            continue
+        user_id = item.get("user_id") or item.get("userId") or item.get("uin")
+        if user_id:
+            member_roles[str(user_id)] = str(item.get("role") or "member").lower()
+    return member_roles
 
 
 # ================================ 跨日查找与成员资格 ================================ #
@@ -255,35 +270,63 @@ async def get_refill_eligible_users(
     bot: Bot,
     group_id: str,
     date_str: str,
-) -> tuple[set[str], set[str]]:
-    """返回登记日活及其中仍在本群的真人账号；Bot 永远不参与门槛。"""
+) -> RefillEligibility:
+    """返回登记日活、仍在群内的真人账号及其中的当前群管理。"""
 
-    group_member_ids, active_user_ids = await asyncio.gather(
+    group_member_roles, active_user_ids = await asyncio.gather(
         fetch_refill_group_members(bot, group_id),
         store.get_group_active_user_ids(group_id, date_str),
     )
     normalized_active = {str(user_id) for user_id in active_user_ids if user_id}
-    eligible_user_ids = (normalized_active & group_member_ids) - {str(bot.self_id)}
-    return normalized_active, eligible_user_ids
+    eligible_user_ids = (normalized_active & set(group_member_roles)) - {str(bot.self_id)}
+    manager_user_ids = {
+        user_id
+        for user_id in eligible_user_ids
+        if group_member_roles.get(user_id) in {"owner", "admin"}
+    }
+    return RefillEligibility(
+        active_user_ids=frozenset(normalized_active),
+        eligible_user_ids=frozenset(eligible_user_ids),
+        manager_user_ids=frozenset(manager_user_ids),
+    )
 
 
 # ================================ 文案与票数 ================================ #
 
-def format_refill_created(request: GroupRoastRefillRequest, max_charges: int) -> str:
+def format_refill_created(
+    request: GroupRoastRefillRequest,
+    max_charges: int,
+    *,
+    manager_double_vote: bool = True,
+) -> str:
     return random.choice(ROAST_REFILL_CREATED_TEXTS).format(
         initiator=request.initiator_name or request.initiator_id,
         active_count=request.active_count_snapshot,
         required_votes=request.required_votes,
         success_count=request.success_count_before,
         max_charges=max_charges,
+        vote_rule=(
+            "群主和管理员每人按 2 头有效支持计算，普通成员按 1 头计算"
+            if manager_double_vote
+            else "当前 Cloud 按每名有效支持者 1 头计算"
+        ),
     )
 
 
-def build_refill_created_message(request: GroupRoastRefillRequest, max_charges: int) -> Message:
+def build_refill_created_message(
+    request: GroupRoastRefillRequest,
+    max_charges: int,
+    *,
+    manager_double_vote: bool = True,
+) -> Message:
     """按图片在前、申请文案在后的顺序构造消息；图片内嵌以兼容跨容器 OneBot。"""
 
     return MessageSegment.image(ROAST_REFILL_IMAGE_PATH.read_bytes()) + MessageSegment.text(
-        "\n" + format_refill_created(request, max_charges)
+        "\n" + format_refill_created(
+            request,
+            max_charges,
+            manager_double_vote=manager_double_vote,
+        )
     )
 
 
@@ -298,11 +341,28 @@ def _remaining_minutes(request: GroupRoastRefillRequest) -> int:
     return max(1, int((remaining + 59) // 60)) if remaining > 0 else 0
 
 
-def format_existing_refill(request: GroupRoastRefillRequest, current: int) -> str:
+def _refill_requirement_hint(request: GroupRoastRefillRequest, supporters: int, votes: int) -> str:
+    """同时描述剩余加权票数和两人联署约束，避免双票进度产生歧义。"""
+
+    missing_votes = max(0, request.required_votes - votes)
+    missing_supporters = max(0, ROAST_REFILL_MIN_DISTINCT_VOTERS - supporters)
+    requirements: list[str] = []
+    if missing_votes:
+        requirements.append(f"{missing_votes} 票")
+    if missing_supporters:
+        requirements.append(f"{missing_supporters} 名有效支持者")
+    return "，还需" + "，并需".join(requirements) if requirements else "，已经达到门槛"
+
+
+def format_existing_refill(
+    request: GroupRoastRefillRequest,
+    supporters: int,
+    votes: int,
+) -> str:
     return random.choice(ROAST_REFILL_EXISTING_TEXTS).format(
-        current=current,
+        current=votes,
         required=request.required_votes,
-        remaining_votes=max(0, request.required_votes - current),
+        requirement_hint=_refill_requirement_hint(request, supporters, votes),
         minutes=_remaining_minutes(request),
     )
 
@@ -358,20 +418,28 @@ async def reconcile_refill_request(
 
     if not request.message_id:
         # prepare 与消息发送/绑定之间存在很短的并发窗口。旁路请求只能等待，
-        # 绝不能把另一个管理员正在创建的共享申请标记为失败。
+        # 绝不能把另一名用户正在创建的共享申请标记为失败。
         return GroupRoastRefillCompleteResult(False, "unbound", request)
 
     raw_voters = await fetch_refill_reactors(bot, request.message_id)
-    if fast_below_threshold and len(raw_voters - {str(bot.self_id)}) < request.required_votes:
+    raw_supporter_count = len(raw_voters - {str(bot.self_id)})
+    if fast_below_threshold and (
+        raw_supporter_count < ROAST_REFILL_MIN_DISTINCT_VOTERS
+        or raw_supporter_count * 2 < request.required_votes
+    ):
+        # 每人最多计两票；即使全部是管理员也不可能达标时，才跳过成员名单查询。
         return GroupRoastRefillCompleteResult(False, "pending", request)
 
-    active_user_ids, eligible_user_ids = await get_refill_eligible_users(
+    eligibility = await get_refill_eligible_users(
         bot,
         request.group_id,
         request.date_str,
     )
-    valid_voter_ids = raw_voters & eligible_user_ids
-    excluded_user_ids = (active_user_ids - eligible_user_ids) | {str(bot.self_id)}
+    valid_voter_ids = raw_voters & eligibility.eligible_user_ids
+    manager_voter_ids = valid_voter_ids & eligibility.manager_user_ids
+    excluded_user_ids = (
+        eligibility.active_user_ids - eligibility.eligible_user_ids
+    ) | {str(bot.self_id)}
     max_charges = resolve_roast_charge_max()
     # 群成员与 reaction 查询期间开关可能变化；在实际修改配额前再确认一次。
     if not is_group_rollpig_enabled(request.group_id):
@@ -380,6 +448,7 @@ async def reconcile_refill_request(
         request_id=request.request_id,
         message_id=request.message_id,
         voter_ids=sorted(valid_voter_ids),
+        manager_voter_ids=sorted(manager_voter_ids),
         # Cloud/本地 Store 会再次按日活求交集；这里额外排除已退群用户，
         # 保证他们既不计票，也不会得到全局烧烤次数补充。
         excluded_user_ids=sorted(excluded_user_ids),
@@ -394,7 +463,7 @@ async def reconcile_refill_request(
             group_id=int(result.request.group_id),
             message=format_refill_success(
                 result.request,
-                votes=len(result.valid_voter_ids),
+                votes=result.effective_votes,
                 benefited=len(result.benefited_user_ids),
                 max_charges=max_charges,
             ),

@@ -49,9 +49,14 @@ from .store.local_json import LocalJsonStore
 
 background_resource_sync_tasks: set[asyncio.Task[None]] = set()
 background_maintenance_tasks: set[asyncio.Task[None]] = set()
+background_daily_report_tasks: set[asyncio.Task[None]] = set()
+daily_report_recovery_dates: set[str] = set()
+pending_daily_report_recovery_dates: set[str] = set()
 DAILY_REPORT_INSTANCE_ID = uuid.uuid4().hex
+DAILY_REPORT_SCHEDULE_TIME = dt.time(23, 45)
 DAILY_REPORT_RETRY_CUTOFF = dt.time(0, 10)
 DAILY_REPORT_TRANSITION_RETRY_SECONDS = 30
+PROTECTION_SETTLEMENT_RETRY_DELAYS = (0.0, 1.0, 3.0)
 
 
 # ================================ 运行时生命周期 ================================ #
@@ -60,7 +65,11 @@ async def shutdown_rollpig_runtime() -> None:
     """释放渲染器缓存与数据库连接。"""
 
     # 退出前等待后台同步与维护任务结束
-    for task_set in (background_resource_sync_tasks, background_maintenance_tasks):
+    for task_set in (
+        background_resource_sync_tasks,
+        background_maintenance_tasks,
+        background_daily_report_tasks,
+    ):
         for task in list(task_set):
             task.cancel()
         for task in list(task_set):
@@ -411,7 +420,13 @@ async def settle_daily_protections(
 
     if not group_ids:
         return
-    event_query = await store.query_daily_events(date_str=date_str, cutoff_at=cutoff_at)
+
+    # ================================ 查询隔离与写入重试 ================================ #
+    try:
+        event_query = await store.query_daily_events(date_str=date_str, cutoff_at=cutoff_at)
+    except Exception as error:
+        logger.warning(f"[猪圈日报] 保护结算事件查询失败，已跳过: error={error}")
+        return
     if not event_query.available:
         # 与投递路径的严格语义一致：事件记录不可用时宁可跳过结算，
         # 也不能把保护名单误写成空。
@@ -430,15 +445,47 @@ async def settle_daily_protections(
             cutoff_at=cutoff_at,
         )
         protected_ids = select_daily_protected_user_ids(events)
-        try:
-            await store.replace_group_protections(group_id, protected_ids, protect_date)
-        except Exception as error:
-            # 单群失败只损失该群保护这一项利好，不影响其余群继续结算。
-            failures.append(f"{group_id}={error}")
+        settled = False
+        last_error: Exception | None = None
+        for attempt, delay in enumerate(PROTECTION_SETTLEMENT_RETRY_DELAYS, start=1):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                await store.replace_group_protections(group_id, protected_ids, protect_date)
+                settled = True
+                break
+            except Exception as error:
+                last_error = error
+                logger.warning(
+                    f"[猪圈日报] 群保护写入失败，准备重试: group={group_id} "
+                    f"attempt={attempt}/{len(PROTECTION_SETTLEMENT_RETRY_DELAYS)} error={error}"
+                )
+        if not settled:
+            failures.append(f"{group_id}={last_error}")
     if failures:
         logger.warning(f"[猪圈日报] 部分群次日保护结算失败: {'; '.join(failures)}")
         return
     logger.info(f"[猪圈日报] 已完成 {len(group_ids)} 个未投递群的次日保护结算")
+
+
+async def settle_daily_protections_safely(
+    group_ids: Sequence[str],
+    *,
+    date_str: str,
+    protect_date: str,
+    cutoff_at: str,
+) -> None:
+    """隔离附加保护结算异常，避免它阻断日报投递或任务收尾。"""
+
+    try:
+        await settle_daily_protections(
+            group_ids,
+            date_str=date_str,
+            protect_date=protect_date,
+            cutoff_at=cutoff_at,
+        )
+    except Exception as error:
+        logger.exception(f"[猪圈日报] 次日保护结算异常，继续处理日报: error={error}")
 
 
 async def build_group_daily_report(
@@ -787,23 +834,30 @@ async def _deliver_daily_report_claim(
 
 
 @scheduler.scheduled_job("cron", hour=23, minute=45, timezone=ROLLPIG_TIMEZONE, id="rollpig_daily_report")
-async def daily_report_job():
+async def daily_report_job(
+    *,
+    report_date: str | None = None,
+    random_delay_enabled: bool = True,
+):
     """每晚 23:45 起推送日报，失败重试最晚持续到次日 00:10。"""
 
     # 日期与截止点必须在随机延迟前固定；所有后端读取都使用同一截止点，
     # 23:45 后的新抽取和互动只能进入下一日实时功能，不能混入本期日报。
-    report_date = rollpig_date_str()
+    report_date = report_date or rollpig_date_str()
     protect_date = (dt.date.fromisoformat(report_date) + dt.timedelta(days=1)).isoformat()
     cutoff = dt.datetime.combine(
         dt.date.fromisoformat(report_date),
-        dt.time(23, 45),
+        DAILY_REPORT_SCHEDULE_TIME,
         tzinfo=ROLLPIG_TIMEZONE,
     )
     cutoff_at = cutoff.isoformat()
     cutoff_time = cutoff.strftime("%H:%M")
-    delay = random.randint(0, 600)  # 0~10 分钟随机延迟
-    logger.info(f"[猪圈日报] 定时触发，随机延迟 {delay} 秒后推送")
+    delay = random.randint(0, 600) if random_delay_enabled else 0
+    source = "定时" if random_delay_enabled else "启动恢复"
+    logger.info(f"[猪圈日报] {source}触发，延迟 {delay} 秒后推送")
     await asyncio.sleep(delay)
+    protection_group_ids: list[str] = []
+    protection_settlement_task: asyncio.Task[None] | None = None
     try:
         active_groups = await store.get_active_group_ids(report_date)
         if not active_groups:
@@ -829,21 +883,22 @@ async def daily_report_job():
             if is_daily_report_enabled(group_id)
         ]
         report_push_group_set = set(report_push_groups)
-
-        # ================================ 次日保护结算 ================================ #
-        # 保护是当日游戏事实的结算：被烤最多的用户照常获得次日保护，
-        # 与是否开启日报通知无关。开启日报的群在构建日报时写入保护，
-        # 保证"写入成功才在卡片中承诺"；其余群在此统一结算。
-        await settle_daily_protections(
-            [
-                group_id
-                for group_id in enabled_active_groups
-                if group_id not in report_push_group_set
-            ],
-            date_str=report_date,
-            protect_date=protect_date,
-            cutoff_at=cutoff_at,
-        )
+        protection_group_ids = [
+            group_id
+            for group_id in enabled_active_groups
+            if group_id not in report_push_group_set
+        ]
+        if protection_group_ids:
+            # 未开启日报群的保护不能等待日报重试结束；启动后与投递并行，
+            # 并在 finally 中等待同一个任务，保证只结算一次且任务退出前收尾。
+            protection_settlement_task = asyncio.create_task(
+                settle_daily_protections_safely(
+                    protection_group_ids,
+                    date_str=report_date,
+                    protect_date=protect_date,
+                    cutoff_at=cutoff_at,
+                )
+            )
 
         if not report_push_groups:
             logger.info("[猪圈日报] 没有群开启日报推送")
@@ -919,12 +974,87 @@ async def daily_report_job():
 
         if claimed_attempts == 0:
             logger.info("[猪圈日报] 当前群日报已由其他实例完成，或没有可安全领取的任务")
-            return
-        logger.info(
-            f"[猪圈日报] 推送完成, 成功发送 {len(sent_groups)}/{len(report_groups)}，"
-            f"累计领取 {claimed_attempts} 次，候选群 {len(report_push_groups)} 个"
-        )
+        else:
+            logger.info(
+                f"[猪圈日报] 推送完成, 成功发送 {len(sent_groups)}/{len(report_groups)}，"
+                f"累计领取 {claimed_attempts} 次，候选群 {len(report_push_groups)} 个"
+            )
     except CloudStoreError as error:
         logger.warning(f"[猪圈日报] 云端账本暂时不可用，跳过本轮推送: {error}")
     except Exception as error:
         logger.error(f"[猪圈日报] 任务异常: {error}")
+    finally:
+        if protection_settlement_task is not None:
+            await protection_settlement_task
+
+
+# ================================ 日报启动恢复 ================================ #
+
+
+def _daily_report_startup_recovery_date(
+    now: dt.datetime | None = None,
+) -> str:
+    """仅在 23:45～次日 00:10 的安全窗口内返回待恢复日报日期。"""
+
+    current_time = now or dt.datetime.now(ROLLPIG_TIMEZONE)
+    local_time = current_time.astimezone(ROLLPIG_TIMEZONE)
+    wall_time = local_time.time().replace(tzinfo=None)
+    if wall_time >= DAILY_REPORT_SCHEDULE_TIME:
+        return local_time.date().isoformat()
+    if wall_time < DAILY_REPORT_RETRY_CUTOFF:
+        return (local_time.date() - dt.timedelta(days=1)).isoformat()
+    return ""
+
+
+@get_driver().on_startup
+async def startup_daily_report_recovery() -> None:
+    """启动时补跑安全窗口内的日报；持久化 claim 负责防重与续跑。"""
+
+    # NoneBot 的 startup 可能早于适配器建立连接。此时不安排必然空跑的任务，
+    # 等 on_bot_connect 拿到真实 Bot 后再恢复，避免唯一一次机会被提前消耗。
+    if not get_bots():
+        return
+    report_date = _daily_report_startup_recovery_date()
+    schedule_daily_report_recovery(report_date)
+
+
+async def _run_daily_report_recovery(report_date: str) -> None:
+    """串行执行合并后的恢复请求；运行期间的新连接只追加一次重查。"""
+
+    try:
+        while True:
+            pending_daily_report_recovery_dates.discard(report_date)
+            await daily_report_job(
+                report_date=report_date,
+                random_delay_enabled=False,
+            )
+            if report_date not in pending_daily_report_recovery_dates:
+                return
+    finally:
+        pending_daily_report_recovery_dates.discard(report_date)
+        daily_report_recovery_dates.discard(report_date)
+
+
+def schedule_daily_report_recovery(report_date: str) -> None:
+    """在安全窗口安排恢复；运行期间的新 Bot 连接会合并为一次后续重查。"""
+
+    if not report_date:
+        return
+    if report_date in daily_report_recovery_dates:
+        # 当前任务解析过 Bot 路由后，新连接可能带来此前不可达的群。记录一次
+        # 待重跑即可；多个连接事件会自然合并，不并发创建重复恢复任务。
+        pending_daily_report_recovery_dates.add(report_date)
+        return
+    daily_report_recovery_dates.add(report_date)
+    task: asyncio.Task[None] = asyncio.create_task(
+        _run_daily_report_recovery(report_date)
+    )
+    background_daily_report_tasks.add(task)
+    task.add_done_callback(background_daily_report_tasks.discard)
+
+
+@get_driver().on_bot_connect
+async def bot_connect_daily_report_recovery(bot: Bot) -> None:
+    """Bot 晚于插件启动连接时，重新尝试安全窗口内的日报恢复。"""
+
+    schedule_daily_report_recovery(_daily_report_startup_recovery_date())

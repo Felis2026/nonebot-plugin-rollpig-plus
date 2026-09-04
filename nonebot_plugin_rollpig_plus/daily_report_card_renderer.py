@@ -1776,10 +1776,24 @@ class DailyReportCardRenderer:
                 self._text(draw, str(displayed_rank), badge.x + badge.width / 2, badge.y + badge.height / 2, 24, CREAM, unit, "display", "mm")
                 self._paste_asset(canvas, entry.avatar, Box(column_x + 58, row_y + 2, 74, 74), unit)
                 text_width = max(1.0, column_width - 160.0)
-                name = self._fit_single_line(entry.name, text_width, 22, unit)
-                detail = self._fit_single_line(entry.detail, text_width, 19, unit)
-                self._text(draw, name, column_x + 145, row_y + 14, 22, INK, unit, "body")
-                self._text(draw, detail, column_x + 145, row_y + 45, 19, INK, unit, "body")
+                # 排行昵称和小猪信息先逐级缩字，只有达到可读下限后仍超宽才省略。
+                # 数据层不能提前截断，否则两三个汉字就可能丢失完整昵称。
+                name, name_size = self._fit_text_size(
+                    entry.name,
+                    text_width,
+                    22,
+                    16,
+                    unit,
+                )
+                detail, detail_size = self._fit_text_size(
+                    entry.detail,
+                    text_width,
+                    19,
+                    15,
+                    unit,
+                )
+                self._text(draw, name, column_x + 145, row_y + 14, name_size, INK, unit, "body")
+                self._text(draw, detail, column_x + 145, row_y + 45, detail_size, INK, unit, "body")
 
             # 列表不足最高行数时保留网格高度，但不伪造空排名内容。
             for row_index in range(len(column.entries[:3]), visible_rows):
@@ -2157,20 +2171,6 @@ def _report_name(
     return re.sub(r"\s+", " ", value).strip() or "群友"
 
 
-def _truncate_display_units(text: str, max_units: int) -> str:
-    """按可见单元截断昵称，组合 Emoji 必须整体保留或整体移除。"""
-
-    units: list[str] = []
-    for token in _tokenize_text(text):
-        if _has_emoji_candidate(token):
-            units.append(token)
-        else:
-            units.extend(token)
-    if len(units) <= max_units:
-        return text
-    return "".join(units[: max(0, max_units - 1)]).rstrip() + "…"
-
-
 def _resource_pig_name(pig_id: str) -> str:
     pig = get_pig_by_id(pig_id) if pig_id else None
     return str(pig.get("name") or pig_id) if pig else (pig_id or "小猪")
@@ -2448,8 +2448,8 @@ def _ranking_avatar(kind: RankingKind, entry: object) -> str:
 
 
 def _compact_ranking_name(name: str) -> str:
-    normalized = re.sub(r"\s+", " ", name).strip() or "群友"
-    return _truncate_display_units(normalized, 6)
+    # 完整昵称交给排行栏的像素级缩字逻辑处理，不能在数据转换阶段固定截断。
+    return re.sub(r"\s+", " ", name).strip() or "群友"
 
 
 def _ranking_cards(report: DailyReport) -> tuple[RankingColumn, ...]:

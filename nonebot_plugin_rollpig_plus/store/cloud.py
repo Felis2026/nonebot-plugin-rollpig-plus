@@ -30,6 +30,7 @@ from .models import (
     RoastReservationParticipant,
     RoastReservationPrepareResult,
     ROAST_REFILL_THRESHOLD_POLICY,
+    ROAST_REFILL_VOTE_WEIGHT_POLICY,
     UnrolledRoastAttemptResult,
 )
 
@@ -1026,6 +1027,8 @@ class CloudStore(RollpigStore):
             "now_ts": now_ts,
             # 新 Cloud 按该能力标识启用封顶门槛；旧 Cloud 会安全忽略未知字段。
             "threshold_policy": ROAST_REFILL_THRESHOLD_POLICY,
+            # 新 Cloud 回显该能力后，创建文案才会声明群管理双票。
+            "vote_weight_policy": ROAST_REFILL_VOTE_WEIGHT_POLICY,
         }
         if eligible_user_ids is not None:
             # 新 Cloud 会据此冻结群成员交集；旧 Cloud 默认忽略未知字段，调用方
@@ -1042,6 +1045,7 @@ class CloudStore(RollpigStore):
             active_user_ids=tuple(sorted({
                 str(user_id) for user_id in payload.get("active_user_ids", []) if user_id
             })),
+            vote_weight_policy=str(payload.get("vote_weight_policy") or ""),
         )
 
     async def bind_group_roast_refill_message(
@@ -1093,6 +1097,7 @@ class CloudStore(RollpigStore):
         message_id: str,
         voter_ids: list[str],
         excluded_user_ids: list[str],
+        manager_voter_ids: Optional[list[str]] = None,
         max_charges: int = 2,
         now_ts: Optional[float] = None,
     ) -> GroupRoastRefillCompleteResult:
@@ -1104,18 +1109,26 @@ class CloudStore(RollpigStore):
                 "message_id": message_id,
                 "voter_ids": voter_ids,
                 "excluded_user_ids": excluded_user_ids,
+                "manager_voter_ids": manager_voter_ids or [],
+                "vote_weight_policy": ROAST_REFILL_VOTE_WEIGHT_POLICY,
                 "max_charges": max_charges,
                 "now_ts": now_ts,
             },
         )
+        valid_voter_ids = tuple(sorted({
+            str(user_id) for user_id in payload.get("valid_voter_ids", []) if user_id
+        }))
         return GroupRoastRefillCompleteResult(
             completed=bool(payload.get("completed")),
             status=str(payload.get("status") or "error"),
             request=self._parse_refill(payload.get("request")),
-            valid_voter_ids=tuple(sorted({
-                str(user_id) for user_id in payload.get("valid_voter_ids", []) if user_id
-            })),
+            valid_voter_ids=valid_voter_ids,
             benefited_user_ids=tuple(sorted({
                 str(user_id) for user_id in payload.get("benefited_user_ids", []) if user_id
             })),
+            # 旧 Cloud 不返回加权票数时保持一人一票，不影响既有补货流程。
+            effective_votes=max(
+                0,
+                int(payload.get("effective_votes", len(valid_voter_ids)) or 0),
+            ),
         )
