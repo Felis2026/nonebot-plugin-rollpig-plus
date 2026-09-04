@@ -51,6 +51,7 @@ background_resource_sync_tasks: set[asyncio.Task[None]] = set()
 background_maintenance_tasks: set[asyncio.Task[None]] = set()
 background_daily_report_tasks: set[asyncio.Task[None]] = set()
 daily_report_recovery_dates: set[str] = set()
+pending_daily_report_recovery_dates: set[str] = set()
 DAILY_REPORT_INSTANCE_ID = uuid.uuid4().hex
 DAILY_REPORT_SCHEDULE_TIME = dt.time(23, 45)
 DAILY_REPORT_RETRY_CUTOFF = dt.time(0, 10)
@@ -1011,25 +1012,39 @@ async def startup_daily_report_recovery() -> None:
     schedule_daily_report_recovery(report_date)
 
 
-def schedule_daily_report_recovery(report_date: str) -> None:
-    """在安全窗口安排一次恢复；无 Bot 时结束后允许连接事件再次尝试。"""
+async def _run_daily_report_recovery(report_date: str) -> None:
+    """串行执行合并后的恢复请求；运行期间的新连接只追加一次重查。"""
 
-    if not report_date or report_date in daily_report_recovery_dates:
+    try:
+        while True:
+            pending_daily_report_recovery_dates.discard(report_date)
+            await daily_report_job(
+                report_date=report_date,
+                random_delay_enabled=False,
+            )
+            if report_date not in pending_daily_report_recovery_dates:
+                return
+    finally:
+        pending_daily_report_recovery_dates.discard(report_date)
+        daily_report_recovery_dates.discard(report_date)
+
+
+def schedule_daily_report_recovery(report_date: str) -> None:
+    """在安全窗口安排恢复；运行期间的新 Bot 连接会合并为一次后续重查。"""
+
+    if not report_date:
+        return
+    if report_date in daily_report_recovery_dates:
+        # 当前任务解析过 Bot 路由后，新连接可能带来此前不可达的群。记录一次
+        # 待重跑即可；多个连接事件会自然合并，不并发创建重复恢复任务。
+        pending_daily_report_recovery_dates.add(report_date)
         return
     daily_report_recovery_dates.add(report_date)
     task: asyncio.Task[None] = asyncio.create_task(
-        daily_report_job(
-            report_date=report_date,
-            random_delay_enabled=False,
-        )
+        _run_daily_report_recovery(report_date)
     )
     background_daily_report_tasks.add(task)
-
-    def finish_recovery(completed_task: asyncio.Task[None]) -> None:
-        background_daily_report_tasks.discard(completed_task)
-        daily_report_recovery_dates.discard(report_date)
-
-    task.add_done_callback(finish_recovery)
+    task.add_done_callback(background_daily_report_tasks.discard)
 
 
 @get_driver().on_bot_connect

@@ -480,6 +480,39 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         schedule_recovery.assert_called_once_with("2026-09-03")
 
+    async def test_bot_connection_during_recovery_queues_one_route_refresh(self) -> None:
+        report_date = "2026-09-03"
+        first_run_started = asyncio.Event()
+        finish_first_run = asyncio.Event()
+        call_count = 0
+
+        async def run_report(**kwargs) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_run_started.set()
+                await finish_first_run.wait()
+
+        jobs.daily_report_recovery_dates.clear()
+        jobs.pending_daily_report_recovery_dates.clear()
+        existing_tasks = set(jobs.background_daily_report_tasks)
+        with patch.object(jobs, "daily_report_job", side_effect=run_report):
+            jobs.schedule_daily_report_recovery(report_date)
+            recovery_task = next(
+                iter(jobs.background_daily_report_tasks - existing_tasks)
+            )
+            await first_run_started.wait()
+
+            # 第二个 Bot 在首轮恢复尚未结束时连接；这次触发不能被日期去重吞掉。
+            jobs.schedule_daily_report_recovery(report_date)
+            jobs.schedule_daily_report_recovery(report_date)
+            finish_first_run.set()
+            await recovery_task
+
+        self.assertEqual(call_count, 2)
+        self.assertNotIn(report_date, jobs.daily_report_recovery_dates)
+        self.assertNotIn(report_date, jobs.pending_daily_report_recovery_dates)
+
     async def test_group_report_writes_protection_before_returning_coupon(self) -> None:
         summary_store = SimpleNamespace(
             get_group_rolls=AsyncMock(return_value={"a": "pig", "b": "pig"}),
