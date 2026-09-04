@@ -1259,6 +1259,87 @@ class DailyProtectionSettlementTests(unittest.IsolatedAsyncioTestCase):
             "200", ["user-b"], "2026-08-27"
         )
 
+    async def test_settlement_starts_during_report_retry_and_is_awaited(self) -> None:
+        retry_wait_started = asyncio.Event()
+        release_retry_wait = asyncio.Event()
+        report_retry_finished = asyncio.Event()
+        settlement_started = asyncio.Event()
+        release_settlement = asyncio.Event()
+        retry_delay_calls = 0
+
+        async def controlled_sleep(delay: float) -> None:
+            if delay == 0:
+                return
+            retry_wait_started.set()
+            await release_retry_wait.wait()
+
+        def report_retry_delay(*args, **kwargs) -> float | None:
+            nonlocal retry_delay_calls
+            retry_delay_calls += 1
+            if retry_delay_calls == 1:
+                return 1.0
+            report_retry_finished.set()
+            return None
+
+        async def settle_protections(*args, **kwargs) -> None:
+            settlement_started.set()
+            await release_settlement.wait()
+
+        mocked_store = SimpleNamespace(
+            get_active_group_ids=AsyncMock(return_value={"100", "200"}),
+            claim_daily_report_deliveries=AsyncMock(
+                return_value=DailyReportDeliveryClaimResult(claims=())
+            ),
+        )
+        bot = SimpleNamespace(self_id="bot-a")
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs.asyncio, "sleep", new=controlled_sleep),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(
+                jobs,
+                "is_daily_report_enabled",
+                side_effect=lambda group_id: group_id == "100",
+            ),
+            patch.object(jobs, "_daily_report_retry_delay", side_effect=report_retry_delay),
+            patch.object(
+                jobs,
+                "resolve_daily_report_bots",
+                new=AsyncMock(return_value={"100": bot}),
+            ),
+            patch.object(
+                jobs,
+                "settle_daily_protections_safely",
+                new=AsyncMock(side_effect=settle_protections),
+            ) as settle_safely,
+        ):
+            report_task = asyncio.create_task(
+                jobs.daily_report_job(
+                    report_date="2026-08-26",
+                    random_delay_enabled=False,
+                )
+            )
+            await asyncio.wait_for(retry_wait_started.wait(), timeout=1)
+            await asyncio.wait_for(settlement_started.wait(), timeout=1)
+
+            settle_safely.assert_awaited_once()
+            self.assertFalse(report_task.done())
+
+            release_retry_wait.set()
+            await asyncio.wait_for(report_retry_finished.wait(), timeout=1)
+            self.assertFalse(report_task.done())
+
+            release_settlement.set()
+            await asyncio.wait_for(report_task, timeout=1)
+
+        settle_safely.assert_awaited_once_with(
+            ["200"],
+            date_str="2026-08-26",
+            protect_date="2026-08-27",
+            cutoff_at="2026-08-26T23:45:00+08:00",
+        )
+
     async def test_settlement_skipped_when_events_unavailable(self) -> None:
         # 事件记录不可用时宁可跳过结算，也不能把保护名单误写成空。
         mocked_store = SimpleNamespace(

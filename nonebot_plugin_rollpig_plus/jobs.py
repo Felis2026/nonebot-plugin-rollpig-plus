@@ -857,6 +857,7 @@ async def daily_report_job(
     logger.info(f"[猪圈日报] {source}触发，延迟 {delay} 秒后推送")
     await asyncio.sleep(delay)
     protection_group_ids: list[str] = []
+    protection_settlement_task: asyncio.Task[None] | None = None
     try:
         active_groups = await store.get_active_group_ids(report_date)
         if not active_groups:
@@ -887,6 +888,17 @@ async def daily_report_job(
             for group_id in enabled_active_groups
             if group_id not in report_push_group_set
         ]
+        if protection_group_ids:
+            # 未开启日报群的保护不能等待日报重试结束；启动后与投递并行，
+            # 并在 finally 中等待同一个任务，保证只结算一次且任务退出前收尾。
+            protection_settlement_task = asyncio.create_task(
+                settle_daily_protections_safely(
+                    protection_group_ids,
+                    date_str=report_date,
+                    protect_date=protect_date,
+                    cutoff_at=cutoff_at,
+                )
+            )
 
         if not report_push_groups:
             logger.info("[猪圈日报] 没有群开启日报推送")
@@ -972,14 +984,8 @@ async def daily_report_job(
     except Exception as error:
         logger.error(f"[猪圈日报] 任务异常: {error}")
     finally:
-        # 未开启日报群的保护属于独立结算。统一放在投递流程退出后执行，既不
-        # 抢占日报的截止窗口，也不会因领取或渲染异常而遗漏已确定的结算范围。
-        await settle_daily_protections_safely(
-            protection_group_ids,
-            date_str=report_date,
-            protect_date=protect_date,
-            cutoff_at=cutoff_at,
-        )
+        if protection_settlement_task is not None:
+            await protection_settlement_task
 
 
 # ================================ 日报启动恢复 ================================ #
