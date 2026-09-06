@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import time
 from dataclasses import dataclass, replace
@@ -25,6 +26,7 @@ from .roast_flow import (
 from .store import store
 from .store.models import RoastEvent, RoastReservation
 from .texts import (
+    DAILY_FEED_RESERVATION_TEXTS,
     RESERVED_TARGET_EATEN_TEXTS,
     RESERVED_TARGET_FOOD_TEXTS,
     RESERVED_TARGET_HUMAN_TEXTS,
@@ -193,7 +195,14 @@ async def _prepare_outcome_with_retry(
         if delay:
             await asyncio.sleep(delay)
         try:
-            updated = await store.save_roast_reservation_outcome(reservation, outcome_snapshot)
+            updated = await store.save_roast_reservation_outcome(
+                reservation,
+                outcome_snapshot,
+                settle_daily_feed=(
+                    reservation.force_mode is None
+                    and str(outcome_snapshot.get("event_type") or "") == "success"
+                ),
+            )
             if updated is not None:
                 return updated
             logger.error(
@@ -387,6 +396,30 @@ def _build_reservation_event(reservation: RoastReservation, outcome: RoastOutcom
     )
 
 
+def _build_reservation_feed_text(reservation: RoastReservation) -> str:
+    """把本轮真实成长者合并成一行，并按预约 ID 稳定选择文案。"""
+
+    fed_results = [
+        result
+        for result in reservation.daily_feed_results
+        if result.status == "fed" and result.new_level > result.previous_level
+    ]
+    if not fed_results:
+        return ""
+    display_names = {
+        participant.user_id: participant.display_name or participant.user_id
+        for participant in reservation.participants
+    }
+    names = [display_names.get(result.user_id, result.user_id) for result in fed_results]
+    if len(names) <= 3:
+        participants = "、".join(f"【{name}】" for name in names)
+    else:
+        participants = f"【{names[0]}】等 {len(names)} 人"
+    digest = hashlib.sha256(reservation.reservation_id.encode("utf-8")).digest()
+    template = DAILY_FEED_RESERVATION_TEXTS[digest[0] % len(DAILY_FEED_RESERVATION_TEXTS)]
+    return template.format(participants=participants)
+
+
 async def _prepare_reservation_message(outcome: RoastOutcome):
     """在进入 sending 前完成所有可能失败或耗时的图片渲染。"""
 
@@ -446,6 +479,9 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> ReservationDeliver
                 reservation = replace(updated, claim_token=reservation.claim_token or updated.claim_token)
 
             message = await _prepare_reservation_message(outcome)
+            feed_text = _build_reservation_feed_text(reservation)
+            if feed_text:
+                message += MessageSegment.text("\n" + feed_text)
 
             # 群开关可能在结果生成期间变化，真正发送前必须再次确认。
             if not is_group_rollpig_enabled(reservation.group_id):

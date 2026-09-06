@@ -55,6 +55,19 @@ from nonebot_plugin_rollpig_plus.yesterday_recap import (
 DATE = "2026-08-23"
 
 
+# ================================ 独立加餐快照回归样本 ================================ #
+
+
+def applied_feed(**overrides) -> dict:
+    """构造独立于外观补全的已结算加餐，可覆写字段验证损坏记录隔离。"""
+
+    return {
+        "status": "fed", "user_id": "user", "pig_id": "pig",
+        "previous_level": 1, "new_level": 2,
+        "created_at": "2026-08-23T12:00:00+00:00", **overrides,
+    }
+
+
 class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -115,6 +128,24 @@ class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((existing.previous_copies, existing.copies), (0, 1))
         self.assertEqual(existing.snapshot, created.snapshot)
 
+    async def test_snapshot_keeps_draw_level_and_exposes_later_daily_feed(self):
+        created = await self.manager.get_or_create_today_pig("user", "pig", date_str=DATE)
+
+        with patch.object(data_manager_module, "rollpig_date_str", return_value=DATE):
+            fed = await self.manager.log_roast_event(
+                "success",
+                "user",
+                "target",
+                event_id="event-1",
+                settle_daily_feed=True,
+            )
+        restored = self.manager.get_daily_roll_snapshot("user", DATE)
+
+        self.assertEqual(created.snapshot.expert_level_after_roll, 0)
+        self.assertEqual((fed.previous_level, fed.new_level), (0, 1))
+        self.assertEqual(restored.expert_level_after_roll, 0)
+        self.assertEqual(restored.daily_feed_result.new_level, 1)
+
     async def test_old_history_remains_readable_without_fabricated_growth(self):
         self.data_file.write_text(
             json.dumps({"history": {DATE: {"user": "pig"}}}, ensure_ascii=False),
@@ -126,6 +157,36 @@ class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((snapshot.date_str, snapshot.pig_id), (DATE, "pig"))
         self.assertFalse(snapshot.outcome_available)
+
+    async def test_independent_feed_survives_missing_or_broken_snapshot(self):
+        self.manager.data["history"] = {DATE: {"user": "pig"}}
+        self.manager.data["daily_feeds"] = {DATE: {"user": applied_feed()}}
+        for raw in (None, "broken", {"pig_id": "other"}, {"pig_id": "pig"}):
+            with self.subTest(raw=raw):
+                self.manager.data["daily_roll_snapshots"] = {DATE: {"user": raw}}
+                snapshot = self.manager.get_daily_roll_snapshot("user", DATE)
+                self.assertEqual(snapshot.daily_feed_result.new_level, 2)
+                self.assertFalse(snapshot.outcome_available)
+                self.assertIsNone(snapshot.copies_after_roll)
+                self.assertEqual(snapshot.unlocked_variant_fields, frozenset())
+
+    async def test_invalid_independent_feed_is_ignored(self):
+        self.manager.data["history"] = {DATE: {"user": "pig"}}
+        for overrides in (
+            {"user_id": "other"}, {"pig_id": "other"}, {"status": "already_fed"},
+            {"previous_level": -1}, {"new_level": 6}, {"new_level": "bad"},
+            {"new_level": True}, {"new_level": 2.5}, {"previous_level": 2},
+        ):
+            with self.subTest(overrides=overrides):
+                self.manager.data["daily_feeds"] = {DATE: {"user": applied_feed(**overrides)}}
+                snapshot = self.manager.get_daily_roll_snapshot("user", DATE)
+                self.assertIsNone(snapshot.daily_feed_result)
+                migrated = self.manager._migrate(self.manager.data, persist=False)
+                if "pig_id" not in overrides:
+                    self.assertNotIn("user", migrated["daily_feeds"].get(DATE, {}))
+                # 迁移只校验记录自身；历史身份匹配由读取入口负责，不能误删独立事实。
+                self.manager.data = migrated
+                self.assertIsNone(self.manager.get_daily_roll_snapshot("user", DATE).daily_feed_result)
 
     async def test_broken_snapshot_day_is_isolated_without_losing_history(self):
         self.data_file.write_text(
@@ -177,6 +238,37 @@ class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CloudDailyRollSnapshotCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_feed_survives_all_appearance_completion_states(self):
+        store = object.__new__(CloudStore)
+        for outcome in (None, {"snapshot_available": False}, {"snapshot_available": True}):
+            with self.subTest(outcome=outcome):
+                store._request = AsyncMock(return_value={
+                    "pig_id": "pig", "daily_feed_result": applied_feed(),
+                    "outcome_snapshot": outcome,
+                })
+                snapshot = await store.get_daily_roll_snapshot("user", DATE)
+                self.assertEqual(snapshot.daily_feed_result.new_level, 2)
+                if not outcome or not outcome["snapshot_available"]:
+                    self.assertFalse(snapshot.outcome_available)
+                    self.assertIsNone(snapshot.expert_level_after_roll)
+                    self.assertEqual(snapshot.unlocked_variant_levels, ())
+
+    async def test_invalid_feed_does_not_break_cloud_snapshot(self):
+        store = object.__new__(CloudStore)
+        for overrides in (
+            {"user_id": "other"}, {"pig_id": "other"}, {"status": "already_fed"},
+            {"previous_level": -1}, {"new_level": 6}, {"new_level": "bad"},
+            {"new_level": True}, {"new_level": 2.5}, {"previous_level": 2},
+        ):
+            with self.subTest(overrides=overrides):
+                store._request = AsyncMock(return_value={
+                    "pig_id": "pig", "daily_feed_result": applied_feed(**overrides),
+                })
+                snapshot = await store.get_daily_roll_snapshot("user", DATE)
+                current = await store.get_or_create_daily_roll("user", "pig", date_str=DATE)
+                self.assertIsNone(snapshot.daily_feed_result)
+                self.assertIsNone(current.snapshot.daily_feed_result)
+
     async def test_snapshot_read_supplies_non_strict_fallback(self):
         store = object.__new__(CloudStore)
         store._request = AsyncMock(return_value={"pig_id": None})
@@ -652,6 +744,24 @@ class YesterdayRecapBusinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(recap.fallback_image_path)
         self.assertEqual(recap.outcome_text, "EX Lv.1 → 2 · 新立绘与介绍已解锁")
         self.assertEqual(recap.summary.text, "本群昨天没有发生与你有关的烤猪事件。")
+
+    async def test_pending_snapshot_uses_feed_appearance_without_inventing_draw_outcome(self):
+        variant = self.root / "pig_ex2.png"
+        variant.write_bytes(b"ex2")
+        self.resources.ex_variants = {
+            "pig": {2: PigExVariant(pig_id="pig", level=2, image_path=variant)},
+        }
+        self.snapshot = CloudStore._parse_daily_roll_snapshot(
+            {"pig_id": "pig", "daily_feed_result": applied_feed(),
+             "outcome_snapshot": {"snapshot_available": False}},
+            date_str=DATE, user_id="user",
+        )
+        recap = await build_yesterday_recap(
+            "user", group_id="100", date_str=DATE,
+            recap_store=self._store([]), resources=self.resources,
+        )
+        self.assertEqual(recap.image_path, variant)
+        self.assertEqual(recap.outcome_text, "")
 
     async def test_multi_events_select_two_families_and_stable_summary(self):
         events = [self._event(index) for index in range(1, 5)]

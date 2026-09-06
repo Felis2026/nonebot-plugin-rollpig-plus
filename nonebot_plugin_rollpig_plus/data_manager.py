@@ -15,6 +15,7 @@ from .runtime import rollpig_date_str, rollpig_today, resolve_roast_cooldown_sec
 from .store.models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyFeedResult,
     DailyReportDeliveryClaim,
     DailyReportDeliveryClaimResult,
     DailyReportDeliveryTransitionResult,
@@ -35,6 +36,7 @@ from .store.models import (
     ROAST_REFILL_MIN_DISTINCT_VOTERS,
     ROAST_REFILL_VOTE_WEIGHT_POLICY,
     expert_level_from_copies,
+    parse_applied_daily_feed,
     roast_refill_threshold,
 )
 
@@ -137,6 +139,7 @@ class PigDataManager:
     - group_roll_seen_at: {date: {group_id: {user_id: ISO时间}}} ← 日报固定截止快照
     - collection : {user_id: [pig_id, ...]}   ← 永久保留，图鉴数据
     - pig_progress: {user_id: {pig_id: {copies, first_obtained_at}}} ← P1A 抽到次数/专家等级
+    - daily_feeds: {date: {user_id: feed_result}} ← 每日用户级加餐结果
     - draw_state : {user_id: {duplicate_streak}} ← P1A 连续重复次数，用于伪保底
     - usage      : {user_id: {last_roast_ts, roast_charges, roast_charge_updated_ts}} ← 普通烤群友充能
     - force_usage: {user_id: "YYYY-MM-DD"}    ← 后门口令每日计数
@@ -171,6 +174,7 @@ class PigDataManager:
             "group_roll_seen_at": {},
             "collection": {},
             "pig_progress": {},
+            "daily_feeds": {},
             "draw_state": {},
             "usage": {},
             "force_usage": {},
@@ -225,6 +229,7 @@ class PigDataManager:
             "group_roll_seen_at",
             "collection",
             "pig_progress",
+            "daily_feeds",
             "draw_state",
             "usage",
             "force_usage",
@@ -281,10 +286,17 @@ class PigDataManager:
                 pig_id = str(pig_id)
                 item = user_progress.get(pig_id)
                 if not isinstance(item, dict):
-                    user_progress[pig_id] = {"copies": 1, "first_obtained_at": None}
+                    user_progress[pig_id] = {
+                        "copies": 1,
+                        "growth_bonus": 0,
+                        "first_obtained_at": None,
+                    }
                     migrated = True
                 elif _safe_int(item.get("copies"), 0) <= 0:
                     item["copies"] = 1
+                    migrated = True
+                if isinstance(item, dict) and _safe_int(item.get("growth_bonus"), -1) < 0:
+                    item["growth_bonus"] = 0
                     migrated = True
             state = draw_state.get(str(user_id))
             if not isinstance(state, dict):
@@ -293,6 +305,32 @@ class PigDataManager:
             elif _safe_int(state.get("duplicate_streak"), 0) < 0:
                 state["duplicate_streak"] = 0
                 migrated = True
+
+        # ================================ 每日加餐记录容错 ================================ #
+        # 加餐记录只保存真实成长结果。单个日期桶或条目损坏时直接隔离，避免后续
+        # 结算在 setdefault 链路上报错，也不能让整份本地账本进入写保护。
+        daily_feeds = data.setdefault("daily_feeds", {})
+        normalized_daily_feeds: dict[str, dict[str, dict]] = {}
+        for date_str, day_feeds in daily_feeds.items():
+            if not _is_valid_date(str(date_str)) or not isinstance(day_feeds, dict):
+                continue
+            normalized_day: dict[str, dict] = {}
+            for user_id, raw_feed in day_feeds.items():
+                if not user_id or not isinstance(raw_feed, dict):
+                    continue
+                pig_id = str(raw_feed.get("pig_id") or "")
+                normalized_user_id = str(user_id)
+                # 兼容早期省略身份/状态的本地记录，但不能覆盖显式错误值，
+                # 更不能先钳制坏等级、再把它当作有效升级保存。
+                candidate = {"status": "fed", "user_id": normalized_user_id, **raw_feed}
+                feed = parse_applied_daily_feed(candidate, pig_id=pig_id, user_id=normalized_user_id)
+                if pig_id and feed is not None:
+                    normalized_day[normalized_user_id] = self._daily_feed_to_raw(feed)
+            if normalized_day:
+                normalized_daily_feeds[str(date_str)] = normalized_day
+        if normalized_daily_feeds != daily_feeds:
+            data["daily_feeds"] = normalized_daily_feeds
+            migrated = True
 
         protected = data.get("protected", {})
         if "date" in protected and isinstance(protected.get("users"), list):
@@ -512,6 +550,21 @@ class PigDataManager:
 
     # ================================ 预约烤猪序列化 ================================ #
 
+    @staticmethod
+    def _daily_feed_from_raw(raw: dict) -> DailyFeedResult:
+        """恢复单条加餐结果；数值统一钳制，避免坏缓存污染展示。"""
+
+        return DailyFeedResult(
+            status=str(raw.get("status") or "already_fed"),
+            user_id=str(raw.get("user_id") or ""),
+            pig_id=str(raw.get("pig_id") or ""),
+            previous_level=max(0, min(5, _safe_int(raw.get("previous_level"), 0))),
+            new_level=max(0, min(5, _safe_int(raw.get("new_level"), 0))),
+            source_type=str(raw.get("source_type") or "reservation"),
+            source_id=str(raw.get("source_id") or ""),
+            created_at=str(raw.get("created_at") or ""),
+        )
+
     def _reservation_from_raw(self, raw: dict) -> RoastReservation:
         """把持久化字典恢复成只读领域对象；坏参与者记录会被忽略。"""
 
@@ -525,6 +578,11 @@ class PigDataManager:
             if isinstance(item, dict) and item.get("user_id")
         )
         snapshot = raw.get("outcome_snapshot")
+        feed_results = tuple(
+            self._daily_feed_from_raw(item)
+            for item in (raw.get("daily_feed_results") or [])
+            if isinstance(item, dict) and item.get("user_id")
+        )
         return RoastReservation(
             reservation_id=str(raw.get("reservation_id") or ""),
             date_str=str(raw.get("date_str") or ""),
@@ -540,6 +598,7 @@ class PigDataManager:
             status=str(raw.get("status") or "pending"),
             target_pig_id=str(raw.get("target_pig_id") or ""),
             outcome_snapshot=dict(snapshot) if isinstance(snapshot, dict) else None,
+            daily_feed_results=feed_results,
             claim_token=str(raw.get("claim_token") or ""),
         )
 
@@ -753,18 +812,33 @@ class PigDataManager:
     ) -> DailyRollSnapshot:
         """恢复单条快照；坏条目只降级为历史身份，不拖垮整个数据文件。"""
 
+        # 抽取快照损坏不影响独立结算的加餐事实，也不恢复不可信的抽取字段。
+        daily_feed = parse_applied_daily_feed(
+            self.data.get("daily_feeds", {}).get(date_str, {}).get(user_id),
+            pig_id=pig_id,
+            user_id=user_id,
+        )
+        identity_snapshot = DailyRollSnapshot(
+            date_str=date_str, pig_id=pig_id, daily_feed_result=daily_feed,
+        )
         if not isinstance(raw, dict) or str(raw.get("pig_id") or "") != pig_id:
             if raw is not None:
                 logger.warning(
                     "rollpig 每日抽取快照损坏，已忽略动态字段: "
                     f"date={date_str} user={user_id} pig_id={pig_id}"
                 )
-            return DailyRollSnapshot(date_str=date_str, pig_id=pig_id)
+            return identity_snapshot
 
         is_new_raw = raw.get("is_new_pig")
         is_new_pig = is_new_raw if isinstance(is_new_raw, bool) else None
         previous_copies = _optional_nonnegative_int(raw.get("previous_copies"))
         copies_after_roll = _optional_nonnegative_int(raw.get("copies_after_roll"))
+        previous_expert_level = _optional_nonnegative_int(raw.get("previous_expert_level"))
+        expert_level_after_roll = _optional_nonnegative_int(raw.get("expert_level_after_roll"))
+        if previous_expert_level is not None and previous_expert_level > 5:
+            previous_expert_level = None
+        if expert_level_after_roll is not None and expert_level_after_roll > 5:
+            expert_level_after_roll = None
         collection_size = _optional_nonnegative_int(raw.get("collection_size_after_roll"))
         resolved_level = _optional_nonnegative_int(raw.get("resolved_variant_level"))
         if resolved_level is not None and resolved_level > 5:
@@ -789,6 +863,9 @@ class PigDataManager:
             is_new_pig=is_new_pig,
             previous_copies=previous_copies,
             copies_after_roll=copies_after_roll,
+            previous_expert_level=previous_expert_level,
+            expert_level_after_roll=expert_level_after_roll,
+            daily_feed_result=daily_feed,
             collection_size_after_roll=collection_size,
             resource_version=str(raw.get("resource_version") or ""),
             resolved_variant_level=resolved_level,
@@ -798,10 +875,10 @@ class PigDataManager:
         )
         if not snapshot.outcome_available:
             logger.warning(
-                "rollpig 每日抽取快照字段残缺，已仅保留历史身份: "
+                "rollpig 每日抽取快照字段残缺，已忽略抽取动态字段: "
                 f"date={date_str} user={user_id} pig_id={pig_id}"
             )
-            return DailyRollSnapshot(date_str=date_str, pig_id=pig_id)
+            return identity_snapshot
         return snapshot
 
     @staticmethod
@@ -813,6 +890,8 @@ class PigDataManager:
             "is_new_pig": snapshot.is_new_pig,
             "previous_copies": snapshot.previous_copies,
             "copies_after_roll": snapshot.copies_after_roll,
+            "previous_expert_level": snapshot.previous_expert_level,
+            "expert_level_after_roll": snapshot.expert_level_after_roll,
             "collection_size_after_roll": snapshot.collection_size_after_roll,
             "resource_version": snapshot.resource_version,
             "resolved_variant_level": snapshot.resolved_variant_level,
@@ -853,6 +932,8 @@ class PigDataManager:
             is_new_pig=result.is_new_pig,
             previous_copies=result.previous_copies,
             copies_after_roll=result.copies,
+            previous_expert_level=result.previous_expert_level,
+            expert_level_after_roll=result.expert_level,
             collection_size_after_roll=collection_size,
         )
         raw_snapshot = self._snapshot_to_raw(snapshot)
@@ -899,17 +980,21 @@ class PigDataManager:
                 existing.is_new_pig,
                 existing.previous_copies,
                 existing.copies_after_roll,
+                existing.previous_expert_level,
+                existing.expert_level_after_roll,
                 existing.collection_size_after_roll,
             ) != (
                 snapshot.is_new_pig,
                 snapshot.previous_copies,
                 snapshot.copies_after_roll,
+                snapshot.previous_expert_level,
+                snapshot.expert_level_after_roll,
                 snapshot.collection_size_after_roll,
             ):
                 raise ValueError("每日抽取成长快照冲突")
 
             if existing.resource_version:
-                if existing != snapshot:
+                if self._snapshot_to_raw(existing) != self._snapshot_to_raw(snapshot):
                     raise ValueError("每日抽取资源快照已由首次客户端写入")
                 return True
 
@@ -960,11 +1045,15 @@ class PigDataManager:
                     continue
                 progress[str(pig_id)] = PigProgress(
                     copies=max(0, _safe_int(item.get("copies"), 0)),
+                    growth_bonus=max(0, _safe_int(item.get("growth_bonus"), 0)),
                     first_obtained_at=item.get("first_obtained_at"),
                 )
 
         for pig_id in collection_ids:
-            progress.setdefault(pig_id, PigProgress(copies=1, first_obtained_at=None))
+            progress.setdefault(
+                pig_id,
+                PigProgress(copies=1, growth_bonus=0, first_obtained_at=None),
+            )
 
         raw_state = self.data.setdefault("draw_state", {}).get(user_id, {})
         duplicate_streak = _safe_int(raw_state.get("duplicate_streak"), 0) if isinstance(raw_state, dict) else 0
@@ -1003,6 +1092,11 @@ class PigDataManager:
             else (1 if already_collected else 0)
         )
         is_new_pig = previous_copies <= 0 and not already_collected
+        growth_bonus = (
+            max(0, _safe_int(previous_item.get("growth_bonus"), 0))
+            if has_progress
+            else 0
+        )
 
         if pig_id not in user_collection:
             user_collection.append(pig_id)
@@ -1022,6 +1116,7 @@ class PigDataManager:
 
         user_progress[pig_id] = {
             "copies": copies,
+            "growth_bonus": growth_bonus,
             "first_obtained_at": first_obtained_at,
         }
         state["duplicate_streak"] = duplicate_streak
@@ -1031,6 +1126,8 @@ class PigDataManager:
             is_new_pig=is_new_pig,
             previous_copies=previous_copies,
             copies=copies,
+            previous_expert_level=expert_level_from_copies(previous_copies, growth_bonus),
+            expert_level=expert_level_from_copies(copies, growth_bonus),
             previous_duplicate_streak=previous_duplicate_streak,
             duplicate_streak=duplicate_streak,
         )
@@ -1050,6 +1147,16 @@ class PigDataManager:
                 is_new_pig=bool(snapshot.is_new_pig),
                 previous_copies=int(snapshot.previous_copies or 0),
                 copies=int(snapshot.copies_after_roll or 0),
+                previous_expert_level=(
+                    int(snapshot.previous_expert_level)
+                    if snapshot.previous_expert_level is not None
+                    else expert_level_from_copies(snapshot.previous_copies or 0)
+                ),
+                expert_level=(
+                    int(snapshot.expert_level_after_roll)
+                    if snapshot.expert_level_after_roll is not None
+                    else expert_level_from_copies(snapshot.copies_after_roll or 0)
+                ),
                 previous_duplicate_streak=draw_state.duplicate_streak,
                 duplicate_streak=draw_state.duplicate_streak,
                 snapshot=snapshot,
@@ -1057,11 +1164,14 @@ class PigDataManager:
 
         draw_state = self.get_draw_state(user_id)
         copies = draw_state.copies_of(pig_id)
+        expert_level = draw_state.expert_level_of(pig_id)
         return DailyRollResult(
             pig_id=pig_id,
             created=False,
             previous_copies=copies,
             copies=copies,
+            previous_expert_level=expert_level,
+            expert_level=expert_level,
             previous_duplicate_streak=draw_state.duplicate_streak,
             duplicate_streak=draw_state.duplicate_streak,
         )
@@ -1236,6 +1346,7 @@ class PigDataManager:
                 "target_pig_id": "",
                 "created_at": now_iso,
                 "outcome_snapshot": None,
+                "daily_feed_results": None,
             }
             self.data.setdefault("roast_reservations", {})[reservation_id] = raw
             self._mark_group_active_users_locked(target_date, str(group_id), [attacker_id])
@@ -1322,6 +1433,8 @@ class PigDataManager:
         reservation_id: str,
         claim_token: str,
         outcome_snapshot: dict,
+        *,
+        settle_daily_feed: bool = False,
     ) -> Optional[RoastReservation]:
         """原子固化结果并进入可恢复的 prepared；此时尚未调用外部发送接口。"""
 
@@ -1338,6 +1451,27 @@ class PigDataManager:
                 if raw.get("status") != "processing":
                     return None
                 raw["outcome_snapshot"] = dict(outcome_snapshot)
+                # 普通预约成功时，参与者在同一锁和同一次保存中分别尝试加餐。
+                # 结果随预约固化，之后的释放、重领和重新渲染只会复用这份列表。
+                if (
+                    settle_daily_feed
+                    and raw.get("force_mode") is None
+                    and str(outcome_snapshot.get("event_type") or "") == "success"
+                ):
+                    raw["daily_feed_results"] = [
+                        self._daily_feed_to_raw(
+                            self._apply_daily_feed_locked(
+                                date_str=str(raw.get("date_str") or rollpig_date_str()),
+                                user_id=str(item.get("user_id") or ""),
+                                source_type="reservation",
+                                source_id=reservation_id,
+                            )
+                        )
+                        for item in raw.get("participants", [])
+                        if isinstance(item, dict) and item.get("user_id")
+                    ]
+                else:
+                    raw["daily_feed_results"] = []
                 changed = True
             elif raw.get("outcome_snapshot") != outcome_snapshot:
                 return None
@@ -1732,6 +1866,16 @@ class PigDataManager:
             for date_str in snapshot_dates_to_del:
                 del daily_roll_snapshots[date_str]
 
+            daily_feeds = self.data.get("daily_feeds", {})
+            feed_dates_to_del = [
+                date_str
+                for date_str in daily_feeds
+                if _is_valid_date(date_str)
+                and (today - datetime.date.fromisoformat(date_str)).days > days_to_keep
+            ]
+            for date_str in feed_dates_to_del:
+                del daily_feeds[date_str]
+
             group_rolls = self.data.get("group_rolls", {})
             group_dates_to_del = [
                 d for d in group_rolls
@@ -1803,6 +1947,7 @@ class PigDataManager:
             if (
                 history_dates_to_del
                 or snapshot_dates_to_del
+                or feed_dates_to_del
                 or group_dates_to_del
                 or active_dates_to_del
                 or refill_ids_to_del
@@ -1930,6 +2075,110 @@ class PigDataManager:
             self.data.setdefault("force_usage", {})[user_id] = today
             await self._atomic_save()
 
+    # ================================ 每日加餐结算 ================================ #
+
+    @staticmethod
+    def _daily_feed_to_raw(result: DailyFeedResult) -> dict:
+        """把加餐结果固化为稳定 JSON，供预约重领原样恢复。"""
+
+        return {
+            "status": result.status,
+            "user_id": result.user_id,
+            "pig_id": result.pig_id,
+            "previous_level": result.previous_level,
+            "new_level": result.new_level,
+            "source_type": result.source_type,
+            "source_id": result.source_id,
+            "created_at": result.created_at,
+        }
+
+    def _apply_daily_feed_locked(
+        self,
+        *,
+        date_str: str,
+        user_id: str,
+        source_type: str,
+        source_id: str,
+    ) -> DailyFeedResult:
+        """在数据锁内尝试加餐；只有真实升级才写入日期唯一记录。"""
+
+        normalized_user_id = str(user_id)
+        pig_id = str(
+            self.data.setdefault("history", {}).get(date_str, {}).get(normalized_user_id)
+            or ""
+        )
+        if not pig_id:
+            return DailyFeedResult(
+                status="no_daily_pig",
+                user_id=normalized_user_id,
+                source_type=source_type,
+                source_id=source_id,
+            )
+
+        day_feeds = self.data.setdefault("daily_feeds", {}).setdefault(date_str, {})
+        existing = day_feeds.get(normalized_user_id)
+        if isinstance(existing, dict):
+            same_source = (
+                str(existing.get("source_type") or "") == source_type
+                and str(existing.get("source_id") or "") == source_id
+            )
+            return DailyFeedResult(
+                status="fed" if same_source else "already_fed",
+                user_id=normalized_user_id,
+                pig_id=str(existing.get("pig_id") or pig_id),
+                previous_level=max(0, min(5, _safe_int(existing.get("previous_level"), 0))),
+                new_level=max(0, min(5, _safe_int(existing.get("new_level"), 0))),
+                source_type=source_type,
+                source_id=source_id,
+                created_at=str(existing.get("created_at") or ""),
+            )
+
+        user_progress = self.data.setdefault("pig_progress", {}).setdefault(
+            normalized_user_id,
+            {},
+        )
+        if not isinstance(user_progress, dict):
+            user_progress = {}
+            self.data["pig_progress"][normalized_user_id] = user_progress
+        raw_progress = user_progress.get(pig_id)
+        if not isinstance(raw_progress, dict):
+            raw_progress = {
+                "copies": 1,
+                "growth_bonus": 0,
+                "first_obtained_at": None,
+            }
+            user_progress[pig_id] = raw_progress
+
+        copies = max(1, _safe_int(raw_progress.get("copies"), 1))
+        growth_bonus = max(0, _safe_int(raw_progress.get("growth_bonus"), 0))
+        previous_level = expert_level_from_copies(copies, growth_bonus)
+        if previous_level >= 5:
+            return DailyFeedResult(
+                status="max_level",
+                user_id=normalized_user_id,
+                pig_id=pig_id,
+                previous_level=previous_level,
+                new_level=previous_level,
+                source_type=source_type,
+                source_id=source_id,
+            )
+
+        raw_progress["growth_bonus"] = growth_bonus + 1
+        new_level = expert_level_from_copies(copies, growth_bonus + 1)
+        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        result = DailyFeedResult(
+            status="fed",
+            user_id=normalized_user_id,
+            pig_id=pig_id,
+            previous_level=previous_level,
+            new_level=new_level,
+            source_type=source_type,
+            source_id=source_id,
+            created_at=created_at,
+        )
+        day_feeds[normalized_user_id] = self._daily_feed_to_raw(result)
+        return result
+
     # ================================ 烤群友事件记录 ================================ #
     # 预约完成和日报事件必须共用同一次原子保存；普通即时事件仍复用同一序列化入口。
 
@@ -1944,7 +2193,13 @@ class PigDataManager:
                     for item in existing_events
                 ):
                     return False
-        events.setdefault(date_str, []).append({
+        day_events = events.setdefault(date_str, [])
+        if event.event_id and any(
+            isinstance(item, dict) and item.get("event_id") == event.event_id
+            for item in day_events
+        ):
+            return False
+        day_events.append({
             "event_id": str(event.event_id or uuid.uuid4().hex),
             "created_at": str(
                 event.created_at
@@ -1982,14 +2237,14 @@ class PigDataManager:
                                reservation_id: str = "", participant_ids: Optional[list[str]] = None,
                                participant_names: Optional[list[str]] = None, participant_count: int = 0,
                                backfire_victim_id: str = "", backfire_victim_name: str = "",
-                               special_reason: str = "", event_id: str = "", created_at: str = ""):
+                               special_reason: str = "", event_id: str = "", created_at: str = "",
+                               settle_daily_feed: bool = False) -> Optional[DailyFeedResult]:
         """
         记录一次烤群友事件。
         event_type: "success" / "escape" / "backfire" / "bot_backfire" / "self_roast"
         """
         async with self._lock:
-            changed = self._append_roast_event_locked(
-                RoastEvent(
+            event = RoastEvent(
                     event_type=event_type,
                     attacker_id=attacker_id,
                     target_id=target_id,
@@ -2004,13 +2259,24 @@ class PigDataManager:
                     backfire_victim_id=backfire_victim_id,
                     backfire_victim_name=backfire_victim_name,
                     special_reason=special_reason,
-                    event_id=event_id,
+                    event_id=str(event_id or uuid.uuid4().hex),
                     created_at=created_at,
-                ),
+                )
+            changed = self._append_roast_event_locked(
+                event,
                 date_str=rollpig_date_str(),
             )
-            if changed:
+            feed_result = None
+            if settle_daily_feed and event_type == "success" and not reservation_id:
+                feed_result = self._apply_daily_feed_locked(
+                    date_str=rollpig_date_str(),
+                    user_id=attacker_id,
+                    source_type="roast",
+                    source_id=str(event.event_id or ""),
+                )
+            if changed or (feed_result is not None and feed_result.status == "fed"):
                 await self._atomic_save()
+            return feed_result
 
     def get_daily_events(
         self,
@@ -2165,6 +2431,34 @@ class PigDataManager:
                 future_previous.append(previous_copies)
         return min(future_previous, default=current_copies)
 
+    def _growth_bonus_at_cutoff_locked(
+        self,
+        user_id: str,
+        pig_id: str,
+        *,
+        cutoff: datetime.datetime,
+    ) -> int:
+        """从当前累计加餐中扣除截止点之后的记录，恢复日报时点等级。"""
+
+        raw_progress = self.data.get("pig_progress", {}).get(user_id, {})
+        raw_item = raw_progress.get(pig_id, {}) if isinstance(raw_progress, dict) else {}
+        current_bonus = (
+            max(0, _safe_int(raw_item.get("growth_bonus"), 0))
+            if isinstance(raw_item, dict)
+            else 0
+        )
+        future_count = 0
+        for day_feeds in self.data.get("daily_feeds", {}).values():
+            if not isinstance(day_feeds, dict):
+                continue
+            raw_feed = day_feeds.get(user_id)
+            if not isinstance(raw_feed, dict) or str(raw_feed.get("pig_id") or "") != pig_id:
+                continue
+            created_at = _parse_utc_datetime(raw_feed.get("created_at"))
+            if created_at is not None and created_at > cutoff:
+                future_count += 1
+        return max(0, current_bonus - future_count)
+
     def _build_daily_report_profiles_locked(
         self,
         *,
@@ -2235,11 +2529,43 @@ class PigDataManager:
                 if daily_visible and isinstance(raw_daily, dict)
                 else None
             )
+            raw_daily_level = (
+                _optional_nonnegative_int(raw_daily.get("expert_level_after_roll"))
+                if daily_visible and isinstance(raw_daily, dict)
+                else None
+            )
+            # ================================ 截止点等级与达成时间 ================================ #
+            daily_feed = parse_applied_daily_feed(
+                self.data.get("daily_feeds", {}).get(date_str, {}).get(user_id),
+                pig_id=daily_pig_id,
+                user_id=user_id,
+            )
+            if daily_feed is not None and not _timestamp_not_after_cutoff(daily_feed.created_at, cutoff):
+                daily_feed = None
             daily_achieved_at = (
                 self._daily_roll_created_at_locked(date_str, user_id)
                 if daily_visible
                 else ""
             )
+            if raw_daily_level is not None:
+                daily_ex_level = min(5, raw_daily_level)
+                daily_base_level = daily_ex_level
+            elif daily_copies is not None:
+                # 旧快照没有冻结 EX；累计 bonus 已含当天加餐，先扣除再统一应用，
+                # 避免重复加级，并让满级前后的达成时间判断使用同一基准。
+                bonus = self._growth_bonus_at_cutoff_locked(user_id, daily_pig_id, cutoff=cutoff)
+                daily_base_level = expert_level_from_copies(
+                    daily_copies, max(0, bonus - int(daily_feed is not None)),
+                )
+                daily_ex_level = expert_level_from_copies(daily_copies, bonus)
+            else:
+                daily_ex_level = None
+                daily_base_level = None
+            if daily_feed is not None and daily_base_level is not None and daily_feed.new_level > daily_base_level:
+                daily_ex_level = max(daily_ex_level, daily_feed.new_level)
+                # 缺失或损坏时间继续兼容展示等级，但不能编造新的排序时间。
+                if _parse_utc_datetime(daily_feed.created_at) is not None:
+                    daily_achieved_at = daily_feed.created_at
 
             recent_pig_id = ""
             if isinstance(history, dict):
@@ -2276,11 +2602,7 @@ class PigDataManager:
                 DailyReportProfileSnapshot(
                     user_id=user_id,
                     daily_pig_id=daily_pig_id if daily_visible else "",
-                    daily_ex_level=(
-                        expert_level_from_copies(daily_copies)
-                        if daily_copies is not None
-                        else None
-                    ),
+                    daily_ex_level=daily_ex_level,
                     daily_achieved_at=daily_achieved_at,
                     catalog_count=len(visible_catalog_ids),
                     catalog_achieved_at=max(
@@ -2290,7 +2612,14 @@ class PigDataManager:
                     )[1],
                     recent_pig_id=recent_pig_id,
                     recent_ex_level=(
-                        expert_level_from_copies(recent_copies)
+                        expert_level_from_copies(
+                            recent_copies,
+                            self._growth_bonus_at_cutoff_locked(
+                                user_id,
+                                recent_pig_id,
+                                cutoff=cutoff,
+                            ),
+                        )
                         if recent_pig_id
                         else None
                     ),

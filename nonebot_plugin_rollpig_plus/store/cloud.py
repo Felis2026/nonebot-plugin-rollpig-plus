@@ -12,6 +12,7 @@ from .base import RollpigStore
 from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyFeedResult,
     DailyEventQueryResult,
     DailyReportDeliveryClaim,
     DailyReportDeliveryClaimResult,
@@ -32,6 +33,7 @@ from .models import (
     ROAST_REFILL_THRESHOLD_POLICY,
     ROAST_REFILL_VOTE_WEIGHT_POLICY,
     UnrolledRoastAttemptResult,
+    parse_applied_daily_feed,
 )
 
 
@@ -148,6 +150,21 @@ class CloudStore(RollpigStore):
             raise
 
     @staticmethod
+    def _parse_daily_feed(payload: dict | None) -> Optional[DailyFeedResult]:
+        if not isinstance(payload, dict) or not payload.get("status") or not payload.get("user_id"):
+            return None
+        return DailyFeedResult(
+            status=str(payload["status"]),
+            user_id=str(payload["user_id"]),
+            pig_id=str(payload.get("pig_id") or ""),
+            previous_level=max(0, min(5, int(payload.get("previous_level") or 0))),
+            new_level=max(0, min(5, int(payload.get("new_level") or 0))),
+            source_type=str(payload.get("source_type") or "roast"),
+            source_id=str(payload.get("source_id") or ""),
+            created_at=str(payload.get("created_at") or ""),
+        )
+
+    @staticmethod
     def _parse_reservation(payload: dict | None) -> Optional[RoastReservation]:
         if not isinstance(payload, dict) or not payload.get("reservation_id"):
             return None
@@ -175,6 +192,11 @@ class CloudStore(RollpigStore):
             status=str(payload.get("status") or "pending"),
             target_pig_id=str(payload.get("target_pig_id") or ""),
             outcome_snapshot=(dict(payload["outcome_snapshot"]) if isinstance(payload.get("outcome_snapshot"), dict) else None),
+            daily_feed_results=tuple(
+                result
+                for item in (payload.get("daily_feed_results") or [])
+                if (result := CloudStore._parse_daily_feed(item)) is not None
+            ),
             claim_token=str(payload.get("claim_token") or ""),
         )
 
@@ -209,6 +231,7 @@ class CloudStore(RollpigStore):
         payload: dict | None,
         *,
         date_str: str,
+        user_id: Optional[str] = None,
         allow_pending_completion: bool = False,
     ) -> Optional[DailyRollSnapshot]:
         """解析 Cloud 快照；只有当前抽取流程可以读取待补全的成长结果。"""
@@ -216,9 +239,16 @@ class CloudStore(RollpigStore):
         if not isinstance(payload, dict) or not payload.get("pig_id"):
             return None
         pig_id = str(payload["pig_id"])
+        # 加餐有独立结算记录，不依赖可选的外观快照补全成功。
+        daily_feed = parse_applied_daily_feed(
+            payload.get("daily_feed_result"), pig_id=pig_id, user_id=user_id,
+        )
+        identity_snapshot = DailyRollSnapshot(
+            date_str=date_str, pig_id=pig_id, daily_feed_result=daily_feed,
+        )
         outcome = payload.get("outcome_snapshot")
         if not isinstance(outcome, dict):
-            return DailyRollSnapshot(date_str=date_str, pig_id=pig_id)
+            return identity_snapshot
 
         snapshot_available = bool(outcome.get("snapshot_available"))
         if not snapshot_available:
@@ -231,7 +261,7 @@ class CloudStore(RollpigStore):
                 outcome.get("collection_size_after_roll"),
             )
             if not allow_pending_completion or any(value is None for value in pending_values):
-                return DailyRollSnapshot(date_str=date_str, pig_id=pig_id)
+                return identity_snapshot
 
         raw_levels = outcome.get("unlocked_variant_levels", [])
         levels = tuple(sorted({
@@ -251,6 +281,17 @@ class CloudStore(RollpigStore):
             is_new_pig=bool(payload.get("is_new_pig")),
             previous_copies=max(0, int(payload.get("previous_copies") or 0)),
             copies_after_roll=max(0, int(payload.get("copies") or 0)),
+            previous_expert_level=(
+                max(0, min(5, int(payload["previous_expert_level"])))
+                if payload.get("previous_expert_level") is not None
+                else None
+            ),
+            expert_level_after_roll=(
+                max(0, min(5, int(payload["expert_level"])))
+                if payload.get("expert_level") is not None
+                else None
+            ),
+            daily_feed_result=daily_feed,
             collection_size_after_roll=max(0, int(outcome.get("collection_size_after_roll") or 0)),
             resource_version=(str(outcome.get("resource_version") or "") if snapshot_available else ""),
             resolved_variant_level=(
@@ -301,7 +342,7 @@ class CloudStore(RollpigStore):
             params={"user_id": user_id, "date_str": date_str},
             fallback={"pig_id": None},
         )
-        return self._parse_daily_roll_snapshot(payload, date_str=date_str)
+        return self._parse_daily_roll_snapshot(payload, date_str=date_str, user_id=user_id)
 
     async def complete_daily_roll_snapshot(
         self,
@@ -359,11 +400,22 @@ class CloudStore(RollpigStore):
             is_new_pig=bool(payload.get("is_new_pig")),
             previous_copies=int(payload.get("previous_copies") or 0),
             copies=int(payload.get("copies") or 0),
+            previous_expert_level=(
+                max(0, min(5, int(payload["previous_expert_level"])))
+                if payload.get("previous_expert_level") is not None
+                else None
+            ),
+            expert_level=(
+                max(0, min(5, int(payload["expert_level"])))
+                if payload.get("expert_level") is not None
+                else None
+            ),
             previous_duplicate_streak=int(payload.get("previous_duplicate_streak") or 0),
             duplicate_streak=int(payload.get("duplicate_streak") or 0),
             snapshot=self._parse_daily_roll_snapshot(
                 payload,
                 date_str=target_date,
+                user_id=user_id,
                 allow_pending_completion=True,
             ),
         )
@@ -383,6 +435,7 @@ class CloudStore(RollpigStore):
                     continue
                 progress[str(pig_id)] = PigProgress(
                     copies=int(item.get("copies") or 0),
+                    growth_bonus=max(0, int(item.get("growth_bonus") or 0)),
                     first_obtained_at=item.get("first_obtained_at"),
                 )
         pig_ids = [str(item) for item in payload.get("pig_ids", [])] if payload else []
@@ -491,6 +544,7 @@ class CloudStore(RollpigStore):
                     continue
                 progress[str(pig_id)] = PigProgress(
                     copies=int(item.get("copies") or 0),
+                    growth_bonus=max(0, int(item.get("growth_bonus") or 0)),
                     first_obtained_at=item.get("first_obtained_at"),
                 )
 
@@ -545,15 +599,37 @@ class CloudStore(RollpigStore):
             "special_reason": event.special_reason,
         }
 
-    async def _append_roast_event(self, event: RoastEvent, *, date_str: str) -> None:
-        await self._request(
+    async def _append_roast_event(
+        self,
+        event: RoastEvent,
+        *,
+        date_str: str,
+        settle_daily_feed: bool = False,
+    ) -> Optional[DailyFeedResult]:
+        payload = await self._request(
             "POST",
             "/v1/events",
-            json_body=self._roast_event_payload(event, date_str=date_str),
+            json_body={
+                **self._roast_event_payload(event, date_str=date_str),
+                "settle_daily_feed": settle_daily_feed,
+                "source_id": event.event_id,
+            },
+        )
+        return self._parse_daily_feed(
+            payload.get("daily_feed_result") if isinstance(payload, dict) else None
         )
 
-    async def append_roast_event(self, event: RoastEvent) -> None:
-        await self._append_roast_event(event, date_str=rollpig_date_str())
+    async def append_roast_event(
+        self,
+        event: RoastEvent,
+        *,
+        settle_daily_feed: bool = False,
+    ) -> Optional[DailyFeedResult]:
+        return await self._append_roast_event(
+            event,
+            date_str=rollpig_date_str(),
+            settle_daily_feed=settle_daily_feed,
+        )
 
     async def query_daily_events(
         self,
@@ -905,7 +981,11 @@ class CloudStore(RollpigStore):
         return bool(payload.get("has_owned"))
 
     async def save_roast_reservation_outcome(
-        self, reservation: RoastReservation, outcome_snapshot: dict
+        self,
+        reservation: RoastReservation,
+        outcome_snapshot: dict,
+        *,
+        settle_daily_feed: bool = False,
     ) -> Optional[RoastReservation]:
         payload = await self._reservation_request(
             "POST",
@@ -914,6 +994,7 @@ class CloudStore(RollpigStore):
                 "reservation_id": reservation.reservation_id,
                 "claim_token": reservation.claim_token,
                 "outcome_snapshot": outcome_snapshot,
+                "settle_daily_feed": settle_daily_feed,
             },
         )
         updated = self._parse_reservation(payload.get("reservation"))

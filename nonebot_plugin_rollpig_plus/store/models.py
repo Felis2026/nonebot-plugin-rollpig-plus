@@ -12,10 +12,13 @@ ROAST_REFILL_MIN_DISTINCT_VOTERS = 2
 LEGACY_ROAST_REFILL_RATIOS = (25, 35, 45, 55, 65)
 
 
-def expert_level_from_copies(copies: int) -> int:
-    """根据累计抽取次数计算 EX Lv.；异常或旧数据统一钳制到 0～5。"""
+def expert_level_from_copies(copies: int, growth_bonus: int = 0) -> int:
+    """根据真实抽取与加餐成长计算 EX Lv.；异常或旧数据统一钳制到 0～5。"""
 
-    return min(max(int(copies or 0) - 1, 0), MAX_EXPERT_LEVEL)
+    return min(
+        max(int(copies or 0) - 1 + int(growth_bonus or 0), 0),
+        MAX_EXPERT_LEVEL,
+    )
 
 
 def roast_refill_threshold(active_count: int, success_count: int) -> tuple[int, int]:
@@ -45,13 +48,14 @@ def legacy_roast_refill_threshold(active_count: int, success_count: int) -> tupl
 @dataclass(frozen=True)
 class PigProgress:
     copies: int = 0
+    growth_bonus: int = 0
     first_obtained_at: Optional[str] = None
 
     @property
     def expert_level(self) -> int:
         """返回当前小猪的只读 EX Lv.，避免展示层重复等级公式。"""
 
-        return expert_level_from_copies(self.copies)
+        return expert_level_from_copies(self.copies, self.growth_bonus)
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,8 @@ class DrawState:
     def expert_level_of(self, pig_id: str) -> int:
         """返回指定小猪的 EX Lv.；未拥有或记录缺失时为 EX0。"""
 
-        return expert_level_from_copies(self.copies_of(pig_id))
+        item = self.progress.get(pig_id)
+        return item.expert_level if item else 0
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,9 @@ class DailyRollSnapshot:
     is_new_pig: Optional[bool] = None
     previous_copies: Optional[int] = None
     copies_after_roll: Optional[int] = None
+    previous_expert_level: Optional[int] = None
+    expert_level_after_roll: Optional[int] = None
+    daily_feed_result: Optional["DailyFeedResult"] = None
     collection_size_after_roll: Optional[int] = None
     resource_version: str = ""
     resolved_variant_level: Optional[int] = None
@@ -108,6 +116,8 @@ class DailyRollResult:
     is_new_pig: bool = False
     previous_copies: int = 0
     copies: int = 0
+    previous_expert_level: Optional[int] = None
+    expert_level: Optional[int] = None
     previous_duplicate_streak: int = 0
     duplicate_streak: int = 0
     snapshot: Optional[DailyRollSnapshot] = None
@@ -152,6 +162,52 @@ class RoastEvent:
     special_reason: str = ""
     event_id: str = ""
     created_at: str = ""
+
+
+@dataclass(frozen=True)
+class DailyFeedResult:
+    """一次用户级加餐判定；只有 status=fed 代表实际发生成长。"""
+
+    status: str
+    user_id: str
+    pig_id: str = ""
+    previous_level: int = 0
+    new_level: int = 0
+    source_type: str = "roast"
+    source_id: str = ""
+    created_at: str = ""
+
+
+# ================================ 历史加餐事实校验 ================================ #
+
+
+def parse_applied_daily_feed(
+    raw: object, *, pig_id: str, user_id: Optional[str] = None,
+) -> Optional[DailyFeedResult]:
+    """读取独立的已生效加餐；不把失败判定或损坏等级归一化成历史事实。"""
+
+    if not isinstance(raw, dict) or raw.get("status") != "fed":
+        return None
+    if not raw.get("user_id") or str(raw.get("pig_id") or "") != pig_id:
+        return None
+    if user_id is not None and str(raw["user_id"]) != user_id:
+        return None
+    previous, current = raw.get("previous_level"), raw.get("new_level")
+    # JSON 整数才可信；拒绝 bool、浮点截断和越界钳制，避免凭空制造升级。
+    if type(previous) is not int or type(current) is not int:
+        return None
+    if not 0 <= previous < current <= MAX_EXPERT_LEVEL:
+        return None
+    return DailyFeedResult(
+        status="fed",
+        user_id=str(raw["user_id"]),
+        pig_id=pig_id,
+        previous_level=previous,
+        new_level=current,
+        source_type=str(raw.get("source_type") or "roast"),
+        source_id=str(raw.get("source_id") or ""),
+        created_at=str(raw.get("created_at") or ""),
+    )
 
 
 @dataclass(frozen=True)
@@ -235,6 +291,7 @@ class RoastReservation:
     status: str = "pending"
     target_pig_id: str = ""
     outcome_snapshot: Optional[dict[str, Any]] = None
+    daily_feed_results: tuple[DailyFeedResult, ...] = ()
     claim_token: str = ""
 
     @property

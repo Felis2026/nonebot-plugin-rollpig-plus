@@ -181,12 +181,18 @@ class ExVariantModelTests(unittest.TestCase):
                 self.assertEqual(expert_level_from_copies(copies), level)
 
     def test_progress_and_draw_state_share_the_same_level_rule(self) -> None:
-        progress = PigProgress(copies=6)
+        progress = PigProgress(copies=4, growth_bonus=2)
         state = DrawState(pig_ids=["pig"], progress={"pig": progress})
 
         self.assertEqual(progress.expert_level, 5)
         self.assertEqual(state.expert_level_of("pig"), 5)
         self.assertEqual(state.expert_level_of("missing"), 0)
+
+    def test_growth_bonus_does_not_change_true_draw_count(self) -> None:
+        progress = PigProgress(copies=2, growth_bonus=2)
+
+        self.assertEqual(progress.copies, 2)
+        self.assertEqual(progress.expert_level, 3)
 
 
 class StrictCardRendererTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase):
@@ -470,6 +476,35 @@ class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_pigsty_ranks_feed_levels_separately_from_favorite(self) -> None:
+        progress = {f"repeat-{i}": PigProgress(copies=2) for i in range(5)}
+        progress["fed-high"] = PigProgress(copies=1, growth_bonus=5)
+        with patch.object(roll_flow_module, "pig_resource_manager", self.manager):
+            summary = roll_flow_module.build_pigsty_growth_summary(
+                "user", DrawState(pig_ids=list(progress), progress=progress), 6,
+            )
+        favorite = next(line for line in summary.splitlines() if "本命猪：" in line)
+        high = next(line for line in summary.splitlines() if "高等级小猪：" in line)
+        self.assertIn("【repeat-0】", favorite)
+        self.assertIn("【fed-high】EX Lv.5", high)
+        self.assertLess(high.index("fed-high"), high.index("repeat-0"))
+        self.assertNotIn("repeat-4", high)
+
+    def test_pigsty_level_ties_use_copies_then_first_obtained_then_id(self) -> None:
+        progress = {
+            "later": PigProgress(copies=2, growth_bonus=3, first_obtained_at="2026-08-24"),
+            "early-b": PigProgress(copies=2, growth_bonus=3, first_obtained_at="2026-08-23"),
+            "early-a": PigProgress(copies=2, growth_bonus=3, first_obtained_at="2026-08-23"),
+            "more-copies": PigProgress(copies=5, first_obtained_at="2026-08-25"),
+        }
+        with patch.object(roll_flow_module, "pig_resource_manager", self.manager):
+            summary = roll_flow_module.build_pigsty_growth_summary(
+                "user", DrawState(pig_ids=list(progress), progress=progress), 4,
+            )
+        high = next(line for line in summary.splitlines() if "高等级小猪：" in line)
+        expected = ["more-copies", "early-a", "early-b", "later"]
+        self.assertEqual(sorted(expected, key=high.index), expected)
 
     async def test_daily_view_reads_progress_but_roast_path_can_skip_it(self) -> None:
         fake_store = SimpleNamespace(

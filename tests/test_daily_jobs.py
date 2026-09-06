@@ -206,13 +206,31 @@ class LocalDailyReportProfileTests(unittest.IsolatedAsyncioTestCase):
         }
         manager.data["pig_progress"] = {
             "before": {
-                "pig-a": {"copies": 3, "first_obtained_at": "2026-08-25T10:00:00+00:00"},
+                "pig-a": {
+                    "copies": 3,
+                    "growth_bonus": 1,
+                    "first_obtained_at": "2026-08-25T10:00:00+00:00",
+                },
                 "pig-future": {"copies": 1, "first_obtained_at": "2026-08-26T16:01:00+00:00"},
             },
             "late": {
                 "pig-old": {"copies": 1, "first_obtained_at": "2026-08-25T10:00:00+00:00"},
                 "pig-new": {"copies": 1, "first_obtained_at": "2026-08-26T15:46:00+00:00"},
             },
+        }
+        manager.data["daily_feeds"] = {
+            "2026-08-26": {
+                "before": {
+                    "status": "fed",
+                    "user_id": "before",
+                    "pig_id": "pig-a",
+                    "previous_level": 1,
+                    "new_level": 2,
+                    "source_type": "roast",
+                    "source_id": "event-1",
+                    "created_at": "2026-08-26T15:44:30+00:00",
+                }
+            }
         }
         local_store = LocalJsonStore(lambda: manager)
 
@@ -233,13 +251,53 @@ class LocalDailyReportProfileTests(unittest.IsolatedAsyncioTestCase):
 
         by_user = {item.user_id: item for item in profiles}
         self.assertEqual(by_user["before"].daily_pig_id, "pig-a")
-        self.assertEqual(by_user["before"].daily_ex_level, 1)
-        self.assertEqual(by_user["before"].recent_ex_level, 1)
+        self.assertEqual(by_user["before"].daily_ex_level, 2)
+        self.assertEqual(by_user["before"].daily_achieved_at, "2026-08-26T15:44:30+00:00")
+        self.assertEqual(by_user["before"].recent_ex_level, 2)
         self.assertEqual(by_user["before"].catalog_count, 1)
         self.assertEqual(by_user["late"].daily_pig_id, "")
         self.assertEqual(by_user["late"].recent_pig_id, "pig-old")
         self.assertEqual(by_user["late"].catalog_count, 1)
         to_thread.assert_awaited_once()
+
+    # ================================ 加餐排行截止点回归 ================================ #
+
+    async def test_feed_updates_achievement_only_when_it_raises_visible_level(self) -> None:
+        date = "2026-08-26"
+        roll_time = f"{date}T08:00:00+00:00"
+        before, cutoff, after = (f"{date}T{time}+00:00" for time in ("15:44:00", "15:45:00", "15:46:00"))
+        cases = (
+            ("before", 0, 0, 1, before, "fed", 1, before),
+            ("at", 0, 0, 1, cutoff, "fed", 1, cutoff),
+            ("after", 0, 0, 1, after, "fed", 0, roll_time),
+            ("max", 5, 5, 5, before, "max_level", 5, roll_time),
+            ("no-effect", 2, 0, 1, before, "fed", 2, roll_time),
+            ("missing-time", 0, 0, 1, "", "fed", 1, roll_time),
+            ("bad-time", 0, 0, 1, "bad", "fed", 1, roll_time),
+            ("bad-level", 0, 0, 6, before, "fed", 0, roll_time),
+            ("no-feed", 0, 0, 0, "", "absent", 0, roll_time),
+            ("unknown-roll", None, 0, 1, before, "fed", None, roll_time),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(data_manager_module, "DATA_FILE", Path(temp_dir) / "pig_data.json"):
+                manager = PigDataManager()
+        for user, level, previous, new, feed_time, status, expected_level, expected_time in cases:
+            manager.data.setdefault("history", {}).setdefault(date, {})[user] = "pig"
+            manager.data.setdefault("daily_roll_snapshots", {}).setdefault(date, {})[user] = {
+                "pig_id": "pig", "expert_level_after_roll": level,
+                "copies_after_roll": 1 if level is not None else None, "created_at": roll_time,
+            }
+            if status != "absent":
+                manager.data.setdefault("daily_feeds", {}).setdefault(date, {})[user] = {
+                    "status": status, "user_id": user, "pig_id": "pig",
+                    "previous_level": previous, "new_level": new, "created_at": feed_time,
+                }
+        profiles = await manager.get_daily_report_profiles(
+            date_str=date, cutoff_at=cutoff, user_ids=tuple(case[0] for case in cases),
+        )
+        for profile, case in zip(profiles, cases):
+            with self.subTest(user=profile.user_id):
+                self.assertEqual((profile.daily_ex_level, profile.daily_achieved_at), case[-2:])
 
 
 class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
