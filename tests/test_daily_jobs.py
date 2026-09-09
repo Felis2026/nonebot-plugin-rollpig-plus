@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import nonebot
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.plugin import get_plugin
 
 try:
@@ -390,6 +391,41 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             cutoff_at=f"{date_str}T23:45:00+08:00",
         )
         self.assertEqual(completed.claims, ())
+
+    async def test_local_confirmed_send_failure_can_be_reclaimed(self) -> None:
+        date_str = jobs.rollpig_date_str()
+        local_store, _ = self._create_local_store()
+
+        first = await local_store.claim_daily_report_deliveries(
+            instance_id="instance-a",
+            delivery_bots={"100": "bot-a"},
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        claim = first.claims[0]
+        self.assertTrue(
+            await local_store.transition_daily_report_delivery(claim, "sending")
+        )
+        with patch.object(local_json_module, "LOCAL_DAILY_REPORT_RETRY_SECONDS", 0):
+            retried = await local_store.transition_daily_report_delivery(
+                claim,
+                "retry",
+                error="ActionFailed: rich media transfer failed",
+            )
+
+        self.assertTrue(retried)
+        self.assertEqual(retried.status, "pending")
+        self.assertTrue(retried.next_attempt_at)
+
+        second = await local_store.claim_daily_report_deliveries(
+            instance_id="instance-b",
+            delivery_bots={"100": "bot-b"},
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        self.assertEqual(len(second.claims), 1)
+        self.assertEqual(second.claims[0].attempt_count, 2)
+        self.assertNotEqual(second.claims[0].claim_token, claim.claim_token)
 
     async def test_local_release_stops_after_four_attempts(self) -> None:
         date_str = jobs.rollpig_date_str()
@@ -815,6 +851,70 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             [call.args[1] for call in mocked_store.transition_daily_report_delivery.await_args_list],
             ["sending", "uncertain"],
         )
+        error_summary = mocked_store.transition_daily_report_delivery.await_args_list[1].kwargs["error"]
+        self.assertTrue(error_summary.startswith("RuntimeError:"))
+        self.assertLessEqual(len(error_summary), 512)
+
+    async def test_rich_media_action_failure_releases_claim_for_cross_instance_retry(self) -> None:
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(
+                side_effect=ActionFailed(
+                    status="failed",
+                    retcode=1200,
+                    message="rich media transfer failed " + "x" * 1000,
+                )
+            ),
+        )
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        retry_at = "2026-08-26T15:51:00+00:00"
+        mocked_store = SimpleNamespace(
+            transition_daily_report_delivery=AsyncMock(
+                side_effect=[
+                    DailyReportDeliveryTransitionResult(ok=True, status="sending"),
+                    DailyReportDeliveryTransitionResult(
+                        ok=True,
+                        status="pending",
+                        next_attempt_at=retry_at,
+                    ),
+                ]
+            )
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            result = await jobs._deliver_daily_report_claim(
+                claim,
+                delivery_bots={"100": bot},
+                protect_date="2026-08-27",
+                cutoff_time="23:45",
+            )
+
+        transitions = mocked_store.transition_daily_report_delivery.await_args_list
+        self.assertEqual([call.args[1] for call in transitions], ["sending", "retry"])
+        self.assertEqual(result, (True, False, retry_at, "retry"))
+        self.assertTrue(transitions[1].kwargs["error"].startswith("ActionFailed:"))
+        self.assertEqual(len(transitions[1].kwargs["error"]), 512)
 
     async def test_disabled_group_is_rechecked_before_claim_side_effects(self) -> None:
         claim = DailyReportDeliveryClaim(
@@ -864,7 +964,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
                         cutoff_time="23:45",
                     )
 
-                self.assertEqual(result, (False, False, ""))
+                self.assertEqual(result, (False, False, "", "skipped"))
                 build_report.assert_not_awaited()
                 bot.send_group_msg.assert_not_awaited()
                 self.assertEqual(
@@ -1080,7 +1180,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
                         cutoff_time="23:45",
                     )
 
-                self.assertEqual(result, (True, False, ""))
+                self.assertEqual(result, (True, False, "", "skipped"))
                 build_report.assert_awaited_once()
                 render_card.assert_awaited_once()
                 bot.send_group_msg.assert_not_awaited()
@@ -1746,6 +1846,34 @@ class CloudDailyReportContractTests(unittest.IsolatedAsyncioTestCase):
             [{"group_id": "100", "delivery_bot_id": "bot-a"}],
         )
         self.assertEqual(requests[2][1]["action"], "sending")
+
+    async def test_transition_truncates_error_before_cloud_request(self) -> None:
+        requests: list[dict] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads((await request.aread()).decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={"ok": True, "status": "uncertain", "attempt_count": 1},
+            )
+
+        cloud_store = self._create_store(handler)
+        try:
+            await cloud_store.transition_daily_report_delivery(
+                DailyReportDeliveryClaim(
+                    "2026-08-31",
+                    "100",
+                    "bot-a",
+                    "2026-08-31T15:45:00",
+                    "claim-token",
+                ),
+                "uncertain",
+                error="x" * 1000,
+            )
+        finally:
+            await cloud_store.close()
+
+        self.assertEqual(len(requests[0]["error"]), 512)
 
     async def test_later_claim_batch_failure_preserves_acquired_claims(self) -> None:
         requests: list[dict] = []

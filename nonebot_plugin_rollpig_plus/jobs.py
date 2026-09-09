@@ -10,6 +10,7 @@ from contextlib import suppress
 
 from nonebot import get_bots, get_driver
 from nonebot.adapters.onebot.v11 import Bot, MessageSegment
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
@@ -39,7 +40,11 @@ from .runtime import (
 )
 from .store import store
 from .store.base import RollpigStore
-from .store.cloud import CloudDailyReportUnsupportedError, CloudStoreError
+from .store.cloud import (
+    DAILY_REPORT_ERROR_MAX_LENGTH,
+    CloudDailyReportUnsupportedError,
+    CloudStoreError,
+)
 from .store.models import (
     DailyReportDeliveryClaim,
     DailyReportDeliveryClaimResult,
@@ -693,6 +698,35 @@ def _daily_report_transition_retry_at() -> str:
     ).isoformat()
 
 
+def _daily_report_error_summary(error: Exception) -> str:
+    """保留异常类型和开头诊断信息，并满足 Cloud 状态字段长度约束。"""
+
+    return f"{type(error).__name__}: {error}"[:DAILY_REPORT_ERROR_MAX_LENGTH]
+
+
+def _is_retryable_daily_report_send_failure(error: Exception) -> bool:
+    """只把 NapCat 明确返回的富媒体传输失败视为确认未发送。"""
+
+    if not isinstance(error, ActionFailed):
+        return False
+    details = " ".join(
+        str(error.info.get(key) or "")
+        for key in ("message", "wording", "msg", "errMsg", "error")
+    ).casefold()
+    return "rich media transfer failed" in details
+
+
+def _daily_report_retry_status(
+    transition: DailyReportDeliveryTransitionResult,
+    retry_at: str,
+) -> str:
+    """区分已安排重领与服务端已判定失败，供逐群日志准确展示。"""
+
+    if transition.status == "failed":
+        return "failed"
+    return "retry" if transition or retry_at else "failed"
+
+
 async def _transition_daily_report_safely(
     claim: DailyReportDeliveryClaim,
     action: str,
@@ -725,8 +759,8 @@ async def _deliver_daily_report_claim(
     delivery_bots: dict[str, Bot],
     protect_date: str,
     cutoff_time: str,
-) -> tuple[bool, bool, str]:
-    """处理一份已领取日报，返回是否生成、是否发送及下一次安全重领时间。"""
+) -> tuple[bool, bool, str, str]:
+    """处理一份已领取日报，返回生成、发送、重领时间及本次最终状态。"""
 
     group_id = claim.group_id
     bot = delivery_bots.get(group_id)
@@ -739,7 +773,7 @@ async def _deliver_daily_report_claim(
         retry_at = transition.next_attempt_at
         if not transition and not retry_at:
             retry_at = _daily_report_transition_retry_at()
-        return False, False, retry_at
+        return False, False, retry_at, _daily_report_retry_status(transition, retry_at)
 
     # Claim 与实际处理之间可能隔着前序群渲染或 Cloud 退避；必须在任何日报
     # 聚合及保护名单写入前重读开关，避免管理员关闭后仍产生群内副作用。
@@ -753,7 +787,7 @@ async def _deliver_daily_report_claim(
         if not transition and not retry_at:
             retry_at = _daily_report_transition_retry_at()
         logger.info(f"[猪圈日报] 群开关已关闭，跳过已领取日报: group={group_id}")
-        return False, False, retry_at
+        return False, False, retry_at, "skipped" if transition else "retry"
 
     sending_started = False
     report_built = False
@@ -770,7 +804,7 @@ async def _deliver_daily_report_claim(
             if not await store.transition_daily_report_delivery(claim, "skip"):
                 raise CloudStoreError("日报空活动状态确认失败")
             logger.info(f"[猪圈日报] 群内没有可展示活动，已跳过: group={group_id}")
-            return False, False, ""
+            return False, False, "", "skipped"
 
         report_built = True
         rendered = await render_daily_report_card(
@@ -787,7 +821,7 @@ async def _deliver_daily_report_claim(
                 error="delivery_deadline_passed_after_render",
             )
             logger.info(f"[猪圈日报] 渲染完成时已超过投递截止，释放日报: group={group_id}")
-            return report_built, False, ""
+            return report_built, False, "", "failed"
         if not is_group_rollpig_enabled(group_id) or not is_daily_report_enabled(group_id):
             transition = await _transition_daily_report_safely(
                 claim,
@@ -800,7 +834,7 @@ async def _deliver_daily_report_claim(
             if not transition and not retry_at:
                 retry_at = _daily_report_transition_retry_at()
             logger.info(f"[猪圈日报] 渲染完成时群开关已关闭，跳过日报: group={group_id}")
-            return report_built, False, retry_at
+            return report_built, False, retry_at, "skipped" if transition else "retry"
         if not await store.transition_daily_report_delivery(claim, "sending"):
             raise CloudStoreError("日报发送意图未获 Cloud 确认")
         sending_started = True
@@ -814,23 +848,35 @@ async def _deliver_daily_report_claim(
             message_id=_daily_report_message_id(response),
         ):
             raise CloudStoreError("日报发送完成状态未获 Cloud 确认")
-        return True, True, ""
+        return True, True, "", "sent"
     except Exception as error:
-        # sending 前可以安全释放并按 Cloud 退避重领；进入 sending 后消息结果可能
-        # 已不可确认，只能冻结为 uncertain，绝不能自动重复发送。
+        # sending 前可以安全释放；进入 sending 后，只有 NapCat 明确拒绝富媒体发送
+        # 才请求重领。超时、断连等结果不明的异常仍冻结为 uncertain，避免重复消息。
+        transition_action = "release"
+        if sending_started:
+            transition_action = (
+                "retry"
+                if _is_retryable_daily_report_send_failure(error)
+                else "uncertain"
+            )
         transition = await _transition_daily_report_safely(
             claim,
-            "uncertain" if sending_started else "release",
-            error=str(error),
+            transition_action,
+            error=_daily_report_error_summary(error),
         )
-        retry_at = transition.next_attempt_at if not sending_started else ""
-        if not sending_started and not transition and not retry_at:
+        retryable = transition_action in {"release", "retry"}
+        retry_at = transition.next_attempt_at if retryable else ""
+        if transition_action == "release" and not transition and not retry_at:
             retry_at = _daily_report_transition_retry_at()
+        if retryable:
+            result_status = _daily_report_retry_status(transition, retry_at)
+        else:
+            result_status = "uncertain" if transition else "failed"
         logger.warning(
             f"[猪圈日报] 推送失败: group={group_id} attempt={claim.attempt_count} "
-            f"fallback={'uncertain' if sending_started else 'retry'} error={error}"
+            f"fallback={result_status} error={error}"
         )
-        return report_built, False, retry_at
+        return report_built, False, retry_at, result_status
 
 
 @scheduler.scheduled_job("cron", hour=23, minute=45, timezone=ROLLPIG_TIMEZONE, id="rollpig_daily_report")
@@ -936,10 +982,15 @@ async def daily_report_job(
                     # 同一批 claim 会顺序渲染和发送；一旦到达硬截止点，当前及
                     # 后续租约都必须主动释放，不能让慢群拖着整批越界投递。
                     for remaining_claim in claim_result.claims[index:]:
-                        await _transition_daily_report_safely(
+                        transition = await _transition_daily_report_safely(
                             remaining_claim,
                             "release",
                             error="delivery_deadline_passed",
+                        )
+                        logger.info(
+                            f"[猪圈日报] 群投递结果: group={remaining_claim.group_id} "
+                            f"status={transition.status or 'failed'} "
+                            f"attempt={remaining_claim.attempt_count}"
                         )
                     logger.info(
                         f"[猪圈日报] 已到次日投递截止时间，释放剩余 "
@@ -947,11 +998,20 @@ async def daily_report_job(
                     )
                     deadline_reached = True
                     break
-                report_built, sent, retry_at = await _deliver_daily_report_claim(
+                (
+                    report_built,
+                    sent,
+                    retry_at,
+                    result_status,
+                ) = await _deliver_daily_report_claim(
                     claim,
                     delivery_bots=delivery_bots,
                     protect_date=protect_date,
                     cutoff_time=cutoff_time,
+                )
+                logger.info(
+                    f"[猪圈日报] 群投递结果: group={claim.group_id} "
+                    f"status={result_status} attempt={claim.attempt_count}"
                 )
                 if report_built:
                     report_groups.add(claim.group_id)

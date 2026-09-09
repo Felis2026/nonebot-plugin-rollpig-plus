@@ -2767,7 +2767,8 @@ class PigDataManager:
             attempt_count = max(0, _safe_int(raw.get("attempt_count"), 0))
             allowed_actions = {
                 "claimed": {"sending", "release", "uncertain", "skip"},
-                "sending": {"sent", "uncertain"},
+                # retry 只表示外部接口已经明确拒绝发送；结果不明仍必须 uncertain。
+                "sending": {"sent", "retry", "uncertain"},
             }.get(status, set())
             if action not in allowed_actions:
                 return DailyReportDeliveryTransitionResult(
@@ -2778,7 +2779,7 @@ class PigDataManager:
 
             now = datetime.datetime.now(datetime.timezone.utc)
             next_attempt_at = ""
-            if action == "release":
+            if action in {"release", "retry"}:
                 if attempt_count >= max_attempts:
                     next_status = "failed"
                 else:

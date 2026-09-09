@@ -56,6 +56,7 @@ class CloudDailyReportUnsupportedError(CloudStoreError):
 DAILY_REPORT_PROFILE_BATCH_SIZE = 2048
 DAILY_REPORT_CLAIM_BATCH_SIZE = 256
 DAILY_REPORT_BATCH_RETRY_SECONDS = 30
+DAILY_REPORT_ERROR_MAX_LENGTH = 512
 
 
 class CloudStore(RollpigStore):
@@ -869,7 +870,9 @@ class CloudStore(RollpigStore):
                 "claim_token": claim.claim_token,
                 "action": action,
                 "message_id": message_id,
-                "error": error,
+                # Cloud 的持久化字段上限为 512；在客户端边界先截断，避免状态迁移
+                # 因诊断文本过长被请求校验拒绝。
+                "error": str(error or "")[:DAILY_REPORT_ERROR_MAX_LENGTH],
             },
         )
         return DailyReportDeliveryTransitionResult(
