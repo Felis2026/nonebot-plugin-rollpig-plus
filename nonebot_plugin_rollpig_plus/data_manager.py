@@ -2244,6 +2244,8 @@ class PigDataManager:
         event_type: "success" / "escape" / "backfire" / "bot_backfire" / "self_roast"
         """
         async with self._lock:
+            # 事件与加餐必须使用同一个业务日期，避免午夜切换时拆到两天。
+            target_date = rollpig_date_str()
             event = RoastEvent(
                     event_type=event_type,
                     attacker_id=attacker_id,
@@ -2264,12 +2266,12 @@ class PigDataManager:
                 )
             changed = self._append_roast_event_locked(
                 event,
-                date_str=rollpig_date_str(),
+                date_str=target_date,
             )
             feed_result = None
             if settle_daily_feed and event_type == "success" and not reservation_id:
                 feed_result = self._apply_daily_feed_locked(
-                    date_str=rollpig_date_str(),
+                    date_str=target_date,
                     user_id=attacker_id,
                     source_type="roast",
                     source_id=str(event.event_id or ""),

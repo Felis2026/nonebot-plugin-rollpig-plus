@@ -916,6 +916,64 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(transitions[1].kwargs["error"].startswith("ActionFailed:"))
         self.assertEqual(len(transitions[1].kwargs["error"]), 512)
 
+    async def test_rich_media_retry_transition_failure_schedules_recheck(self) -> None:
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(
+                side_effect=ActionFailed(
+                    status="failed",
+                    retcode=1200,
+                    message="rich media transfer failed",
+                )
+            ),
+        )
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        retry_at = "2026-08-26T15:50:30+00:00"
+        mocked_store = SimpleNamespace(
+            transition_daily_report_delivery=AsyncMock(
+                side_effect=[
+                    DailyReportDeliveryTransitionResult(ok=True, status="sending"),
+                    RuntimeError("retry response lost"),
+                ]
+            )
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
+            patch.object(jobs, "_daily_report_transition_retry_at", return_value=retry_at),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            result = await jobs._deliver_daily_report_claim(
+                claim,
+                delivery_bots={"100": bot},
+                protect_date="2026-08-27",
+                cutoff_time="23:45",
+            )
+
+        self.assertEqual(
+            [call.args[1] for call in mocked_store.transition_daily_report_delivery.await_args_list],
+            ["sending", "retry"],
+        )
+        self.assertEqual(result, (True, False, retry_at, "retry"))
+
     async def test_disabled_group_is_rechecked_before_claim_side_effects(self) -> None:
         claim = DailyReportDeliveryClaim(
             "2026-08-26",

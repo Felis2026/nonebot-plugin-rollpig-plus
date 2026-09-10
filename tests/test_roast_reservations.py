@@ -274,6 +274,28 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.status, "already_fed")
         self.assertEqual((progress.copies, progress.growth_bonus, progress.expert_level), (1, 1, 1))
 
+    async def test_normal_success_reuses_one_business_date_for_event_and_feed(self):
+        await self.manager.get_or_create_today_pig("a", "pig-a", date_str="2026-08-07")
+
+        with patch.object(
+            data_manager_module,
+            "rollpig_date_str",
+            side_effect=["2026-08-07", "2026-08-08"],
+        ) as date_mock:
+            result = await self.manager.log_roast_event(
+                "success",
+                "a",
+                "target",
+                event_id="event-1",
+                settle_daily_feed=True,
+            )
+
+        self.assertEqual(result.status, "fed")
+        self.assertEqual(date_mock.call_count, 1)
+        self.assertEqual(len(self.manager.data["daily_events"]["2026-08-07"]), 1)
+        self.assertNotIn("2026-08-08", self.manager.data["daily_events"])
+        self.assertIn("a", self.manager.data["daily_feeds"]["2026-08-07"])
+
     async def test_daily_feed_without_today_pig_keeps_event_and_does_not_claim(self):
         with patch.object(data_manager_module, "rollpig_date_str", return_value="2026-08-07"):
             result = await self.manager.log_roast_event(

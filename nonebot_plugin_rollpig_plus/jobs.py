@@ -866,7 +866,7 @@ async def _deliver_daily_report_claim(
         )
         retryable = transition_action in {"release", "retry"}
         retry_at = transition.next_attempt_at if retryable else ""
-        if transition_action == "release" and not transition and not retry_at:
+        if retryable and not transition and not retry_at:
             retry_at = _daily_report_transition_retry_at()
         if retryable:
             result_status = _daily_report_retry_status(transition, retry_at)
