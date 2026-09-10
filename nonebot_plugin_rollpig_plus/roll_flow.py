@@ -84,8 +84,16 @@ def build_completed_daily_roll_snapshot(
     if snapshot is None or not snapshot.outcome_available:
         return None
 
-    previous_level = expert_level_from_copies(snapshot.previous_copies or 0)
-    current_level = expert_level_from_copies(snapshot.copies_after_roll or 0)
+    previous_level = (
+        int(snapshot.previous_expert_level)
+        if snapshot.previous_expert_level is not None
+        else expert_level_from_copies(snapshot.previous_copies or 0)
+    )
+    current_level = (
+        int(snapshot.expert_level_after_roll)
+        if snapshot.expert_level_after_roll is not None
+        else expert_level_from_copies(snapshot.copies_after_roll or 0)
+    )
     pig_id = str(pig_data.get("id") or snapshot.pig_id)
     unlocked_levels, unlocked_fields = resolve_variant_unlocks(
         pig_id,
@@ -167,11 +175,19 @@ def build_roll_growth_text(result: DailyRollResult, pig_data: dict) -> str:
         return ""
 
     pig_name = pig_data.get("name", "未知小猪")
-    current_level = expert_level_from_copies(result.copies)
+    current_level = (
+        result.expert_level
+        if result.expert_level is not None
+        else expert_level_from_copies(result.copies)
+    )
     if result.is_new_pig:
         return random.choice(DAILY_ROLL_NEW_PIG_TEXTS).format(pig=pig_name, level=current_level)
 
-    previous_level = expert_level_from_copies(result.previous_copies)
+    previous_level = (
+        result.previous_expert_level
+        if result.previous_expert_level is not None
+        else expert_level_from_copies(result.previous_copies)
+    )
     if previous_level == current_level:
         return random.choice(DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS).format(
             pig=pig_name,
@@ -206,6 +222,22 @@ def build_roll_growth_text(result: DailyRollResult, pig_data: dict) -> str:
         old_level=previous_level,
         new_level=current_level,
     )
+
+
+def _current_daily_card_expert_level(result: DailyRollResult) -> int:
+    """返回今日卡片应展示的最终等级，同时保留抽取快照的历史语义。"""
+
+    level = (
+        result.expert_level
+        if result.expert_level is not None
+        else expert_level_from_copies(result.copies)
+    )
+    feed = result.snapshot.daily_feed_result if result.snapshot is not None else None
+    # get 与 get-or-create 之间可能被另一 Bot 抢先完成抽取和加餐；此时响应中的
+    # expert_level 仍是抽取时快照，当前卡片应采用同一只猪已结算的加餐等级。
+    if feed is not None and feed.status == "fed" and feed.pig_id == result.pig_id:
+        level = max(level, int(feed.new_level))
+    return min(max(level, 0), MAX_EXPERT_LEVEL)
 
 
 async def resolve_daily_pig(
@@ -272,7 +304,7 @@ async def resolve_daily_pig(
         pig=pig,
         roll_result=roll_result,
         growth_text=build_roll_growth_text(roll_result, pig) if include_progress else "",
-        ex_level=expert_level_from_copies(roll_result.copies) if include_progress else None,
+        ex_level=_current_daily_card_expert_level(roll_result) if include_progress else None,
     )
 
 
@@ -300,11 +332,14 @@ def build_pigsty_growth_summary(user_name: str, draw_state: DrawState, total_pig
         favorite_level = favorite_progress.expert_level
         favorite_line = f"🐷 本命猪：【{favorite_name}】EX Lv.{favorite_level}（累计 {favorite_progress.copies} 次）"
 
-        repeat_items = [
-            (pig_id, progress)
-            for pig_id, progress in ranked_progress
-            if progress.copies >= 2
-        ][:5]
+        # 加餐不增加 copies；高等级榜独立按 EX 排序，本命猪仍按真实抽取次数。
+        repeat_items = sorted(
+            ((pig_id, progress) for pig_id, progress in ranked_progress if progress.expert_level >= 1),
+            key=lambda item: (
+                -item[1].expert_level, -item[1].copies,
+                item[1].first_obtained_at or "", item[0],
+            ),
+        )[:5]
         if repeat_items:
             parts = []
             for pig_id, progress in repeat_items:

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import nonebot
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.plugin import get_plugin
 
 try:
@@ -206,13 +207,31 @@ class LocalDailyReportProfileTests(unittest.IsolatedAsyncioTestCase):
         }
         manager.data["pig_progress"] = {
             "before": {
-                "pig-a": {"copies": 3, "first_obtained_at": "2026-08-25T10:00:00+00:00"},
+                "pig-a": {
+                    "copies": 3,
+                    "growth_bonus": 1,
+                    "first_obtained_at": "2026-08-25T10:00:00+00:00",
+                },
                 "pig-future": {"copies": 1, "first_obtained_at": "2026-08-26T16:01:00+00:00"},
             },
             "late": {
                 "pig-old": {"copies": 1, "first_obtained_at": "2026-08-25T10:00:00+00:00"},
                 "pig-new": {"copies": 1, "first_obtained_at": "2026-08-26T15:46:00+00:00"},
             },
+        }
+        manager.data["daily_feeds"] = {
+            "2026-08-26": {
+                "before": {
+                    "status": "fed",
+                    "user_id": "before",
+                    "pig_id": "pig-a",
+                    "previous_level": 1,
+                    "new_level": 2,
+                    "source_type": "roast",
+                    "source_id": "event-1",
+                    "created_at": "2026-08-26T15:44:30+00:00",
+                }
+            }
         }
         local_store = LocalJsonStore(lambda: manager)
 
@@ -233,13 +252,53 @@ class LocalDailyReportProfileTests(unittest.IsolatedAsyncioTestCase):
 
         by_user = {item.user_id: item for item in profiles}
         self.assertEqual(by_user["before"].daily_pig_id, "pig-a")
-        self.assertEqual(by_user["before"].daily_ex_level, 1)
-        self.assertEqual(by_user["before"].recent_ex_level, 1)
+        self.assertEqual(by_user["before"].daily_ex_level, 2)
+        self.assertEqual(by_user["before"].daily_achieved_at, "2026-08-26T15:44:30+00:00")
+        self.assertEqual(by_user["before"].recent_ex_level, 2)
         self.assertEqual(by_user["before"].catalog_count, 1)
         self.assertEqual(by_user["late"].daily_pig_id, "")
         self.assertEqual(by_user["late"].recent_pig_id, "pig-old")
         self.assertEqual(by_user["late"].catalog_count, 1)
         to_thread.assert_awaited_once()
+
+    # ================================ 加餐排行截止点回归 ================================ #
+
+    async def test_feed_updates_achievement_only_when_it_raises_visible_level(self) -> None:
+        date = "2026-08-26"
+        roll_time = f"{date}T08:00:00+00:00"
+        before, cutoff, after = (f"{date}T{time}+00:00" for time in ("15:44:00", "15:45:00", "15:46:00"))
+        cases = (
+            ("before", 0, 0, 1, before, "fed", 1, before),
+            ("at", 0, 0, 1, cutoff, "fed", 1, cutoff),
+            ("after", 0, 0, 1, after, "fed", 0, roll_time),
+            ("max", 5, 5, 5, before, "max_level", 5, roll_time),
+            ("no-effect", 2, 0, 1, before, "fed", 2, roll_time),
+            ("missing-time", 0, 0, 1, "", "fed", 1, roll_time),
+            ("bad-time", 0, 0, 1, "bad", "fed", 1, roll_time),
+            ("bad-level", 0, 0, 6, before, "fed", 0, roll_time),
+            ("no-feed", 0, 0, 0, "", "absent", 0, roll_time),
+            ("unknown-roll", None, 0, 1, before, "fed", None, roll_time),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(data_manager_module, "DATA_FILE", Path(temp_dir) / "pig_data.json"):
+                manager = PigDataManager()
+        for user, level, previous, new, feed_time, status, expected_level, expected_time in cases:
+            manager.data.setdefault("history", {}).setdefault(date, {})[user] = "pig"
+            manager.data.setdefault("daily_roll_snapshots", {}).setdefault(date, {})[user] = {
+                "pig_id": "pig", "expert_level_after_roll": level,
+                "copies_after_roll": 1 if level is not None else None, "created_at": roll_time,
+            }
+            if status != "absent":
+                manager.data.setdefault("daily_feeds", {}).setdefault(date, {})[user] = {
+                    "status": status, "user_id": user, "pig_id": "pig",
+                    "previous_level": previous, "new_level": new, "created_at": feed_time,
+                }
+        profiles = await manager.get_daily_report_profiles(
+            date_str=date, cutoff_at=cutoff, user_ids=tuple(case[0] for case in cases),
+        )
+        for profile, case in zip(profiles, cases):
+            with self.subTest(user=profile.user_id):
+                self.assertEqual((profile.daily_ex_level, profile.daily_achieved_at), case[-2:])
 
 
 class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -332,6 +391,41 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             cutoff_at=f"{date_str}T23:45:00+08:00",
         )
         self.assertEqual(completed.claims, ())
+
+    async def test_local_confirmed_send_failure_can_be_reclaimed(self) -> None:
+        date_str = jobs.rollpig_date_str()
+        local_store, _ = self._create_local_store()
+
+        first = await local_store.claim_daily_report_deliveries(
+            instance_id="instance-a",
+            delivery_bots={"100": "bot-a"},
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        claim = first.claims[0]
+        self.assertTrue(
+            await local_store.transition_daily_report_delivery(claim, "sending")
+        )
+        with patch.object(local_json_module, "LOCAL_DAILY_REPORT_RETRY_SECONDS", 0):
+            retried = await local_store.transition_daily_report_delivery(
+                claim,
+                "retry",
+                error="ActionFailed: rich media transfer failed",
+            )
+
+        self.assertTrue(retried)
+        self.assertEqual(retried.status, "pending")
+        self.assertTrue(retried.next_attempt_at)
+
+        second = await local_store.claim_daily_report_deliveries(
+            instance_id="instance-b",
+            delivery_bots={"100": "bot-b"},
+            date_str=date_str,
+            cutoff_at=f"{date_str}T23:45:00+08:00",
+        )
+        self.assertEqual(len(second.claims), 1)
+        self.assertEqual(second.claims[0].attempt_count, 2)
+        self.assertNotEqual(second.claims[0].claim_token, claim.claim_token)
 
     async def test_local_release_stops_after_four_attempts(self) -> None:
         date_str = jobs.rollpig_date_str()
@@ -757,6 +851,128 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             [call.args[1] for call in mocked_store.transition_daily_report_delivery.await_args_list],
             ["sending", "uncertain"],
         )
+        error_summary = mocked_store.transition_daily_report_delivery.await_args_list[1].kwargs["error"]
+        self.assertTrue(error_summary.startswith("RuntimeError:"))
+        self.assertLessEqual(len(error_summary), 512)
+
+    async def test_rich_media_action_failure_releases_claim_for_cross_instance_retry(self) -> None:
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(
+                side_effect=ActionFailed(
+                    status="failed",
+                    retcode=1200,
+                    message="rich media transfer failed " + "x" * 1000,
+                )
+            ),
+        )
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        retry_at = "2026-08-26T15:51:00+00:00"
+        mocked_store = SimpleNamespace(
+            transition_daily_report_delivery=AsyncMock(
+                side_effect=[
+                    DailyReportDeliveryTransitionResult(ok=True, status="sending"),
+                    DailyReportDeliveryTransitionResult(
+                        ok=True,
+                        status="pending",
+                        next_attempt_at=retry_at,
+                    ),
+                ]
+            )
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            result = await jobs._deliver_daily_report_claim(
+                claim,
+                delivery_bots={"100": bot},
+                protect_date="2026-08-27",
+                cutoff_time="23:45",
+            )
+
+        transitions = mocked_store.transition_daily_report_delivery.await_args_list
+        self.assertEqual([call.args[1] for call in transitions], ["sending", "retry"])
+        self.assertEqual(result, (True, False, retry_at, "retry"))
+        self.assertTrue(transitions[1].kwargs["error"].startswith("ActionFailed:"))
+        self.assertEqual(len(transitions[1].kwargs["error"]), 512)
+
+    async def test_rich_media_retry_transition_failure_schedules_recheck(self) -> None:
+        bot = SimpleNamespace(
+            self_id="bot-a",
+            send_group_msg=AsyncMock(
+                side_effect=ActionFailed(
+                    status="failed",
+                    retcode=1200,
+                    message="rich media transfer failed",
+                )
+            ),
+        )
+        claim = DailyReportDeliveryClaim(
+            "2026-08-26",
+            "100",
+            "bot-a",
+            "2026-08-26T23:45:00+08:00",
+            "claim-a",
+        )
+        retry_at = "2026-08-26T15:50:30+00:00"
+        mocked_store = SimpleNamespace(
+            transition_daily_report_delivery=AsyncMock(
+                side_effect=[
+                    DailyReportDeliveryTransitionResult(ok=True, status="sending"),
+                    RuntimeError("retry response lost"),
+                ]
+            )
+        )
+
+        with (
+            patch.object(jobs, "store", mocked_store),
+            patch.object(jobs, "is_group_rollpig_enabled", return_value=True),
+            patch.object(jobs, "is_daily_report_enabled", return_value=True),
+            patch.object(jobs, "_daily_report_deadline_reached", return_value=False),
+            patch.object(jobs, "_daily_report_transition_retry_at", return_value=retry_at),
+            patch.object(
+                jobs,
+                "build_group_daily_report",
+                new=AsyncMock(return_value=SimpleNamespace(has_activity=True)),
+            ),
+            patch.object(
+                jobs,
+                "render_daily_report_card",
+                new=AsyncMock(return_value=SimpleNamespace(data=b"image")),
+            ),
+        ):
+            result = await jobs._deliver_daily_report_claim(
+                claim,
+                delivery_bots={"100": bot},
+                protect_date="2026-08-27",
+                cutoff_time="23:45",
+            )
+
+        self.assertEqual(
+            [call.args[1] for call in mocked_store.transition_daily_report_delivery.await_args_list],
+            ["sending", "retry"],
+        )
+        self.assertEqual(result, (True, False, retry_at, "retry"))
 
     async def test_disabled_group_is_rechecked_before_claim_side_effects(self) -> None:
         claim = DailyReportDeliveryClaim(
@@ -806,7 +1022,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
                         cutoff_time="23:45",
                     )
 
-                self.assertEqual(result, (False, False, ""))
+                self.assertEqual(result, (False, False, "", "skipped"))
                 build_report.assert_not_awaited()
                 bot.send_group_msg.assert_not_awaited()
                 self.assertEqual(
@@ -1022,7 +1238,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
                         cutoff_time="23:45",
                     )
 
-                self.assertEqual(result, (True, False, ""))
+                self.assertEqual(result, (True, False, "", "skipped"))
                 build_report.assert_awaited_once()
                 render_card.assert_awaited_once()
                 bot.send_group_msg.assert_not_awaited()
@@ -1688,6 +1904,34 @@ class CloudDailyReportContractTests(unittest.IsolatedAsyncioTestCase):
             [{"group_id": "100", "delivery_bot_id": "bot-a"}],
         )
         self.assertEqual(requests[2][1]["action"], "sending")
+
+    async def test_transition_truncates_error_before_cloud_request(self) -> None:
+        requests: list[dict] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads((await request.aread()).decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={"ok": True, "status": "uncertain", "attempt_count": 1},
+            )
+
+        cloud_store = self._create_store(handler)
+        try:
+            await cloud_store.transition_daily_report_delivery(
+                DailyReportDeliveryClaim(
+                    "2026-08-31",
+                    "100",
+                    "bot-a",
+                    "2026-08-31T15:45:00",
+                    "claim-token",
+                ),
+                "uncertain",
+                error="x" * 1000,
+            )
+        finally:
+            await cloud_store.close()
+
+        self.assertEqual(len(requests[0]["error"]), 512)
 
     async def test_later_claim_batch_failure_preserves_acquired_claims(self) -> None:
         requests: list[dict] = []

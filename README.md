@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.13.1-ff69b4" alt="Version 0.13.1">
+    <img src="https://img.shields.io/badge/Version-0.14.0-ff69b4" alt="Version 0.14.0">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -39,7 +39,7 @@
 | 模块 | 能做什么 |
 | --- | --- |
 | **今日小猪** | 每天抽取一只固定小猪；支持昨日回顾、明日预测、随机小猪和 PigHub 找猪。 |
-| **猪圈成长** | 收藏小猪、查看图片图鉴；重复抽取会提升 EX Lv.，并逐步触发新猪保底。 |
+| **猪圈成长** | 收藏小猪、查看图片图鉴；重复抽取和每日一次烤猪加餐会提升 EX Lv.，并逐步触发新猪保底。 |
 | **EX 差分** | 资源包可为同一只猪提供不同 EX 等级的立绘和文案，不新增图鉴 ID，也不破坏已有成长数据。 |
 | **烤猪互动** | 今日烤猪、烤群友、随机烤猪、加急生火、预约烤猪与烤箱补货。 |
 | **群聊总结** | 可以为指定群开启每日小猪数据总结。 |
@@ -111,6 +111,8 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 
 第一位发起预约的人会成为主厨，其他群友可以继续**免费**烤目标群友实现添柴；等目标完成今日抽猪后，再统一结算这场预约。
 
+每天第一次通过普通 `烤群友` / `随机烤群友` 成功，或参与成功结算的普通预约时，自己的今日小猪会获得一次**烤猪加餐**并成长 `1` 级。加急、管理员后门、自烤、逃脱、反噬和特殊终态不会触发；已经达到 EX Lv.5 时保持静默，也不会占用当天机会。
+
 ### 群聊总结
 
 `本周小猪` 会生成个人一周总结长图。
@@ -134,6 +136,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 - 第一位参与者成为主厨，并消耗一次普通烧烤充能。
 - 后续最多 `11` 位群友可以免费加入，同一场最多 `12` 人。
 - 目标完成今日抽猪后，由负责该预约的 Bot 继续完成结算与投递。
+- 普通预约成功时，最终参与者分别尝试获得当天一次烤猪加餐；强制预约不触发。
 - Local 与 Cloud 后端均支持预约流程。
 
 #### 烤箱补货
@@ -255,7 +258,7 @@ ROLLPIG_CLOUD_TOKEN=replace-with-token
 
 Cloud 模式用于同步今日小猪、图鉴成长、烧烤充能等核心状态。关键写操作不会在异常时偷偷落回本地，避免多 Bot 产生数据分叉。
 
-完整的多 Bot 猪圈日报协同需要 RollPig Cloud `0.6.0+`。连接旧版 Cloud 时，其他既有功能保持可用，但日报会安全停止，不会让多个实例各自降级后向同一群重复发送。
+完整的多 Bot 猪圈日报协同需要 RollPig Cloud `0.6.0+`；跨群、跨 Bot 共享烤猪加餐需要 Cloud `0.7.0+`。Plus 连接旧版 Cloud 时，抽猪、烤群友和预约等原有玩法继续可用，但不会在本地补发加餐，避免成长记录分叉。
 
 ### 添加额外 Overlay
 

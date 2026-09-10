@@ -209,6 +209,21 @@ def _sort_progress_items(draw_state: DrawState) -> list[tuple[str, PigProgress]]
     )
 
 
+def _favorite_progress_item(draw_state: DrawState) -> tuple[str, PigProgress] | None:
+    """本命猪只按真实抽取次数排序；加餐成长不能伪造玩家最常抽到的猪。"""
+
+    if not draw_state.progress:
+        return None
+    return min(
+        draw_state.progress.items(),
+        key=lambda item: (
+            -int(item[1].copies or 0),
+            item[1].first_obtained_at or "",
+            item[0],
+        ),
+    )
+
+
 def _build_catalog_data(
     *,
     user_name: str,
@@ -246,8 +261,9 @@ def _build_catalog_data(
             )
         )
 
-    if progress_items:
-        favorite_id, favorite_progress = progress_items[0]
+    favorite_item = _favorite_progress_item(snapshot.draw_state)
+    if favorite_item is not None:
+        favorite_id, favorite_progress = favorite_item
         favorite_pig = pig_resource_manager.pig_map.get(favorite_id) or {"id": favorite_id}
         favorite_appearance = pig_resource_manager.resolve_pig_appearance(
             favorite_pig,

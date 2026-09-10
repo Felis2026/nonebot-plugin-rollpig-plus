@@ -416,6 +416,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
         target_id=target_id,
         target_name=target_name,
         group_id=group_id,
+        daily_feed_eligible=(force_mode is None),
     )
 
 
@@ -547,4 +548,5 @@ async def _(bot: Bot, event: GroupMessageEvent):
         target_id=target_id,
         target_name=target_name,
         group_id=group_id,
+        daily_feed_eligible=True,
     )

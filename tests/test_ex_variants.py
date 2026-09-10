@@ -33,7 +33,9 @@ from nonebot_plugin_rollpig_plus.config import Config
 from nonebot_plugin_rollpig_plus.resource_manager import RollPigResourceManager
 from nonebot_plugin_rollpig_plus.store.models import (
     CatalogSnapshot,
+    DailyFeedResult,
     DailyRollResult,
+    DailyRollSnapshot,
     DrawState,
     PigProgress,
     expert_level_from_copies,
@@ -181,12 +183,18 @@ class ExVariantModelTests(unittest.TestCase):
                 self.assertEqual(expert_level_from_copies(copies), level)
 
     def test_progress_and_draw_state_share_the_same_level_rule(self) -> None:
-        progress = PigProgress(copies=6)
+        progress = PigProgress(copies=4, growth_bonus=2)
         state = DrawState(pig_ids=["pig"], progress={"pig": progress})
 
         self.assertEqual(progress.expert_level, 5)
         self.assertEqual(state.expert_level_of("pig"), 5)
         self.assertEqual(state.expert_level_of("missing"), 0)
+
+    def test_growth_bonus_does_not_change_true_draw_count(self) -> None:
+        progress = PigProgress(copies=2, growth_bonus=2)
+
+        self.assertEqual(progress.copies, 2)
+        self.assertEqual(progress.expert_level, 3)
 
 
 class StrictCardRendererTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase):
@@ -471,6 +479,35 @@ class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_pigsty_ranks_feed_levels_separately_from_favorite(self) -> None:
+        progress = {f"repeat-{i}": PigProgress(copies=2) for i in range(5)}
+        progress["fed-high"] = PigProgress(copies=1, growth_bonus=5)
+        with patch.object(roll_flow_module, "pig_resource_manager", self.manager):
+            summary = roll_flow_module.build_pigsty_growth_summary(
+                "user", DrawState(pig_ids=list(progress), progress=progress), 6,
+            )
+        favorite = next(line for line in summary.splitlines() if "本命猪：" in line)
+        high = next(line for line in summary.splitlines() if "高等级小猪：" in line)
+        self.assertIn("【repeat-0】", favorite)
+        self.assertIn("【fed-high】EX Lv.5", high)
+        self.assertLess(high.index("fed-high"), high.index("repeat-0"))
+        self.assertNotIn("repeat-4", high)
+
+    def test_pigsty_level_ties_use_copies_then_first_obtained_then_id(self) -> None:
+        progress = {
+            "later": PigProgress(copies=2, growth_bonus=3, first_obtained_at="2026-08-24"),
+            "early-b": PigProgress(copies=2, growth_bonus=3, first_obtained_at="2026-08-23"),
+            "early-a": PigProgress(copies=2, growth_bonus=3, first_obtained_at="2026-08-23"),
+            "more-copies": PigProgress(copies=5, first_obtained_at="2026-08-25"),
+        }
+        with patch.object(roll_flow_module, "pig_resource_manager", self.manager):
+            summary = roll_flow_module.build_pigsty_growth_summary(
+                "user", DrawState(pig_ids=list(progress), progress=progress), 4,
+            )
+        high = next(line for line in summary.splitlines() if "高等级小猪：" in line)
+        expected = ["more-copies", "early-a", "early-b", "later"]
+        self.assertEqual(sorted(expected, key=high.index), expected)
+
     async def test_daily_view_reads_progress_but_roast_path_can_skip_it(self) -> None:
         fake_store = SimpleNamespace(
             get_daily_roll=AsyncMock(return_value="pig"),
@@ -493,6 +530,55 @@ class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
         self.assertEqual(daily.ex_level, 5)
         self.assertIsNone(roast.ex_level)
         self.assertEqual(fake_store.get_draw_state.await_count, 1)
+
+    async def test_concurrent_existing_roll_uses_applied_feed_level_for_today_card(self) -> None:
+        roll_result = DailyRollResult(
+            pig_id="pig",
+            created=False,
+            copies=1,
+            expert_level=0,
+            snapshot=DailyRollSnapshot(
+                date_str="2026-09-10",
+                pig_id="pig",
+                is_new_pig=True,
+                previous_copies=0,
+                copies_after_roll=1,
+                previous_expert_level=0,
+                expert_level_after_roll=0,
+                daily_feed_result=DailyFeedResult(
+                    status="fed",
+                    user_id="user",
+                    pig_id="pig",
+                    previous_level=0,
+                    new_level=1,
+                ),
+                collection_size_after_roll=1,
+                resource_version="builtin",
+            ),
+        )
+        fake_store = SimpleNamespace(
+            get_daily_roll=AsyncMock(return_value=None),
+            get_or_create_daily_roll=AsyncMock(return_value=roll_result),
+        )
+
+        with (
+            patch.object(roll_flow_module, "store", fake_store),
+            patch.object(roll_flow_module, "pig_resource_manager", self.manager),
+            patch.object(
+                roll_flow_module,
+                "pick_daily_roll_candidate",
+                new=AsyncMock(return_value=self.manager.pig_map["pig"]),
+            ),
+        ):
+            resolution = await roll_flow_module.resolve_daily_pig(
+                "user",
+                "group",
+                include_progress=True,
+            )
+
+        self.assertEqual(resolution.ex_level, 1)
+        self.assertEqual(resolution.roll_result.expert_level, 0)
+        self.assertEqual(resolution.growth_text, "")
 
     def test_growth_text_uses_matching_variant_change_pool(self) -> None:
         result = DailyRollResult(

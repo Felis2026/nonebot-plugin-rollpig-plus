@@ -549,6 +549,22 @@ class DailyReportTimelineTests(unittest.TestCase):
 
 
 class DailyReportRankingTests(unittest.TestCase):
+    def test_equal_ex_top_three_uses_upgrade_time_instead_of_early_draw(self) -> None:
+        participants = ("fed-late", "drawn-b", "drawn-a", "drawn-c")
+        profiles = {
+            user: DailyUserReportProfile(
+                user_id=user, daily_pig_id=f"pig-{user}", daily_ex_level=1,
+                daily_achieved_at=f"{DATE}T{hour:02d}:00:00+08:00",
+            )
+            for user, hour in zip(participants, (12, 9, 9, 10))
+        }
+        rankings = build_rankings(
+            participants, {user: f"pig-{user}" for user in participants}, (), profiles, {},
+        )
+        entries = next(ranking.entries for ranking in rankings if ranking.kind == "expert_level")
+        self.assertEqual([entry.user_id for entry in entries], ["drawn-a", "drawn-b", "drawn-c"])
+        self.assertEqual([entry.rank for entry in entries], [1, 1, 1])
+
     def test_missing_cloud_profile_fields_hide_ex_and_catalog_rankings(self) -> None:
         report = build_daily_report(
             date_str=DATE,

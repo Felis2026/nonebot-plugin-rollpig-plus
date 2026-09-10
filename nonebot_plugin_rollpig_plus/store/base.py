@@ -6,6 +6,7 @@ from typing import Optional
 from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyFeedResult,
     DailyEventQueryResult,
     DailyReportDeliveryClaim,
     DailyReportDeliveryClaimResult,
@@ -114,7 +115,12 @@ class RollpigStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def append_roast_event(self, event: RoastEvent) -> None:
+    async def append_roast_event(
+        self,
+        event: RoastEvent,
+        *,
+        settle_daily_feed: bool = False,
+    ) -> Optional[DailyFeedResult]:
         raise NotImplementedError
 
     @abstractmethod
@@ -248,7 +254,11 @@ class RollpigStore(ABC):
 
     @abstractmethod
     async def save_roast_reservation_outcome(
-        self, reservation: RoastReservation, outcome_snapshot: dict
+        self,
+        reservation: RoastReservation,
+        outcome_snapshot: dict,
+        *,
+        settle_daily_feed: bool = False,
     ) -> Optional[RoastReservation]:
         raise NotImplementedError
 

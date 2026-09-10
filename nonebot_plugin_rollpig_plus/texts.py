@@ -1152,3 +1152,26 @@ ROAST_REFILL_REACTION_HINT_TEXTS = [
     "引导用的「续标识」没有贴成功，请手动选择该标识投票；有效票仍会正常核验。",
     "自动添加投票标识失败了。请在申请消息下手动添加「续标识」，不要改点其他表情。",
 ]
+
+
+# ================================ 烤猪加餐文案 ================================ #
+
+DAILY_FEED_ROAST_TEXTS = (
+    "🍖 【{pig}】蹭到一顿加餐，EX Lv.{old_level} → {new_level}",
+    "🍖 【{pig}】叼走了烤架边最后一块肉，EX Lv.{old_level} → {new_level}",
+    "🍖 【{pig}】守在烤架边半天，总算没白等，EX Lv.{old_level} → {new_level}",
+    "🍖 厨师尝菜，【{pig}】负责再尝一口，EX Lv.{old_level} → {new_level}",
+    "🍖 剩下这口归【{pig}】，EX Lv.{old_level} → {new_level}",
+    "🍖 烤架边角料喂给了【{pig}】，EX Lv.{old_level} → {new_level}",
+    "🍖 这顿没白忙，【{pig}】也吃上了，EX Lv.{old_level} → {new_level}",
+)
+
+DAILY_FEED_RESERVATION_TEXTS = (
+    "🍖 开席后还有加餐，{participants}的小猪也成长了。",
+    "🍖 肉刚出炉，{participants}的小猪就端着碗来了，吃完也跟着成长了。",
+    "🍖 {participants}的小猪蹲到最后，各蹭了一顿加餐，成长了。",
+    "🍖 {participants}的小猪把餐盘舔了个干净，也跟着成长了。",
+    "🍖 这桌还留了加餐，{participants}的小猪获得成长。",
+    "🍖 烤架边角料没有浪费，{participants}的小猪各吃一口，也跟着成长了。",
+    "🍖 散席前又分了一轮，{participants}的小猪加餐成长了。",
+)

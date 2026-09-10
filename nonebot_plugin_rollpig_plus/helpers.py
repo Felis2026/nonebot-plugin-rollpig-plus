@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import random
 import time
+import uuid
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Awaitable, Callable
@@ -18,7 +20,8 @@ from .runtime import is_group_rollpig_enabled, rollpig_date_str
 from .reservation_delivery import schedule_opportunistic_delivery
 from .store import store
 from .store.cloud import CloudStoreError
-from .store.models import RoastEvent
+from .store.models import DailyFeedResult, RoastEvent
+from .texts import DAILY_FEED_ROAST_TEXTS
 
 
 # ================================ 命令参数边界 ================================ #
@@ -242,6 +245,7 @@ async def send_rendered_pig(
     event: Event,
     pig_data: dict,
     extra_text: str = "",
+    trailing_text: str = "",
     *,
     cache_final_card: bool = True,
     ex_level: int = 0,
@@ -311,6 +315,8 @@ async def send_rendered_pig(
     if extra_text:
         msg += extra_text + "\n"
     msg += MessageSegment.image(render_result.data)
+    if trailing_text:
+        msg += "\n" + trailing_text
     ready_to_send_at = time.perf_counter()
 
     log_perf(
@@ -325,6 +331,7 @@ async def send_rendered_pig(
         f"analysis_font={render_result.analysis_font_size} "
         f"analysis_lines={render_result.analysis_lines} "
         f"emoji={render_result.emoji_enabled} extra={bool(extra_text)} "
+        f"trailing={bool(trailing_text)} "
         f"card_cache={'final-disk' if cache_final_card else 'dynamic'} "
         f"requested_ex={appearance.requested_level} applied_ex={appearance.applied_level} "
         f"variant_fallback={variant_fallback}"
@@ -350,20 +357,25 @@ async def finish_roast_outcome(
     target_id: str,
     target_name: str,
     group_id: str,
+    daily_feed_eligible: bool = False,
 ) -> None:
     """落库并发送烤群友结果；outcome 使用 Any 避免与 roast_flow 形成循环 import。"""
 
-    await store.append_roast_event(
-        RoastEvent(
-            event_type=outcome.event_type,
-            attacker_id=attacker_id,
-            target_id=target_id,
-            attacker_name=attacker_name,
-            target_name=target_name,
-            food=outcome.food_name,
-            group_id=group_id,
-        )
+    roast_event = RoastEvent(
+        event_type=outcome.event_type,
+        attacker_id=attacker_id,
+        target_id=target_id,
+        attacker_name=attacker_name,
+        target_name=target_name,
+        food=outcome.food_name,
+        group_id=group_id,
+        event_id=uuid.uuid4().hex,
     )
+    feed_result = await store.append_roast_event(
+        roast_event,
+        settle_daily_feed=(daily_feed_eligible and outcome.event_type == "success"),
+    )
+    feed_text = build_daily_feed_roast_text(feed_result)
     if outcome.render_data:
         # 烤猪分析文案会随对象和结果变化；缓存最终成品会迅速挤满，故只复用 GIF 源帧。
         await send_rendered_pig(
@@ -371,7 +383,25 @@ async def finish_roast_outcome(
             event,
             outcome.render_data,
             extra_text=outcome.extra_text,
+            trailing_text=feed_text,
             cache_final_card=False,
         )
         return
-    await matcher.finish(MessageSegment.reply(event.message_id) + outcome.plain_text)
+    text = outcome.plain_text
+    if feed_text:
+        text += "\n" + feed_text
+    await matcher.finish(MessageSegment.reply(event.message_id) + text)
+
+
+def build_daily_feed_roast_text(result: DailyFeedResult | None) -> str:
+    """只为实际成长追加一行加餐结果；旧 Cloud 和无效果判定保持静默。"""
+
+    if result is None or result.status != "fed" or result.new_level <= result.previous_level:
+        return ""
+    pig = pig_resource_manager.pig_map.get(result.pig_id)
+    pig_name = str(pig.get("name") or result.pig_id) if pig else result.pig_id
+    return random.choice(DAILY_FEED_ROAST_TEXTS).format(
+        pig=pig_name or "今日小猪",
+        old_level=result.previous_level,
+        new_level=result.new_level,
+    )

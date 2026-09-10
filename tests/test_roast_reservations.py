@@ -250,6 +250,159 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.data["usage"], {})
         self.assertEqual(self.manager.data["force_usage"], {})
 
+    async def test_normal_success_feeds_once_without_changing_copies(self):
+        await self.manager.get_or_create_today_pig("a", "pig-a", date_str="2026-08-07")
+
+        with patch.object(data_manager_module, "rollpig_date_str", return_value="2026-08-07"):
+            first = await self.manager.log_roast_event(
+                "success",
+                "a",
+                "target",
+                event_id="event-1",
+                settle_daily_feed=True,
+            )
+            second = await self.manager.log_roast_event(
+                "success",
+                "a",
+                "target-2",
+                event_id="event-2",
+                settle_daily_feed=True,
+            )
+
+        progress = self.manager.get_draw_state("a").progress["pig-a"]
+        self.assertEqual((first.status, first.previous_level, first.new_level), ("fed", 0, 1))
+        self.assertEqual(second.status, "already_fed")
+        self.assertEqual((progress.copies, progress.growth_bonus, progress.expert_level), (1, 1, 1))
+
+    async def test_normal_success_reuses_one_business_date_for_event_and_feed(self):
+        await self.manager.get_or_create_today_pig("a", "pig-a", date_str="2026-08-07")
+
+        with patch.object(
+            data_manager_module,
+            "rollpig_date_str",
+            side_effect=["2026-08-07", "2026-08-08"],
+        ) as date_mock:
+            result = await self.manager.log_roast_event(
+                "success",
+                "a",
+                "target",
+                event_id="event-1",
+                settle_daily_feed=True,
+            )
+
+        self.assertEqual(result.status, "fed")
+        self.assertEqual(date_mock.call_count, 1)
+        self.assertEqual(len(self.manager.data["daily_events"]["2026-08-07"]), 1)
+        self.assertNotIn("2026-08-08", self.manager.data["daily_events"])
+        self.assertIn("a", self.manager.data["daily_feeds"]["2026-08-07"])
+
+    async def test_daily_feed_without_today_pig_keeps_event_and_does_not_claim(self):
+        with patch.object(data_manager_module, "rollpig_date_str", return_value="2026-08-07"):
+            result = await self.manager.log_roast_event(
+                "success",
+                "a",
+                "target",
+                event_id="event-1",
+                settle_daily_feed=True,
+            )
+
+        self.assertEqual(result.status, "no_daily_pig")
+        self.assertEqual(len(self.manager.data["daily_events"]["2026-08-07"]), 1)
+        self.assertEqual(self.manager.data["daily_feeds"], {})
+
+    async def test_daily_feed_retry_reuses_result_and_event_id(self):
+        await self.manager.get_or_create_today_pig("a", "pig-a", date_str="2026-08-07")
+
+        with patch.object(data_manager_module, "rollpig_date_str", return_value="2026-08-07"):
+            first = await self.manager.log_roast_event(
+                "success",
+                "a",
+                "target",
+                event_id="event-1",
+                settle_daily_feed=True,
+            )
+            repeated = await self.manager.log_roast_event(
+                "success",
+                "a",
+                "target",
+                event_id="event-1",
+                settle_daily_feed=True,
+            )
+
+        self.assertEqual((first.status, repeated.status), ("fed", "fed"))
+        self.assertEqual(first.created_at, repeated.created_at)
+        self.assertEqual(len(self.manager.data["daily_events"]["2026-08-07"]), 1)
+        self.assertEqual(self.manager.get_draw_state("a").progress["pig-a"].growth_bonus, 1)
+
+    async def test_max_level_does_not_consume_daily_feed(self):
+        await self.manager.get_or_create_today_pig("a", "pig-a", date_str="2026-08-07")
+        self.manager.data["pig_progress"]["a"]["pig-a"]["copies"] = 6
+
+        with patch.object(data_manager_module, "rollpig_date_str", return_value="2026-08-07"):
+            result = await self.manager.log_roast_event(
+                "success",
+                "a",
+                "target",
+                event_id="event-1",
+                settle_daily_feed=True,
+            )
+
+        self.assertEqual(result.status, "max_level")
+        self.assertNotIn("a", self.manager.data["daily_feeds"].get("2026-08-07", {}))
+
+    async def test_successful_reservation_feeds_all_participants_once(self):
+        for user_id in ("a", "b"):
+            await self.manager.get_or_create_today_pig(
+                user_id,
+                f"pig-{user_id}",
+                date_str="2026-08-07",
+            )
+        created = await self._prepare()
+        await self._prepare("b")
+        await self.manager.get_or_create_today_pig("target", "pig-target", date_str="2026-08-07")
+        claimed = (
+            await self.manager.claim_roast_reservations("bot-1", date_str="2026-08-07")
+        ).reservations[0]
+        snapshot = {"event_type": "success", "plain_text": "fixed"}
+
+        saved = await self.manager.save_roast_reservation_outcome(
+            claimed.reservation_id,
+            claimed.claim_token,
+            snapshot,
+            settle_daily_feed=True,
+        )
+        repeated = await self.manager.save_roast_reservation_outcome(
+            claimed.reservation_id,
+            claimed.claim_token,
+            snapshot,
+            settle_daily_feed=True,
+        )
+
+        self.assertEqual(created.reservation.participant_count, 1)
+        self.assertEqual([item.user_id for item in saved.daily_feed_results], ["a", "b"])
+        self.assertTrue(all(item.status == "fed" for item in saved.daily_feed_results))
+        self.assertEqual(repeated.daily_feed_results, saved.daily_feed_results)
+        self.assertEqual(self.manager.get_draw_state("a").progress["pig-a"].growth_bonus, 1)
+        self.assertEqual(self.manager.get_draw_state("b").progress["pig-b"].growth_bonus, 1)
+
+    async def test_forced_reservation_never_feeds_participants(self):
+        await self.manager.get_or_create_today_pig("a", "pig-a", date_str="2026-08-07")
+        await self._prepare(force_mode="normal")
+        await self.manager.get_or_create_today_pig("target", "pig-target", date_str="2026-08-07")
+        claimed = (
+            await self.manager.claim_roast_reservations("bot-1", date_str="2026-08-07")
+        ).reservations[0]
+
+        saved = await self.manager.save_roast_reservation_outcome(
+            claimed.reservation_id,
+            claimed.claim_token,
+            {"event_type": "success"},
+            settle_daily_feed=True,
+        )
+
+        self.assertEqual(saved.daily_feed_results, ())
+        self.assertEqual(self.manager.get_draw_state("a").progress["pig-a"].growth_bonus, 0)
+
     async def test_migration_quarantines_ambiguous_processing_outcome(self):
         migrated = self.manager._migrate(
             {
@@ -264,6 +417,30 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(migrated["roast_reservations"]["legacy"]["status"], "sending")
+
+    async def test_migration_isolates_broken_daily_feed_buckets(self):
+        migrated = self.manager._migrate(
+            {
+                "daily_feeds": {
+                    "broken-date": [],
+                    "2026-08-07": {
+                        "a": {
+                            "pig_id": "pig-a",
+                            "previous_level": 0,
+                            "new_level": 1,
+                            "source_type": "roast",
+                            "source_id": "event-1",
+                        },
+                        "broken": "invalid",
+                    },
+                }
+            },
+            persist=False,
+        )
+
+        self.assertEqual(set(migrated["daily_feeds"]), {"2026-08-07"})
+        self.assertEqual(set(migrated["daily_feeds"]["2026-08-07"]), {"a"})
+        self.assertEqual(migrated["daily_feeds"]["2026-08-07"]["a"]["status"], "fed")
 
     async def test_create_join_duplicate_and_full_do_not_double_consume(self):
         created = await self._prepare()
@@ -1428,6 +1605,56 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CloudReservationCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_event_requests_feed_but_old_cloud_response_stays_silent(self):
+        store = object.__new__(CloudStore)
+        store._request = AsyncMock(return_value={"ok": True})
+        event = RoastEvent(
+            event_type="success",
+            attacker_id="owner",
+            target_id="target",
+            group_id="100",
+            event_id="event-1",
+        )
+
+        result = await store._append_roast_event(
+            event,
+            date_str="2026-08-07",
+            settle_daily_feed=True,
+        )
+
+        self.assertIsNone(result)
+        body = store._request.await_args.kwargs["json_body"]
+        self.assertTrue(body["settle_daily_feed"])
+        self.assertEqual(body["source_id"], "event-1")
+
+    async def test_new_cloud_feed_response_is_parsed(self):
+        store = object.__new__(CloudStore)
+        store._request = AsyncMock(return_value={
+            "ok": True,
+            "daily_feed_result": {
+                "status": "fed",
+                "user_id": "owner",
+                "pig_id": "pig-a",
+                "previous_level": 1,
+                "new_level": 2,
+                "source_type": "roast",
+                "source_id": "event-1",
+            },
+        })
+
+        result = await store._append_roast_event(
+            RoastEvent(
+                event_type="success",
+                attacker_id="owner",
+                target_id="target",
+                event_id="event-1",
+            ),
+            date_str="2026-08-07",
+            settle_daily_feed=True,
+        )
+
+        self.assertEqual((result.status, result.pig_id, result.new_level), ("fed", "pig-a", 2))
+
     async def test_claim_advertises_prepared_capability_and_local_exclusions(self):
         store = object.__new__(CloudStore)
         store._reservation_request = AsyncMock(

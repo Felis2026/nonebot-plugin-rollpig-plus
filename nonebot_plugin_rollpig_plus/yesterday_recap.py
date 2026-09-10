@@ -613,8 +613,16 @@ def build_yesterday_outcome_text(snapshot: DailyRollSnapshot) -> str:
             return f"新猪入圈 · 图鉴第 {snapshot.collection_size_after_roll} 只"
         return "新猪入圈"
 
-    previous_level = expert_level_from_copies(snapshot.previous_copies or 0)
-    current_level = expert_level_from_copies(snapshot.copies_after_roll or 0)
+    previous_level = (
+        int(snapshot.previous_expert_level)
+        if snapshot.previous_expert_level is not None
+        else expert_level_from_copies(snapshot.previous_copies or 0)
+    )
+    current_level = (
+        int(snapshot.expert_level_after_roll)
+        if snapshot.expert_level_after_roll is not None
+        else expert_level_from_copies(snapshot.copies_after_roll or 0)
+    )
     if current_level <= previous_level:
         return ""
     prefix = f"EX Lv.{previous_level} → {current_level}"
@@ -655,11 +663,17 @@ async def build_yesterday_recap(
     # 这样今天补上的 EX 差分能立即用于昨天已经达到对应等级的用户。
     pig = resources.pig_map.get(roll.pig_id)
     if pig is not None:
-        replay_ex_level = (
-            expert_level_from_copies(roll.copies_after_roll)
-            if roll.copies_after_roll is not None
-            else max(0, int(roll.resolved_variant_level or 0))
-        )
+        if (
+            roll.daily_feed_result is not None
+            and roll.daily_feed_result.pig_id == roll.pig_id
+        ):
+            replay_ex_level = roll.daily_feed_result.new_level
+        elif roll.expert_level_after_roll is not None:
+            replay_ex_level = int(roll.expert_level_after_roll)
+        elif roll.copies_after_roll is not None:
+            replay_ex_level = expert_level_from_copies(roll.copies_after_roll)
+        else:
+            replay_ex_level = max(0, int(roll.resolved_variant_level or 0))
         appearance = resources.resolve_pig_appearance(pig, replay_ex_level)
         pig_name = str(appearance.pig_data.get("name") or roll.pig_id)
         image_path = appearance.image_path

@@ -6,6 +6,7 @@ from .base import RollpigStore
 from .models import (
     CatalogSnapshot,
     CooldownConsumeResult,
+    DailyFeedResult,
     DailyEventQueryResult,
     DailyReportDeliveryClaim,
     DailyReportDeliveryClaimResult,
@@ -120,8 +121,13 @@ class LocalJsonStore(RollpigStore):
     async def consume_force_usage(self, user_id: str, date_str: Optional[str] = None) -> bool:
         return await self.manager.consume_force_roast_usage(user_id, date_str=date_str)
 
-    async def append_roast_event(self, event: RoastEvent) -> None:
-        await self.manager.log_roast_event(
+    async def append_roast_event(
+        self,
+        event: RoastEvent,
+        *,
+        settle_daily_feed: bool = False,
+    ) -> Optional[DailyFeedResult]:
+        return await self.manager.log_roast_event(
             event.event_type,
             event.attacker_id,
             event.target_id,
@@ -138,6 +144,7 @@ class LocalJsonStore(RollpigStore):
             special_reason=event.special_reason,
             event_id=event.event_id,
             created_at=event.created_at,
+            settle_daily_feed=settle_daily_feed,
         )
 
     async def query_daily_events(
@@ -250,11 +257,18 @@ class LocalJsonStore(RollpigStore):
     async def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
         return self.manager.has_owned_roast_reservations(delivery_bot_id, date_str=date_str)
 
-    async def save_roast_reservation_outcome(self, reservation: RoastReservation, outcome_snapshot: dict) -> Optional[RoastReservation]:
+    async def save_roast_reservation_outcome(
+        self,
+        reservation: RoastReservation,
+        outcome_snapshot: dict,
+        *,
+        settle_daily_feed: bool = False,
+    ) -> Optional[RoastReservation]:
         return await self.manager.save_roast_reservation_outcome(
             reservation.reservation_id,
             reservation.claim_token,
             outcome_snapshot,
+            settle_daily_feed=settle_daily_feed,
         )
 
     async def mark_roast_reservation_sending(
