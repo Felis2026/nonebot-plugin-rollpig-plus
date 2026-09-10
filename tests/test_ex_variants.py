@@ -33,7 +33,9 @@ from nonebot_plugin_rollpig_plus.config import Config
 from nonebot_plugin_rollpig_plus.resource_manager import RollPigResourceManager
 from nonebot_plugin_rollpig_plus.store.models import (
     CatalogSnapshot,
+    DailyFeedResult,
     DailyRollResult,
+    DailyRollSnapshot,
     DrawState,
     PigProgress,
     expert_level_from_copies,
@@ -528,6 +530,55 @@ class ExVariantFlowTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
         self.assertEqual(daily.ex_level, 5)
         self.assertIsNone(roast.ex_level)
         self.assertEqual(fake_store.get_draw_state.await_count, 1)
+
+    async def test_concurrent_existing_roll_uses_applied_feed_level_for_today_card(self) -> None:
+        roll_result = DailyRollResult(
+            pig_id="pig",
+            created=False,
+            copies=1,
+            expert_level=0,
+            snapshot=DailyRollSnapshot(
+                date_str="2026-09-10",
+                pig_id="pig",
+                is_new_pig=True,
+                previous_copies=0,
+                copies_after_roll=1,
+                previous_expert_level=0,
+                expert_level_after_roll=0,
+                daily_feed_result=DailyFeedResult(
+                    status="fed",
+                    user_id="user",
+                    pig_id="pig",
+                    previous_level=0,
+                    new_level=1,
+                ),
+                collection_size_after_roll=1,
+                resource_version="builtin",
+            ),
+        )
+        fake_store = SimpleNamespace(
+            get_daily_roll=AsyncMock(return_value=None),
+            get_or_create_daily_roll=AsyncMock(return_value=roll_result),
+        )
+
+        with (
+            patch.object(roll_flow_module, "store", fake_store),
+            patch.object(roll_flow_module, "pig_resource_manager", self.manager),
+            patch.object(
+                roll_flow_module,
+                "pick_daily_roll_candidate",
+                new=AsyncMock(return_value=self.manager.pig_map["pig"]),
+            ),
+        ):
+            resolution = await roll_flow_module.resolve_daily_pig(
+                "user",
+                "group",
+                include_progress=True,
+            )
+
+        self.assertEqual(resolution.ex_level, 1)
+        self.assertEqual(resolution.roll_result.expert_level, 0)
+        self.assertEqual(resolution.growth_text, "")
 
     def test_growth_text_uses_matching_variant_change_pool(self) -> None:
         result = DailyRollResult(

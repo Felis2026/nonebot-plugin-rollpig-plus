@@ -224,6 +224,22 @@ def build_roll_growth_text(result: DailyRollResult, pig_data: dict) -> str:
     )
 
 
+def _current_daily_card_expert_level(result: DailyRollResult) -> int:
+    """返回今日卡片应展示的最终等级，同时保留抽取快照的历史语义。"""
+
+    level = (
+        result.expert_level
+        if result.expert_level is not None
+        else expert_level_from_copies(result.copies)
+    )
+    feed = result.snapshot.daily_feed_result if result.snapshot is not None else None
+    # get 与 get-or-create 之间可能被另一 Bot 抢先完成抽取和加餐；此时响应中的
+    # expert_level 仍是抽取时快照，当前卡片应采用同一只猪已结算的加餐等级。
+    if feed is not None and feed.status == "fed" and feed.pig_id == result.pig_id:
+        level = max(level, int(feed.new_level))
+    return min(max(level, 0), MAX_EXPERT_LEVEL)
+
+
 async def resolve_daily_pig(
     user_id: str,
     group_id: str = "",
@@ -288,11 +304,7 @@ async def resolve_daily_pig(
         pig=pig,
         roll_result=roll_result,
         growth_text=build_roll_growth_text(roll_result, pig) if include_progress else "",
-        ex_level=(
-            roll_result.expert_level
-            if roll_result.expert_level is not None
-            else expert_level_from_copies(roll_result.copies)
-        ) if include_progress else None,
+        ex_level=_current_daily_card_expert_level(roll_result) if include_progress else None,
     )
 
 
