@@ -41,6 +41,10 @@ class CloudStoreError(RuntimeError):
     pass
 
 
+class CloudMakeupUnsupportedError(CloudStoreError):
+    pass
+
+
 class CloudReservationUnsupportedError(CloudStoreError):
     """旧版 Cloud 没有预约接口时抛出，handler 可只降级预约场景。"""
 
@@ -246,6 +250,7 @@ class CloudStore(RollpigStore):
         )
         identity_snapshot = DailyRollSnapshot(
             date_str=date_str, pig_id=pig_id, daily_feed_result=daily_feed,
+            is_makeup=payload.get("is_makeup") is True,
         )
         outcome = payload.get("outcome_snapshot")
         if not isinstance(outcome, dict):
@@ -279,6 +284,7 @@ class CloudStore(RollpigStore):
         return DailyRollSnapshot(
             date_str=date_str,
             pig_id=pig_id,
+            is_makeup=payload.get("is_makeup") is True,
             is_new_pig=bool(payload.get("is_new_pig")),
             previous_copies=max(0, int(payload.get("previous_copies") or 0)),
             copies_after_roll=max(0, int(payload.get("copies") or 0)),
@@ -383,18 +389,26 @@ class CloudStore(RollpigStore):
         proposed_pig_id: str,
         date_str: Optional[str] = None,
         group_id: str = "",
+        *,
+        makeup: bool = False,
     ) -> DailyRollResult:
         target_date = date_str or rollpig_date_str()
-        payload = await self._request(
-            "POST",
-            "/v1/daily-rolls/get-or-create",
-            json_body={
-                "user_id": user_id,
-                "proposed_pig_id": proposed_pig_id,
-                "date_str": target_date,
-                "group_id": group_id,
-            },
-        )
+        try:
+            payload = await self._request(
+                "POST",
+                "/v1/daily-rolls/makeup" if makeup else "/v1/daily-rolls/get-or-create",
+                json_body={
+                    "user_id": user_id,
+                    "proposed_pig_id": proposed_pig_id,
+                    "date_str": target_date,
+                    "group_id": "" if makeup else group_id,
+                },
+            )
+        except CloudStoreError as error:
+            cause = error.__cause__
+            if makeup and isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in {404, 405}:
+                raise CloudMakeupUnsupportedError("当前 Cloud 尚未支持补签，请联系维护者升级。") from error
+            raise
         return DailyRollResult(
             pig_id=str(payload["pig_id"]),
             created=bool(payload.get("created")),

@@ -69,6 +69,31 @@ def applied_feed(**overrides) -> dict:
 
 
 class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_makeup_is_atomic_persistent_and_does_not_activate_reservations(self):
+        yesterday = data_manager_module.rollpig_date_str(-1)
+        today = data_manager_module.rollpig_date_str()
+        original = await self.manager.get_or_create_today_pig("user", "pig", date_str=today)
+        self.manager.data["roast_reservations"] = {
+            "pending": {"date_str": yesterday, "target_id": "user", "status": "pending"},
+        }
+        results = await asyncio.gather(*(
+            self.manager.get_or_create_today_pig(
+                "user", "pig", date_str=yesterday, group_id="100", makeup=True,
+            ) for _ in range(8)
+        ))
+        self.assertEqual(sum(result.created for result in results), 1)
+        self.assertEqual(self.manager.get_draw_state("user").copies_of("pig"), 2)
+        self.assertEqual(self.manager.get_daily_roll_snapshot("user", today), original.snapshot)
+        self.assertEqual(self.manager.data["roast_reservations"]["pending"]["status"], "pending")
+        self.assertEqual(self.manager.get_group_rolls("100", yesterday), {})
+        restored = PigDataManager().get_daily_roll_snapshot("user", yesterday)
+        self.assertTrue(restored.is_makeup)
+        completed = replace(restored, resource_version="builtin")
+        await self.manager.complete_daily_roll_snapshot("user", completed)
+        self.assertTrue(PigDataManager().get_daily_roll_snapshot("user", yesterday).is_makeup)
+        with self.assertRaises(ValueError):
+            await self.manager.get_or_create_today_pig("user", "other", date_str=today, makeup=True)
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -238,6 +263,23 @@ class LocalDailyRollSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CloudDailyRollSnapshotCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_old_cloud_makeup_does_not_fall_back_to_normal_draw(self):
+        from nonebot_plugin_rollpig_plus.store.cloud import CloudMakeupUnsupportedError
+        store = object.__new__(CloudStore)
+        response = httpx.Response(404, request=httpx.Request("POST", "https://example.test/v1/daily-rolls/makeup"))
+        cause = httpx.HTTPStatusError("missing", request=response.request, response=response)
+        error = CloudStoreError("missing")
+        error.__cause__ = cause
+        store._request = AsyncMock(side_effect=error)
+        with self.assertRaises(CloudMakeupUnsupportedError):
+            await store.get_or_create_daily_roll("user", "pig", date_str=DATE, makeup=True)
+        self.assertEqual(store._request.await_count, 1)
+        self.assertEqual(store._request.await_args.args[1], "/v1/daily-rolls/makeup")
+        snapshot = CloudStore._parse_daily_roll_snapshot(
+            {"pig_id": "pig", "is_makeup": True}, date_str=DATE,
+        )
+        self.assertTrue(snapshot.is_makeup)
+
     async def test_feed_survives_all_appearance_completion_states(self):
         store = object.__new__(CloudStore)
         for outcome in (None, {"snapshot_available": False}, {"snapshot_available": True}):
@@ -618,6 +660,29 @@ class DailyRollSnapshotCompletionIsolationTests(unittest.IsolatedAsyncioTestCase
 
 
 class YesterdayRecapBusinessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_makeup_card_does_not_read_historical_events_or_protection(self):
+        self.snapshot = replace(self.snapshot, is_makeup=True)
+        self.resources.pig_map["pig"].update(description="今天也在写代码", analysis="键盘旁住着一只小猪。")
+        recap_store = self._store([self._event(1)], protected=True)
+        recap = await build_yesterday_recap(
+            "user", date_str=DATE, group_id="100", recap_store=recap_store,
+            resources=self.resources,
+        )
+        self.assertTrue(recap.roll.is_makeup)
+        self.assertEqual(recap.pig_description, "今天也在写代码")
+        self.assertEqual(recap.pig_analysis, "键盘旁住着一只小猪。")
+        self.assertEqual(recap.outcome_text, build_yesterday_outcome_text(self.snapshot))
+        data = yesterday_card_module.build_yesterday_card_data(recap, hero_path=None)
+        self.assertEqual(data.title, "昨日小猪 · 补签")
+        self.assertEqual(data.role_prefix, "补签抽到 ")
+        self.assertEqual(len(data.sections), 1)
+        self.assertEqual(data.sections[0].title, recap.pig_description)
+        self.assertEqual(data.sections[0].body[0].text, recap.pig_analysis)
+        self.assertEqual(recap.experiences, ())
+        self.assertEqual(recap.aftereffect_text, "")
+        recap_store.query_daily_events.assert_not_awaited()
+        recap_store.is_protected.assert_not_awaited()
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -1184,6 +1249,27 @@ class YesterdayTextPoolTests(unittest.TestCase):
 
 
 class YesterdayCardRendererTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_yesterday_is_made_up_then_sent_as_one_card(self):
+        recap = self._recap(None)
+        recap = replace(recap, roll=replace(recap.roll, is_makeup=True))
+        event = SimpleNamespace(user_id="user", message_id=123, group_id=100)
+        rendered = SimpleNamespace(
+            data=b"card", renderer="pillow", image_format="png", width=720,
+            height=900, used_fallback_image=True,
+        )
+        with (
+            patch.object(roll_handler_module, "build_yesterday_recap", new=AsyncMock(side_effect=[None, recap])),
+            patch.object(roll_handler_module, "ensure_yesterday_pig", new=AsyncMock(return_value=True)) as makeup,
+            patch.object(roll_handler_module, "get_event_group_id", return_value="100"),
+            patch.object(roll_handler_module, "render_yesterday_recap_card", new=AsyncMock(return_value=rendered)),
+            patch.object(roll_handler_module.cmd_yest, "finish", new=AsyncMock()) as finish,
+        ):
+            await roll_handler_module._handle_yesterday_pig(event)
+        makeup.assert_awaited_once_with("user", roll_handler_module.rollpig_date_str(-1))
+        self.assertEqual(finish.await_count, 1)
+        self.assertEqual([segment.type for segment in finish.await_args.args[0]], ["reply", "text", "image"])
+        self.assertIn(finish.await_args.args[0][1].data["text"], roll_handler_module.YESTERDAY_MAKEUP_TEXTS)
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -1787,7 +1873,7 @@ class YesterdayCardRendererTests(unittest.IsolatedAsyncioTestCase):
         ):
             await roll_handler_module._handle_yesterday_pig(event)
 
-        build_mock.assert_awaited_once_with("user", group_id="100")
+        build_mock.assert_awaited_once_with("user", group_id="100", date_str=roll_handler_module.rollpig_date_str(-1))
         render_mock.assert_awaited_once_with(recap)
         finish_mock.assert_awaited_once()
         message = finish_mock.await_args.args[0]

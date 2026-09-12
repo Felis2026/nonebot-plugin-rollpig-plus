@@ -169,6 +169,22 @@ async def pick_daily_roll_candidate(user_id: str) -> dict:
     return random.choices(pig_list, weights=weights, k=1)[0]
 
 
+async def ensure_yesterday_pig(user_id: str, date_str: str) -> bool:
+    """补抽缺失的昨日记录；候选由 Bot 选择，后端原子决定最终结果。"""
+    if await store.get_daily_roll(user_id, date_str=date_str):
+        return False
+    if not pig_resource_manager.pig_list:
+        raise RuntimeError("小猪资源暂时不可用，无法补签")
+    candidate = await pick_daily_roll_candidate(user_id)
+    result = await store.get_or_create_daily_roll(
+        user_id, candidate["id"], date_str=date_str, makeup=True,
+    )
+    pig = pig_resource_manager.pig_map.get(result.pig_id)
+    if pig is not None:
+        await _complete_daily_roll_snapshot(user_id, result, pig)
+    return result.created
+
+
 def build_roll_growth_text(result: DailyRollResult, pig_data: dict) -> str:
     """生成今日首次抽猪后的成长提示；重复查看当天结果时不刷提示也不刷等级。"""
     if not result.created:

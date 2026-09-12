@@ -67,12 +67,15 @@ class LocalJsonStore(RollpigStore):
         proposed_pig_id: str,
         date_str: Optional[str] = None,
         group_id: str = "",
+        *,
+        makeup: bool = False,
     ) -> DailyRollResult:
         return await self.manager.get_or_create_today_pig(
             user_id=user_id,
             proposed_pig_id=proposed_pig_id,
             date_str=date_str,
             group_id=group_id,
+            makeup=makeup,
         )
 
     async def get_draw_state(self, user_id: str) -> DrawState:

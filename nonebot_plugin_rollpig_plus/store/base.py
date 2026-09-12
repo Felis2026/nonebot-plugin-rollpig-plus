@@ -62,6 +62,8 @@ class RollpigStore(ABC):
         proposed_pig_id: str,
         date_str: Optional[str] = None,
         group_id: str = "",
+        *,
+        makeup: bool = False,
     ) -> DailyRollResult:
         raise NotImplementedError
 

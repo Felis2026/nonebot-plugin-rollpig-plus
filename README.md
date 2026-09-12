@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.14.0-ff69b4" alt="Version 0.14.0">
+    <img src="https://img.shields.io/badge/Version-0.14.1-ff69b4" alt="Version 0.14.1">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -115,6 +115,8 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 
 ### 群聊总结
 
+发送 `昨日小猪` 时，昨天没有记录会自动免费补抽一次，计入收藏与 EX 成长。只能补昨天，重复查看返回同一结果。补签卡注明“补签”，不展示昨日互动，不补发预约、加餐或保护，不重算日报。今天已抽的小猪保持原有抽取记录。Cloud 模式需要服务端支持 `/v1/daily-rolls/makeup`；旧 Cloud 仍可查看已有昨日记录，缺少记录时提示补签尚不可用。
+
 `本周小猪` 会生成个人一周总结长图。
 
 群主或管理员还可以通过 `小猪日报 开启` 为当前群开启猪圈日报；默认关闭，不会在安装后自动向群里推送。
@@ -160,7 +162,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | 指令 | 说明 |
 | --- | --- |
 | `今日小猪` / `今天是什么小猪` | 抽取或查看今天的小猪。 |
-| `昨日小猪` | 用回顾卡片查看昨天真实抽到的小猪、成长结果和与你有关的关键经历。 |
+| `昨日小猪` | 查看昨日回顾；昨天未抽猪时自动免费补签，卡片标记“补签”。 |
 | `明日小猪` | 查看明日预测。 |
 | `随机小猪 [数量]` | 从 PigHub 随机获取猪猪图，最多 10 张。 |
 | `找猪 关键词` / `搜猪 关键词` | 按关键词搜索 PigHub 猪猪图。 |

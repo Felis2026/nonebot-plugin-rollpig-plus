@@ -8,12 +8,15 @@ from nonebot.params import CommandArg
 from ..roll_flow import (
     RECORDED_PIG_RESOURCE_MISSING_TEXT,
     resolve_daily_pig,
+    ensure_yesterday_pig,
 )
 from ..resource_manager import PIG_LIST, sync_rollpig_resources
 from ..helpers import send_rendered_pig
 from ..reservation_flow import deliver_newly_ready_reservations
 from ..pighub_service import build_pighub_image_url, pighub_service
-from ..texts import TOMORROW_TEXTS
+from ..texts import TOMORROW_TEXTS, YESTERDAY_MAKEUP_TEXTS
+from ..runtime import rollpig_date_str
+from ..store.cloud import CloudMakeupUnsupportedError
 from ..yesterday_card_renderer import render_yesterday_recap_card
 from ..yesterday_recap import (
     YesterdayPigResourceMissingError,
@@ -252,8 +255,19 @@ async def _handle_yesterday_pig(event: Event) -> None:
 
     user_id = str(event.user_id)
     group_id = get_event_group_id(event)
+    makeup_created = False
     try:
-        recap = await build_yesterday_recap(user_id, group_id=group_id)
+        target_date = rollpig_date_str(-1)
+        recap = await build_yesterday_recap(user_id, group_id=group_id, date_str=target_date)
+        if recap is None:
+            if not PIG_LIST:
+                await cmd_yest.finish(MessageSegment.reply(event.message_id) + "小猪资源暂时不可用，无法补签。")
+                return
+            makeup_created = await ensure_yesterday_pig(user_id, target_date)
+            recap = await build_yesterday_recap(user_id, group_id=group_id, date_str=target_date)
+    except CloudMakeupUnsupportedError as error:
+        await cmd_yest.finish(MessageSegment.reply(event.message_id) + str(error))
+        return
     except YesterdayPigResourceMissingError as error:
         logger.warning(f"rollpig 昨日身份无法解析: user={user_id} pig_id={error}")
         await cmd_yest.finish(
@@ -263,7 +277,7 @@ async def _handle_yesterday_pig(event: Event) -> None:
         return
 
     if recap is None:
-        await cmd_yest.finish(MessageSegment.reply(event.message_id) + "你昨天没抽猪。")
+        await cmd_yest.finish(MessageSegment.reply(event.message_id) + "补签结果暂时无法读取，请稍后再试。")
         return
 
     try:
@@ -286,10 +300,10 @@ async def _handle_yesterday_pig(event: Event) -> None:
         f"size={render_result.width}x{render_result.height} "
         f"bytes={len(render_result.data)} image_fallback={render_result.used_fallback_image}"
     )
-    await cmd_yest.finish(
-        MessageSegment.reply(event.message_id)
-        + MessageSegment.image(render_result.data)
-    )
+    message = MessageSegment.reply(event.message_id)
+    if makeup_created:
+        message += MessageSegment.text(random.choice(YESTERDAY_MAKEUP_TEXTS))
+    await cmd_yest.finish(message + MessageSegment.image(render_result.data))
 
 
 @cmd_yest.handle()

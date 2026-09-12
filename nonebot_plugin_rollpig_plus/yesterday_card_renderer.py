@@ -58,7 +58,7 @@ YESTERDAY_CARD_DEFAULT_BODY_FONT = PACKAGE_RESOURCE_DIR / "fonts" / "SourceHanSa
 YESTERDAY_CARD_WIDTH = 720
 YESTERDAY_CARD_SUPERSAMPLE = 3
 YESTERDAY_CARD_DISK_CACHE_MAX_BYTES = 64 * 1024 * 1024
-YESTERDAY_CARD_CACHE_VERSION = 2
+YESTERDAY_CARD_CACHE_VERSION = 3
 YESTERDAY_CARD_CACHE_MAGIC = b"ROLLPIG-YESTERDAY-CACHE-V2\n"
 YESTERDAY_CARD_CACHE_HEADER_MAX_BYTES = 4096
 YESTERDAY_CARD_CACHE_DIR = localstore.get_plugin_cache_dir() / "yesterday_cards"
@@ -1744,6 +1744,14 @@ def build_yesterday_card_data(
     )
 
     sections: list[InfoSection] = []
+    if recap.roll.is_makeup and (recap.pig_description or recap.pig_analysis):
+        sections.append(
+            InfoSection(
+                kind="summary",
+                title=recap.pig_description or "小猪介绍",
+                body=(TextSpan(recap.pig_analysis, BODY_INK),),
+            )
+        )
     if recap.experiences:
         highlight_title = "昨日高光" if recap.scope == "group" else "昨日高光 · 跨群"
         sections.append(
@@ -1771,9 +1779,9 @@ def build_yesterday_card_data(
         )
 
     return CardData(
-        title="昨日小猪",
+        title="昨日小猪 · 补签" if recap.roll.is_makeup else "昨日小猪",
         date=_format_recap_date(recap.date_str),
-        role_prefix="昨天你是 ",
+        role_prefix="补签抽到 " if recap.roll.is_makeup else "昨天你是 ",
         role=f"【{recap.pig_name}】",
         stats=stats,
         sections=tuple(sections),
