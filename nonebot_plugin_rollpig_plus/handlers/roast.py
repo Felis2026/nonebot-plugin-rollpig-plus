@@ -515,7 +515,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
         return
 
     # 正常概率判定
-    intro = random.choice(RANDOM_ROAST_INTRO_TEXTS).format(target=target_name) + "\n\n"
+    intro = random.choice(RANDOM_ROAST_INTRO_TEXTS).format(target=target_name) + "\n"
     try:
         outcome = await build_member_roast_outcome(
             attacker_pig=attacker_pig,

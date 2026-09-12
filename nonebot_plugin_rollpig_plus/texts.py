@@ -3,6 +3,13 @@
 # 若需修改文案风格或新增变体，直接在对应列表中追加即可
 
 # --- 明日小猪随机文案 ---
+YESTERDAY_MAKEUP_TEXTS = (
+    "昨天没领的小猪，今天给你补上。",
+    "昨天漏了一只猪？现在领走。",
+    "昨天的猪还没领呢，给你补抽一只。",
+    "猪圈查到一笔漏签，补发小猪一头。",
+)
+
 TOMORROW_TEXTS = [
     "天机不可泄露，但我闻到了一股红烧味……",
     "明日运势：大概率是一只特立独行的猪。",
@@ -69,10 +76,10 @@ DAILY_ROLL_NEW_PIG_TEXTS = [
 
 DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS = [
     "你又抽到了【{pig}】｜EX Lv. {old_level} → {new_level}｜下次遇见新猪的机会悄悄升温。",
-    "重复命中【{pig}】｜EX Lv. {old_level} → {new_level}｜这只猪越来越熟练了。",
+    "重复命中【{pig}】｜EX Lv. {old_level} → {new_level}｜这次重复也算有点收获。",
     "【{pig}】今天又来报到｜EX Lv. {old_level} → {new_level}｜新猪气息也更近了一点。",
     "又是【{pig}】！不过它变强了｜EX Lv. {old_level} → {new_level}｜下一抽更值得期待。",
-    "【{pig}】熟练度上升｜EX Lv. {old_level} → {new_level}｜猪圈的风向开始变化。",
+    "【{pig}】又往上拱了一级｜EX Lv. {old_level} → {new_level}｜猪圈的风向开始变化。",
     "重复也不是白重复：【{pig}】EX Lv. {old_level} → {new_level}｜新猪概率正在抬头。",
     "今天和【{pig}】很有缘｜EX Lv. {old_level} → {new_level}｜下一次或许会有新朋友。",
     "【{pig}】再次出现，并且更会营业了｜EX Lv. {old_level} → {new_level}｜保底小火苗点起来了。",
@@ -99,7 +106,7 @@ DAILY_ROLL_VARIANT_LEVEL_UP_TEXTS = {
         "重复命中【{pig}】｜EX Lv. {old_level} → {new_level}｜今天的它看起来有些不一样。",
         "【{pig}】今天又来报到｜EX Lv. {old_level} → {new_level}｜这次还换了一副新模样。",
         "又是【{pig}】！不过它变强了｜EX Lv. {old_level} → {new_level}｜成长已经写在了新的模样上。",
-        "【{pig}】熟练度上升｜EX Lv. {old_level} → {new_level}｜它的样子也跟着发生了变化。",
+        "【{pig}】迎来新变化｜EX Lv. {old_level} → {new_level}｜这次还换了一副新模样。",
         "重复也不是白重复：【{pig}】EX Lv. {old_level} → {new_level}｜猪圈为它记录下了一副新模样。",
         "今天和【{pig}】很有缘｜EX Lv. {old_level} → {new_level}｜这次相遇似乎多了一点新鲜感。",
         "【{pig}】再次出现，并且更会营业了｜EX Lv. {old_level} → {new_level}｜今天还换了身新行头。",
@@ -111,7 +118,7 @@ DAILY_ROLL_VARIANT_LEVEL_UP_TEXTS = {
         "重复命中【{pig}】｜EX Lv. {old_level} → {new_level}｜你对它的了解又深了一层。",
         "【{pig}】今天又来报到｜EX Lv. {old_level} → {new_level}｜猪圈里也多了一段关于它的新记录。",
         "又是【{pig}】！不过它变强了｜EX Lv. {old_level} → {new_level}｜它似乎有了些新的话想说。",
-        "【{pig}】熟练度上升｜EX Lv. {old_level} → {new_level}｜它的成长故事有了新的篇章。",
+        "【{pig}】又长大了一点｜EX Lv. {old_level} → {new_level}｜关于它的新故事也翻开了一页。",
         "重复也不是白重复：【{pig}】EX Lv. {old_level} → {new_level}｜这次还带来了一段新的故事。",
         "今天和【{pig}】很有缘｜EX Lv. {old_level} → {new_level}｜今天又听见了关于它的新故事。",
         "【{pig}】再次出现，并且更会营业了｜EX Lv. {old_level} → {new_level}｜关于它的记录也丰富了一些。",

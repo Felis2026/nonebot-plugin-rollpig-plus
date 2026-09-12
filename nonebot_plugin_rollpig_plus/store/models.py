@@ -93,6 +93,7 @@ class DailyRollSnapshot:
     resolved_image_name: str = ""
     unlocked_variant_levels: tuple[int, ...] = ()
     unlocked_variant_fields: frozenset[str] = frozenset()
+    is_makeup: bool = False
 
     @property
     def outcome_available(self) -> bool:

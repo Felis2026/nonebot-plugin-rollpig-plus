@@ -270,6 +270,41 @@ class StrictCardRendererTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTes
         with Image.open(BytesIO(result.data)) as rendered:
             self.assertEqual(rendered.getpixel((400, 200)), (100, 180, 255))
 
+    async def test_card_message_avoids_explicit_line_breaks_around_image(self) -> None:
+        render_result = PigCardRenderResult(
+            data=b"image",
+            image_format="PNG",
+            renderer="pillow",
+            analysis_font_size=28,
+            analysis_lines=2,
+            emoji_enabled=True,
+        )
+        fake_matcher = SimpleNamespace(finish=AsyncMock())
+        fake_event = SimpleNamespace(message_id=123)
+
+        with (
+            patch.object(helpers_module, "pig_resource_manager", self.manager),
+            patch.object(
+                helpers_module,
+                "render_pig_card_image",
+                new=AsyncMock(return_value=render_result),
+            ),
+            patch.object(helpers_module, "log_perf"),
+        ):
+            await helpers_module.send_rendered_pig(
+                fake_matcher,
+                fake_event,
+                self.manager.pig_map["pig"],
+                extra_text="随机烤前缀\n\n",
+                trailing_text="\n加餐结果",
+                cache_final_card=False,
+            )
+
+        message = fake_matcher.finish.await_args.args[0]
+        self.assertEqual([segment.type for segment in message], ["reply", "text", "image", "text"])
+        self.assertEqual(message[1].data["text"], "随机烤前缀")
+        self.assertEqual(message[3].data["text"], "加餐结果")
+
 
 class ExVariantResourceTests(ExVariantFixtureMixin, unittest.TestCase):
     def setUp(self) -> None:

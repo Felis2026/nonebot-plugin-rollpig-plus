@@ -312,11 +312,13 @@ async def send_rendered_pig(
         extra_text = ""
 
     msg = MessageSegment.reply(event.message_id)
+    # 部分 QQ 客户端会把图片两侧的显式换行渲染成整行留白；文字与图片直接
+    # 使用相邻消息段，纯文本内部原有的换行仍保持不变。
     if extra_text:
-        msg += extra_text + "\n"
+        msg += extra_text.rstrip("\r\n")
     msg += MessageSegment.image(render_result.data)
     if trailing_text:
-        msg += "\n" + trailing_text
+        msg += trailing_text.lstrip("\r\n")
     ready_to_send_at = time.perf_counter()
 
     log_perf(

@@ -87,6 +87,8 @@ class YesterdayRecap:
     summary: YesterdaySummary | None
     aftereffect_text: str
     events_available: bool
+    pig_description: str = ""
+    pig_analysis: str = ""
 
 
 @dataclass(frozen=True)
@@ -689,6 +691,19 @@ async def build_yesterday_recap(
         pig_name = roll.pig_id
         image_path = None
         base_image_path = None
+
+    if roll.is_makeup:
+        # 补签展示当前资源在本次成长等级下的介绍，不虚构昨日互动。
+        outcome_text = build_yesterday_outcome_text(roll)
+        return YesterdayRecap(
+            date_str=target_date, scope=scope, group_id=normalized_group_id,
+            roll=roll, pig_name=pig_name, image_path=image_path,
+            fallback_image_path=base_image_path, resource_version=roll.resource_version,
+            outcome_text=outcome_text, footprints=(),
+            experiences=(), summary=None, aftereffect_text="", events_available=False,
+            pig_description=str(appearance.pig_data.get("description") or "") if pig else "",
+            pig_analysis=str(appearance.pig_data.get("analysis") or "") if pig else "",
+        )
 
     event_query = await recap_store.query_daily_events(
         date_str=target_date,

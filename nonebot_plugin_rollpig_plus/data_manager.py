@@ -820,6 +820,7 @@ class PigDataManager:
         )
         identity_snapshot = DailyRollSnapshot(
             date_str=date_str, pig_id=pig_id, daily_feed_result=daily_feed,
+            is_makeup=isinstance(raw, dict) and raw.get("is_makeup") is True,
         )
         if not isinstance(raw, dict) or str(raw.get("pig_id") or "") != pig_id:
             if raw is not None:
@@ -872,6 +873,7 @@ class PigDataManager:
             resolved_image_name=str(raw.get("resolved_image_name") or ""),
             unlocked_variant_levels=unlocked_levels,
             unlocked_variant_fields=unlocked_fields,
+            is_makeup=raw.get("is_makeup") is True,
         )
         if not snapshot.outcome_available:
             logger.warning(
@@ -887,6 +889,7 @@ class PigDataManager:
 
         return {
             "pig_id": snapshot.pig_id,
+            "is_makeup": snapshot.is_makeup,
             "is_new_pig": snapshot.is_new_pig,
             "previous_copies": snapshot.previous_copies,
             "copies_after_roll": snapshot.copies_after_roll,
@@ -978,6 +981,7 @@ class PigDataManager:
                 raise ValueError("旧抽取记录不支持补全历史快照")
             if (
                 existing.is_new_pig,
+                existing.is_makeup,
                 existing.previous_copies,
                 existing.copies_after_roll,
                 existing.previous_expert_level,
@@ -985,6 +989,7 @@ class PigDataManager:
                 existing.collection_size_after_roll,
             ) != (
                 snapshot.is_new_pig,
+                snapshot.is_makeup,
                 snapshot.previous_copies,
                 snapshot.copies_after_roll,
                 snapshot.previous_expert_level,
@@ -1201,9 +1206,15 @@ class PigDataManager:
         proposed_pig_id: str,
         date_str: Optional[str] = None,
         group_id: str = "",
+        *,
+        makeup: bool = False,
     ) -> DailyRollResult:
         target_date = date_str or rollpig_date_str()
         async with self._lock:
+            if makeup:
+                if target_date != rollpig_date_str(-1):
+                    raise ValueError("只能补签昨天的小猪")
+                group_id = ""
             history = self.data.setdefault("history", {})
             day_history = history.setdefault(target_date, {})
             existing_pig_id = day_history.get(user_id)
@@ -1224,6 +1235,13 @@ class PigDataManager:
                 date_str=target_date,
                 result=result,
             )
+
+            if makeup:
+                snapshot = replace(result.snapshot, is_makeup=True)
+                self.data["daily_roll_snapshots"][target_date][user_id]["is_makeup"] = True
+                result = replace(result, snapshot=snapshot)
+                await self._atomic_save()
+                return result
 
             # 预约只在 DailyRoll 首次创建的同一临界区内转为 ready；重复查看不会二次激活。
             for reservation in self.data.setdefault("roast_reservations", {}).values():
