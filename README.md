@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.14.1-ff69b4" alt="Version 0.14.1">
+    <img src="https://img.shields.io/badge/Version-0.14.2-ff69b4" alt="Version 0.14.2">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -41,7 +41,7 @@
 | **今日小猪** | 每天抽取一只固定小猪；支持昨日回顾、明日预测、随机小猪和 PigHub 找猪。 |
 | **猪圈成长** | 收藏小猪、查看图片图鉴；重复抽取和每日一次烤猪加餐会提升 EX Lv.，并逐步触发新猪保底。 |
 | **EX 差分** | 资源包可为同一只猪提供不同 EX 等级的立绘和文案，不新增图鉴 ID，也不破坏已有成长数据。 |
-| **烤猪互动** | 今日烤猪、烤群友、随机烤猪、加急生火、预约烤猪与烤箱补货。 |
+| **烤猪互动** | 今日烤猪、烤群友、随机烤猪、加急生火、预约烤猪与烤箱续火。 |
 | **群聊总结** | 可以为指定群开启每日小猪数据总结。 |
 | **云端资源** | 公有小猪、GIF Overlay、EX 差分和共享烤猪文案可在线同步；失败时保留当前可用资源。 |
 | **多实例同步** | 默认单机本地运行；可接入 RollPig Cloud，实现多群、跨 Bot 同步成长与互动状态。 |
@@ -145,7 +145,9 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 - 普通预约成功时，最终参与者分别尝试获得当天一次烤猪加餐；强制预约不触发。
 - Local 与 Cloud 后端均支持预约流程。
 
-#### 烤箱补货
+#### 烤箱续火
+
+- 发送 `烤箱续火` 发起投票；`烤箱补货` 等旧指令继续可用。普通烧烤次数耗尽时会提示使用此功能，不恢复加急生火次数。
 
 - 本群当日有效活跃用户均可发起；未参与当天 RollPig 的成员不能创建新申请。
 - 投票持续 `10` 分钟。
@@ -178,7 +180,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪；目标未抽猪时自动进入预约流程。 |
 | `随机烤猪` | 从当前群已有记录中随机选择目标烤。 |
 | `加急生火 @目标` | 使用加急模式烤群友。 |
-| `烤箱补货` | 当日活跃用户发起群体烧烤次数补货投票。 |
+| `烤箱续火` | 当日活跃用户发起群体烧烤次数补货投票。 |
 | `小猪日报 状态` | 查看当前群日报状态。 |
 | `小猪日报 开启` / `小猪日报 关闭` | 群主或管理员控制当前群日报。 |
 | `同步小猪资源` | SUPERUSER 手动触发资源同步。 |
@@ -457,7 +459,7 @@ Cloud 主要负责把需要一致性的成长与互动状态放到统一后端�
 - 抽猪规则：`roll_flow.py`
 - 烤群友：`roast_flow.py`
 - 预约：`reservation_flow.py` / `reservation_delivery.py`
-- 烤箱补货：`roast_refill.py`
+- 烤箱续火：`roast_refill.py`
 - 资源同步：`resource_manager.py`
 - PigHub：`pighub_service.py`
 - AI / 共享烤猪文案：`roast_manager.py`

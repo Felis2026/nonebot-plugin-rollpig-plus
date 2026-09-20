@@ -137,7 +137,7 @@ async def add_refill_reaction(bot: Bot, message_id: str) -> bool:
         )
         return True
     except Exception as error:
-        logger.warning(f"rollpig 烤箱补货自动添加续标识失败: message={message_id} error={error}")
+        logger.warning(f"rollpig 烤箱续火自动添加续标识失败: message={message_id} error={error}")
         return False
 
 
@@ -496,7 +496,7 @@ async def process_refill_notice(bot: Bot, event: Any) -> None:
         # reaction 原始人数尚未达到门槛时必然无法通过，跳过昂贵的群成员与日活读取。
         await reconcile_refill_request(bot, request, fast_below_threshold=True)
     except RoastRefillReactionError as error:
-        logger.warning(f"rollpig 烤箱补货验票失败: request={request.request_id} error={error}")
+        logger.warning(f"rollpig 烤箱续火验票失败: request={request.request_id} error={error}")
         if error.message_missing or error.capability_unsupported:
             reason = "message_missing" if error.message_missing else "reaction_unsupported"
             await store.fail_group_roast_refill(request.request_id, message_id, reason)

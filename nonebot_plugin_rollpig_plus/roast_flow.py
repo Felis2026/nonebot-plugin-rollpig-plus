@@ -253,7 +253,10 @@ def format_cooldown_message(remaining_seconds: int) -> str:
     minutes, seconds = divmod(remaining, 60)
     hours, minutes = divmod(minutes, 60)
     time_str = f"{hours}小时{minutes}分" if hours > 0 else f"{minutes}分{seconds}秒"
-    return f"烧烤充能恢复中！还需要 {time_str} 恢复 1 次。"
+    return (
+        f"烧烤充能恢复中！还需要 {time_str} 恢复 1 次。\n"
+        "等不及了？发送「烤箱续火」，喊群友一起添把火。"
+    )
 
 
 # ================================ 烤猪拦截文案 ================================ #

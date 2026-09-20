@@ -82,6 +82,16 @@ async def _matches(matcher, message: Message) -> bool:
 
 
 class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refill_primary_command_and_legacy_aliases_keep_exact_matching(self):
+        for command in ("烤箱续火", "烤箱补货", "重置烤猪次数", "恢复烧烤配额", "申请烤箱补给", "重置烧烤次数"):
+            self.assertTrue(await _matches(refill_handler.cmd_roast_refill, Message(f"/{command}")))
+            self.assertFalse(await _matches(refill_handler.cmd_roast_refill, Message(f"/{command}测试")))
+
+    def test_normal_cooldown_guides_refill_without_blank_lines(self):
+        message = roast_handler.format_cooldown_message(12000)
+        self.assertEqual(message, "烧烤充能恢复中！还需要 3小时20分 恢复 1 次。\n等不及了？发送「烤箱续火」，喊群友一起添把火。")
+        self.assertNotIn("烤箱续火", roast_handler.pick_force_limit_text("甲", "乙"))
+
     def test_reply_join_accepts_only_exact_words_and_own_bot_reply(self):
         def event(message, sender="1000", has_reply=True):
             return SimpleNamespace(

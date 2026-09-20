@@ -43,8 +43,8 @@ from ..texts import (
 
 
 cmd_roast_refill = on_command(
-    "烤箱补货",
-    aliases={"重置烤猪次数", "恢复烧烤配额", "申请烤箱补给", "重置烧烤次数"},
+    "烤箱续火",
+    aliases={"烤箱补货", "重置烤猪次数", "恢复烧烤配额", "申请烤箱补给", "重置烧烤次数"},
     rule=command_has_no_argument,
     block=True,
 )
@@ -66,7 +66,7 @@ async def _fail_unusable_request(request_id: str, message_id: str, reason: str) 
     try:
         await store.fail_group_roast_refill(request_id, message_id, reason)
     except Exception as error:
-        logger.warning(f"rollpig 烤箱补货失败状态写入异常: request={request_id} error={error}")
+        logger.warning(f"rollpig 烤箱续火失败状态写入异常: request={request_id} error={error}")
 
 
 async def _bind_refill_message_with_retry(
@@ -82,13 +82,13 @@ async def _bind_refill_message_with_retry(
         except Exception as error:
             if attempt >= len(ROAST_REFILL_BIND_RETRY_DELAYS):
                 logger.error(
-                    f"rollpig 烤箱补货消息绑定重试耗尽: "
+                    f"rollpig 烤箱续火消息绑定重试耗尽: "
                     f"request={request_id} message={message_id} error={error}"
                 )
                 return None
             delay = ROAST_REFILL_BIND_RETRY_DELAYS[attempt]
             logger.warning(
-                f"rollpig 烤箱补货消息绑定临时失败，准备重试: "
+                f"rollpig 烤箱续火消息绑定临时失败，准备重试: "
                 f"request={request_id} message={message_id} "
                 f"attempt={attempt + 1}/{total_attempts} error={error}"
             )
@@ -106,7 +106,7 @@ async def _handle_post_send_probe_error(
     if not error.message_missing and not error.capability_unsupported:
         # 临时网络异常不终止投票，留待后续 Notice 或命令重试验票。
         logger.warning(
-            f"rollpig 烤箱补货发起后验票临时失败，申请保持有效: "
+            f"rollpig 烤箱续火发起后验票临时失败，申请保持有效: "
             f"request={request.request_id} error={error}"
         )
         return False
@@ -118,7 +118,7 @@ async def _handle_post_send_probe_error(
     else:
         text = pick_refill_unsupported_text()
     logger.warning(
-        f"rollpig 烤箱补货投票无法继续: "
+        f"rollpig 烤箱续火投票无法继续: "
         f"request={request.request_id} reason={reason} error={error}"
     )
     await bot.send_group_msg(group_id=int(request.group_id), message=text)
@@ -185,7 +185,7 @@ async def _describe_existing_refill(
             if error.message_missing:
                 return "原补货投票消息已经失效，本轮申请已停止，请重新发起。"
             return pick_refill_unsupported_text()
-        logger.warning(f"rollpig 烤箱补货恢复验票失败: request={request.request_id} error={error}")
+        logger.warning(f"rollpig 烤箱续火恢复验票失败: request={request.request_id} error={error}")
         return "暂时没能读取当前票数，申请仍然有效，请稍后再试。"
 
     if result.completed:
@@ -201,7 +201,7 @@ async def _describe_existing_refill(
     if result.status == "group_disabled":
         return "本群 RollPig 当前已关闭，补货申请暂不结算。"
     if result.status == "succeeded":
-        return "本轮烤箱补货已经完成。"
+        return "本轮烤箱续火已经完成。"
     if result.status in {"expired", "failed"}:
         return "上一轮补货申请已经结束，请重新发起。"
     return "补货申请状态刚刚发生变化，请稍后再试。"
@@ -212,7 +212,7 @@ async def _describe_existing_refill(
 @guard_store_errors(cmd_roast_refill)
 async def _(bot: Bot, event: Event):
     if not isinstance(event, GroupMessageEvent):
-        await cmd_roast_refill.finish("烤箱补货只能在群聊中发起。")
+        await cmd_roast_refill.finish("烤箱续火只能在群聊中发起。")
         return
     group_id = str(event.group_id)
     date_str = rollpig_date_str()
@@ -228,7 +228,7 @@ async def _(bot: Bot, event: Event):
     except CloudRoastRefillUnsupportedError:
         await cmd_roast_refill.finish(
             MessageSegment.reply(event.message_id)
-            + "当前 Cloud 版本尚未支持烤箱补货，请先升级 RollPig Cloud。其他功能不受影响。"
+            + "当前 Cloud 版本尚未支持烤箱续火，请先升级 RollPig Cloud。其他功能不受影响。"
         )
         return
 
@@ -245,7 +245,7 @@ async def _(bot: Bot, event: Event):
     try:
         eligibility = await get_refill_eligible_users(bot, group_id, date_str)
     except RoastRefillReactionError as error:
-        logger.warning(f"rollpig 烤箱补货群成员核对失败: group={group_id} error={error}")
+        logger.warning(f"rollpig 烤箱续火群成员核对失败: group={group_id} error={error}")
         await cmd_roast_refill.finish(
             MessageSegment.reply(event.message_id) + "暂时无法核对本群活跃小猪，请稍后再试。"
         )
@@ -278,7 +278,7 @@ async def _(bot: Bot, event: Event):
     except CloudRoastRefillUnsupportedError:
         await cmd_roast_refill.finish(
             MessageSegment.reply(event.message_id)
-            + "当前 Cloud 版本尚未支持烤箱补货，请先升级 RollPig Cloud。其他功能不受影响。"
+            + "当前 Cloud 版本尚未支持烤箱续火，请先升级 RollPig Cloud。其他功能不受影响。"
         )
         return
 
@@ -323,7 +323,7 @@ async def _(bot: Bot, event: Event):
         )
     except Exception as error:
         await _fail_unusable_request(request.request_id, "", "send_failed")
-        logger.warning(f"rollpig 烤箱补货投票消息发送失败: request={request.request_id} error={error}")
+        logger.warning(f"rollpig 烤箱续火投票消息发送失败: request={request.request_id} error={error}")
         await cmd_roast_refill.finish(MessageSegment.reply(event.message_id) + "补货投票消息发送失败，本轮没有扣改任何次数。")
         return
 
@@ -355,4 +355,4 @@ async def _(bot: Bot, event: NoticeEvent):
         return
     except Exception as error:
         # Notice 属于旁路事件，任何异常都不能影响其他插件的事件分发。
-        logger.warning(f"rollpig 烤箱补货 Notice 处理失败: error={error}")
+        logger.warning(f"rollpig 烤箱续火 Notice 处理失败: error={error}")
