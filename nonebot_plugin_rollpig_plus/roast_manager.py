@@ -234,7 +234,7 @@ def _resolve_deepseek_model(model: str, base_url: str, *, warn: bool = True) -> 
         if warn:
             logger.warning(
                 "检测到旧 DeepSeek 模型名 deepseek-chat，已自动兼容为 deepseek-v4-flash 非思考模式；"
-                "建议更新 rollpig_model 配置。"
+                "建议更新 rollpig_ai_model 配置。"
             )
         return "deepseek-v4-flash", {"thinking": {"type": "disabled"}}
 
@@ -328,17 +328,25 @@ class RoastManager:
         self._ai_semaphore = asyncio.Semaphore(
             _clamp_int(active_config.rollpig_ai_concurrency, 4, 1, 6)
         )
+        # ================================ 兼容旧版 AI 配置 ================================ #
         # AI 只有在“开关开启 + key 存在”时才会启用。
-        self.ai_ready = bool(active_config.rollpig_ai_enabled and active_config.rollpig_deepseek_key)
+        # 新字段逐项优先；空字符串也是显式配置，不能重新启用旧 key。
+        ai_key = getattr(active_config, "rollpig_ai_api_key", None)
+        ai_base = getattr(active_config, "rollpig_ai_base_url", None)
+        ai_model = getattr(active_config, "rollpig_ai_model", None)
+        ai_key = active_config.rollpig_deepseek_key if ai_key is None else ai_key
+        ai_base = active_config.rollpig_deepseek_base if ai_base is None else ai_base
+        ai_model = active_config.rollpig_model if ai_model is None else ai_model
+        self.ai_ready = bool(active_config.rollpig_ai_enabled and ai_key)
         self.ai_model, self.ai_extra_body = _resolve_deepseek_model(
-            active_config.rollpig_model,
-            active_config.rollpig_deepseek_base,
+            ai_model,
+            ai_base,
             warn=self.ai_ready,
         )
         if self.ai_ready:
             self.client = AsyncOpenAI(
-                api_key=active_config.rollpig_deepseek_key,
-                base_url=active_config.rollpig_deepseek_base,
+                api_key=ai_key,
+                base_url=ai_base,
             )
 
     # ================================ 文案库持久化 ================================ #
@@ -1242,7 +1250,7 @@ class RoastManager:
             text = content.strip().strip('"').strip("'").replace("\n", "")
             return text[: self.ai_output_max_chars]
         except Exception as e:
-            logger.error(f"DeepSeek API 请求错误: {e}")
+            logger.error(f"AI API 请求错误: {e}")
             raise e
 
 roast_manager = RoastManager()

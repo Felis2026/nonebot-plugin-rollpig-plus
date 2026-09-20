@@ -45,7 +45,7 @@
 | **群聊总结** | 可以为指定群开启每日小猪数据总结。 |
 | **云端资源** | 公有小猪、GIF Overlay、EX 差分和共享烤猪文案可在线同步；失败时保留当前可用资源。 |
 | **多实例同步** | 默认单机本地运行；可接入 RollPig Cloud，实现多群、跨 Bot 同步成长与互动状态。 |
-| **可选 AI** | 不配置 AI 也能正常烤猪；开启后可使用 DeepSeek 生成更多文案，并与共享/本地文案共同使用。 |
+| **可选 AI** | 不配置 AI 也能正常烤猪；开启后可使用 OpenAI Chat Completions 兼容服务生成更多文案，并与共享/本地文案共同使用。 |
 
 RollPig Plus **不硬性要求接入 Cloud、 AI**。普通卡片与图鉴均使用 Pillow 渲染，默认配置即可运行基础功能。
 
@@ -344,7 +344,9 @@ fonts/LXGWWenKaiTC-Bold.ttf
 | 配置项 | 默认值 | 作用 |
 | --- | --- | --- |
 | `rollpig_ai_enabled` | `false` | 是否开启 AI 烤猪。 |
-| `rollpig_model` | `deepseek-v4-flash` | AI 模型名称。 |
+| `rollpig_ai_api_key` | `null` | AI 服务 API Key；未配置时读取旧 `rollpig_deepseek_key`。 |
+| `rollpig_ai_base_url` | `null` | OpenAI Chat Completions 兼容服务地址；未配置时读取旧 `rollpig_deepseek_base`，默认 `https://api.deepseek.com`。 |
+| `rollpig_ai_model` | `null` | 模型名称；未配置时读取旧 `rollpig_model`，默认 `deepseek-v4-flash`。 |
 | `rollpig_roast_cooldown_hours` | `8` | 普通烧烤恢复 1 次所需小时数。 |
 | `rollpig_roast_charge_max` | `2` | 普通烧烤最大储存次数。 |
 | `rollpig_storage_backend` | `local` | `local` / `cloud` 存储后端。 |
@@ -360,6 +362,8 @@ fonts/LXGWWenKaiTC-Bold.ttf
 | `rollpig_catalog_render_concurrency` | `2` | 图鉴并发绘制数；低内存部署可设为 `1`。 |
 
 更多参数和默认值以 [`rollpig_config.example.json`](rollpig_config.example.json) 及当前版本源码为准。
+
+AI 新旧字段可以混用，逐项以新字段为准；旧配置不必修改。只有 DeepSeek 官方地址会将旧模型名 `deepseek-chat` / `deepseek-reasoner` 转为对应的 V4 Flash 非思考 / 思考模式，其他服务的模型名原样传入，不附加 DeepSeek 专用参数。此处支持兼容接口，不直接支持其他厂商的原生协议。
 
 </details>
 

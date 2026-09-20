@@ -83,6 +83,10 @@ class Config(BaseModel):
 
     # --- AI 烤猪配置 ---
     rollpig_ai_enabled: bool = False  # 是否开启 AI 生成
+    # None 表示继承对应旧字段；不把默认地址或模型放进新字段，避免覆盖旧配置。
+    rollpig_ai_api_key: Optional[str] = None
+    rollpig_ai_base_url: Optional[str] = None
+    rollpig_ai_model: Optional[str] = None
     rollpig_deepseek_key: Optional[str] = None  # DeepSeek API Key
     rollpig_deepseek_base: str = "https://api.deepseek.com" # Base URL
     rollpig_model: str = "deepseek-v4-flash" # 模型名称

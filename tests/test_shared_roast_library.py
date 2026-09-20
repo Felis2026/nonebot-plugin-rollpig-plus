@@ -35,6 +35,32 @@ _extract_origin_feature = roast_manager_module._extract_origin_feature
 
 
 class SharedRoastLibraryTests(unittest.IsolatedAsyncioTestCase):
+    def test_generic_ai_config_preserves_legacy_and_third_party_models(self):
+        cases = (
+            ({"rollpig_deepseek_key": "old", "rollpig_model": "deepseek-chat"}, "old", "https://api.deepseek.com", "deepseek-v4-flash", {"thinking": {"type": "disabled"}}),
+            ({"rollpig_deepseek_key": "old", "rollpig_model": "deepseek-reasoner"}, "old", "https://api.deepseek.com", "deepseek-v4-flash", {"thinking": {"type": "enabled"}}),
+            ({"rollpig_deepseek_key": "old", "rollpig_ai_api_key": "new", "rollpig_ai_base_url": "https://example.com/v1", "rollpig_ai_model": "vendor/model"}, "new", "https://example.com/v1", "vendor/model", None),
+            ({"rollpig_deepseek_key": "old", "rollpig_ai_base_url": "https://example.com/v1", "rollpig_model": "deepseek-chat"}, "old", "https://example.com/v1", "deepseek-chat", None),
+        )
+        for config, key, base, model, extra in cases:
+            with self.subTest(config=config), patch.object(roast_manager_module, "AsyncOpenAI") as client:
+                manager = RoastManager(
+                    Config(rollpig_ai_enabled=True, **config),
+                    library_file=self.root / "library.json", sources_file=self.root / "sources.json",
+                    cache_dir=self.root / "cache",
+                )
+                client.assert_called_once_with(api_key=key, base_url=base)
+                self.assertEqual(manager.ai_model, model)
+                self.assertEqual(manager.ai_extra_body, extra)
+        with patch.object(roast_manager_module, "AsyncOpenAI") as client:
+            manager = RoastManager(
+                Config(rollpig_ai_enabled=True, rollpig_deepseek_key="old", rollpig_ai_api_key=""),
+                library_file=self.root / "library.json", sources_file=self.root / "sources.json",
+                cache_dir=self.root / "cache",
+            )
+            self.assertFalse(manager.ai_ready)
+            client.assert_not_called()
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)

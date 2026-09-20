@@ -1,9 +1,9 @@
 {
   "rollpig": {
     "rollpig_ai_enabled": false,
-    "rollpig_deepseek_key": null,
-    "rollpig_deepseek_base": "https://api.deepseek.com",
-    "rollpig_model": "deepseek-v4-flash",
+    "rollpig_ai_api_key": null,
+    "rollpig_ai_base_url": null,
+    "rollpig_ai_model": null,
     "rollpig_ai_timeout": 20.0,
     "rollpig_ai_concurrency": 4,
     "rollpig_ai_max_tokens": 4096,
