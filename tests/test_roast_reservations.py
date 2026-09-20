@@ -109,21 +109,25 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(roast_handler._is_reservation_reply(event(message)))
 
     async def test_success_notice_binds_actual_bot_response_without_adding_lines(self):
-        matcher = SimpleNamespace(send=AsyncMock(return_value={"message_id": 900}), finish=AsyncMock())
         event = SimpleNamespace(message_id=12, self_id=1000, group_id=100)
         preparation = SimpleNamespace(status="reservation_joined", reservation=SimpleNamespace(
             reservation_id="reservation", date_str="2026-08-07", participant_count=2,
         ))
-        with patch.object(roast_handler, "store") as store:
-            store.bind_roast_reservation_message = AsyncMock(return_value=True)
-            await roast_handler._send_reservation_notice(matcher, event, preparation, attacker_name="甲", target_name="乙")
-            store.bind_roast_reservation_message.assert_awaited_once_with(
-                reservation_id="reservation", bot_id="1000", group_id="100", message_id="900", date_str="2026-08-07",
-            )
-        matcher.finish.assert_awaited_once_with()
-        message = matcher.send.await_args.args[0]
-        self.assertEqual(message[0].type, "reply")
-        self.assertFalse(str(message[1]).startswith("\n"))
+        for result in ({"message_id": 900}, 900, "900", None, {}, ""):
+            with self.subTest(result=result), patch.object(roast_handler, "store") as store:
+                matcher = SimpleNamespace(send=AsyncMock(return_value=result), finish=AsyncMock())
+                store.bind_roast_reservation_message = AsyncMock(return_value=True)
+                await roast_handler._send_reservation_notice(matcher, event, preparation, attacker_name="甲", target_name="乙")
+                if result:
+                    store.bind_roast_reservation_message.assert_awaited_once_with(
+                        reservation_id="reservation", bot_id="1000", group_id="100", message_id="900", date_str="2026-08-07",
+                    )
+                else:
+                    store.bind_roast_reservation_message.assert_not_awaited()
+                matcher.finish.assert_awaited_once_with()
+                message = matcher.send.await_args.args[0]
+                self.assertEqual(message[0].type, "reply")
+                self.assertFalse(str(message[1]).startswith("\n"))
 
     async def test_old_cloud_does_not_break_success_notice(self):
         matcher = SimpleNamespace(send=AsyncMock(return_value={"message_id": 900}), finish=AsyncMock())
@@ -298,8 +302,13 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         joined = await self.manager.join_roast_reservation_by_message(attacker_id="b", attacker_name="B", **binding)
         self.assertEqual(joined.status, "reservation_joined")
         self.assertEqual(joined.reservation.participant_count, 2)
+        self.assertEqual(self.manager.data["group_rolls"]["2026-08-07"]["100"]["b"], "pig-b")
+        seen_at = self.manager.data["group_roll_seen_at"]["2026-08-07"]["100"]["b"]
+        self.manager = PigDataManager()
+        self.assertEqual(self.manager.data["group_rolls"]["2026-08-07"]["100"]["b"], "pig-b")
         repeated = await self.manager.join_roast_reservation_by_message(attacker_id="b", attacker_name="B", **binding)
         self.assertEqual(repeated.status, "already_joined")
+        self.assertEqual(self.manager.data["group_roll_seen_at"]["2026-08-07"]["100"]["b"], seen_at)
         await self.manager.bind_roast_reservation_message(
             reservation_id=joined.reservation.reservation_id, **{**binding, "message_id": "901"},
         )

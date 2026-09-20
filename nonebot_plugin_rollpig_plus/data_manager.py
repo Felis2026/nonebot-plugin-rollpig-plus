@@ -1326,7 +1326,8 @@ class PigDataManager:
         if len(participants) >= ROAST_RESERVATION_MAX_PARTICIPANTS:
             return RoastReservationPrepareResult("reservation_full", self._reservation_from_raw(raw))
         participants.append({"user_id": user_id, "display_name": name, "pig_id": pig_id})
-        self._mark_group_active_users_locked(raw["date_str"], raw["group_id"], [user_id])
+        # 回复加入也代表今日小猪在本群出现，必须与参与者名单一起落盘。
+        self._record_group_roll(raw["date_str"], raw["group_id"], user_id, pig_id)
         return RoastReservationPrepareResult("reservation_joined", self._reservation_from_raw(raw))
 
     async def prepare_roast_reservation(

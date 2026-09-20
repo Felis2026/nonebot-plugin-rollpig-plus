@@ -32,6 +32,7 @@ from ..helpers import (
 )
 from ..reservation_delivery import register_owned_reservation
 from ..reservation_flow import deliver_newly_ready_reservations
+from ..roast_refill import extract_message_id
 from ..store import store
 from ..store.cloud import CloudReservationUnsupportedError, CloudStoreError
 from ..data_manager import LocalStoreUnavailableError
@@ -91,8 +92,8 @@ async def _send_reservation_notice(matcher, event, preparation, *, attacker_name
         )
     )
     if preparation.reservation and preparation.status in {"reservation_created", "reservation_joined", "already_joined"}:
-        message_id = result.get("message_id") if isinstance(result, dict) else None
-        if message_id is not None:
+        message_id = extract_message_id(result)
+        if message_id:
             try:
                 bound = await store.bind_roast_reservation_message(
                     reservation_id=preparation.reservation.reservation_id,
