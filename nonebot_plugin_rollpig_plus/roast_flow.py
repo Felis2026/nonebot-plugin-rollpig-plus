@@ -67,6 +67,12 @@ def pick_reservation_prepare_text(
     """把预约准备状态转换为用户可见文案，handler 不直接拼业务文本。"""
 
     reservation = result.reservation
+    if result.status == "reservation_closed":
+        return "这场预约已经结束或过期，不能再加入了。"
+    if result.status == "attacker_unrolled":
+        return "先发送「今日小猪」领一只猪，再来加入预约。"
+    if result.status == "self_target":
+        return "这场预约烤的就是你，别往自己的烤架里添柴了。"
     if result.status == "reservation_created":
         return random.choice(ROAST_RESERVATION_CREATED_TEXTS).format(owner=attacker_name, target=target_name)
     if result.status == "reservation_joined":

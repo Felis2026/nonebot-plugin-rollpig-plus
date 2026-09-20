@@ -245,6 +245,12 @@ class LocalJsonStore(RollpigStore):
     async def prepare_roast_reservation(self, **kwargs) -> RoastReservationPrepareResult:
         return await self.manager.prepare_roast_reservation(**kwargs)
 
+    async def bind_roast_reservation_message(self, **kwargs) -> bool:
+        return await self.manager.bind_roast_reservation_message(**kwargs)
+
+    async def join_roast_reservation_by_message(self, **kwargs) -> RoastReservationPrepareResult:
+        return await self.manager.join_roast_reservation_by_message(**kwargs)
+
     async def claim_roast_reservations(
         self,
         delivery_bot_id: str,
