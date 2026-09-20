@@ -481,7 +481,8 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> ReservationDeliver
             message = await _prepare_reservation_message(outcome)
             feed_text = _build_reservation_feed_text(reservation)
             if feed_text:
-                message += MessageSegment.text("\n" + feed_text)
+                separator = "" if outcome.render_data else "\n"
+                message += MessageSegment.text(separator + feed_text)
 
             # 群开关可能在结果生成期间变化，真正发送前必须再次确认。
             if not is_group_rollpig_enabled(reservation.group_id):

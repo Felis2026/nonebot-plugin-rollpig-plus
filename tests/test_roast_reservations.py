@@ -1049,6 +1049,41 @@ class ReservationDeliveryRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_feed_text_does_not_add_newline_after_image(self):
+        for has_image in (True, False):
+            with self.subTest(has_image=has_image):
+                outcome = RoastOutcome(
+                    event_type="success",
+                    render_data={"id": "food"} if has_image else None,
+                    plain_text="预约成功",
+                )
+                reservation = self._reservation()
+                prepared = RoastReservation(**{
+                    **reservation.__dict__, "status": "prepared",
+                    "outcome_snapshot": reservation_flow._serialize_outcome(outcome),
+                })
+                bot = SimpleNamespace(send_group_msg=AsyncMock())
+                mocked_store = SimpleNamespace(
+                    claim_roast_reservations=AsyncMock(return_value=SimpleNamespace(reservations=(prepared,), has_owned=True)),
+                    mark_roast_reservation_sending=AsyncMock(return_value=prepared),
+                    complete_roast_reservation=AsyncMock(return_value=True),
+                )
+                message = MessageSegment.image(b"image") if has_image else MessageSegment.text("预约成功")
+                with (
+                    patch.object(reservation_flow, "store", mocked_store),
+                    patch.object(reservation_flow, "get_bots", return_value={"bot-1": bot}),
+                    patch.object(reservation_flow, "is_group_rollpig_enabled", return_value=True),
+                    patch.object(reservation_flow, "_prepare_reservation_message", new=AsyncMock(return_value=message)),
+                    patch.object(reservation_flow, "_build_reservation_feed_text", return_value="小猪加餐成功。"),
+                ):
+                    await reservation_flow.deliver_ready_reservations("bot-1")
+                sent = bot.send_group_msg.await_args.kwargs["message"]
+                if has_image:
+                    self.assertEqual([segment.type for segment in sent], ["image", "text"])
+                    self.assertEqual(sent[-1].data["text"], "小猪加餐成功。")
+                else:
+                    self.assertEqual(sent.extract_plain_text(), "预约成功\n小猪加餐成功。")
+
     def setUp(self) -> None:
         reservation_flow._resource_backoff_until.clear()
         reservation_flow._group_backoff.clear()
