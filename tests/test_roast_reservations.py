@@ -82,6 +82,90 @@ async def _matches(matcher, message: Message) -> bool:
 
 
 class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refill_primary_command_and_legacy_aliases_keep_exact_matching(self):
+        for command in ("烤箱续火", "烤箱补货", "重置烤猪次数", "恢复烧烤配额", "申请烤箱补给", "重置烧烤次数"):
+            self.assertTrue(await _matches(refill_handler.cmd_roast_refill, Message(f"/{command}")))
+            self.assertFalse(await _matches(refill_handler.cmd_roast_refill, Message(f"/{command}测试")))
+
+    def test_normal_cooldown_guides_refill_without_blank_lines(self):
+        message = roast_handler.format_cooldown_message(12000)
+        self.assertEqual(message, "烧烤充能恢复中！还需要 3小时20分 恢复 1 次。\n等不及了？发送「烤箱续火」，喊群友一起添把火。")
+        self.assertNotIn("烤箱续火", roast_handler.pick_force_limit_text("甲", "乙"))
+
+    def test_reply_join_accepts_only_exact_words_and_own_bot_reply(self):
+        def event(message, sender="1000", has_reply=True):
+            return SimpleNamespace(
+                self_id=1000,
+                reply=SimpleNamespace(sender=SimpleNamespace(user_id=sender)) if has_reply else None,
+                get_message=lambda: message,
+                get_plaintext=lambda: message.extract_plain_text(),
+            )
+        for phrase in ("加入", "加入预约", "加入烤猪"):
+            self.assertTrue(roast_handler._is_reservation_reply(event(Message(phrase))))
+            self.assertTrue(roast_handler._is_reservation_reply(event(MessageSegment.at(1000) + phrase)))
+            self.assertFalse(roast_handler._is_reservation_reply(event(Message(phrase), has_reply=False)))
+            self.assertFalse(roast_handler._is_reservation_reply(event(Message(phrase), sender="2000")))
+        for message in (Message("加入预约吧"), Message("加入 预约"), MessageSegment.at(2000) + "加入", Message("加入") + MessageSegment.image("file:///pig.png")):
+            self.assertFalse(roast_handler._is_reservation_reply(event(message)))
+
+    async def test_success_notice_binds_actual_bot_response_without_adding_lines(self):
+        event = SimpleNamespace(message_id=12, self_id=1000, group_id=100)
+        preparation = SimpleNamespace(status="reservation_joined", reservation=SimpleNamespace(
+            reservation_id="reservation", date_str="2026-08-07", participant_count=2,
+        ))
+        for result in ({"message_id": 900}, 900, "900", None, {}, ""):
+            with self.subTest(result=result), patch.object(roast_handler, "store") as store:
+                matcher = SimpleNamespace(send=AsyncMock(return_value=result), finish=AsyncMock())
+                store.bind_roast_reservation_message = AsyncMock(return_value=True)
+                await roast_handler._send_reservation_notice(matcher, event, preparation, attacker_name="甲", target_name="乙")
+                if result:
+                    store.bind_roast_reservation_message.assert_awaited_once_with(
+                        reservation_id="reservation", bot_id="1000", group_id="100", message_id="900", date_str="2026-08-07",
+                    )
+                else:
+                    store.bind_roast_reservation_message.assert_not_awaited()
+                matcher.finish.assert_awaited_once_with()
+                message = matcher.send.await_args.args[0]
+                self.assertEqual(message[0].type, "reply")
+                self.assertFalse(str(message[1]).startswith("\n"))
+
+    async def test_old_cloud_does_not_break_success_notice(self):
+        matcher = SimpleNamespace(send=AsyncMock(return_value={"message_id": 900}), finish=AsyncMock())
+        event = SimpleNamespace(message_id=12, self_id=1000, group_id=100)
+        preparation = SimpleNamespace(status="reservation_created", reservation=SimpleNamespace(
+            reservation_id="reservation", date_str="2026-08-07",
+        ))
+        with patch.object(roast_handler, "store") as store:
+            store.bind_roast_reservation_message = AsyncMock(side_effect=CloudReservationUnsupportedError("old cloud"))
+            await roast_handler._send_reservation_notice(matcher, event, preparation, attacker_name="甲", target_name="乙")
+        matcher.send.assert_awaited_once()
+        matcher.finish.assert_awaited_once_with()
+
+    async def test_reply_handler_ignores_unrelated_notice_and_routes_known_reservation(self):
+        event = SimpleNamespace(self_id=1000, group_id=100, user_id=123, reply=SimpleNamespace(message_id=900))
+        handler = roast_handler._join_reservation_reply.__wrapped__.__wrapped__
+        for status in ("message_not_found", "reservation_closed", "reservation_joined"):
+            reservation = SimpleNamespace(target_name="目标", delivery_bot_id="1000") if status == "reservation_joined" else None
+            preparation = SimpleNamespace(status=status, reservation=reservation)
+            with (
+                patch.object(roast_handler, "store") as store,
+                patch.object(roast_handler, "get_event_user_name", return_value="参与者"),
+                patch.object(roast_handler, "register_owned_reservation"),
+                patch.object(roast_handler.cmd_join_reservation, "stop_propagation") as stop,
+                patch.object(roast_handler, "_send_reservation_notice", new_callable=AsyncMock) as send,
+            ):
+                store.join_roast_reservation_by_message = AsyncMock(return_value=preparation)
+                await handler(event)
+                store.join_roast_reservation_by_message.assert_awaited_once_with(
+                    bot_id="1000", group_id="100", message_id="900", attacker_id="123", attacker_name="参与者",
+                )
+                if status == "message_not_found":
+                    stop.assert_not_called()
+                    send.assert_not_awaited()
+                else:
+                    stop.assert_called_once()
+                    send.assert_awaited_once()
+
     def test_pigsty_summary_advertises_submission_command(self):
         summary = build_pigsty_growth_summary(
             "Felis",
@@ -207,6 +291,59 @@ class LocalBackupRotationTests(unittest.TestCase):
 
 
 class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_join_persists_and_notification_chain_keeps_same_reservation(self):
+        created = await self._prepare()
+        binding = dict(bot_id="bot-1", group_id="100", message_id="900", date_str="2026-08-07")
+        self.assertTrue(await self.manager.bind_roast_reservation_message(
+            reservation_id=created.reservation.reservation_id, **binding,
+        ))
+        await self.manager.get_or_create_today_pig("b", "pig-b", date_str="2026-08-07")
+        self.manager = PigDataManager()
+        joined = await self.manager.join_roast_reservation_by_message(attacker_id="b", attacker_name="B", **binding)
+        self.assertEqual(joined.status, "reservation_joined")
+        self.assertEqual(joined.reservation.participant_count, 2)
+        self.assertEqual(self.manager.data["group_rolls"]["2026-08-07"]["100"]["b"], "pig-b")
+        seen_at = self.manager.data["group_roll_seen_at"]["2026-08-07"]["100"]["b"]
+        self.manager = PigDataManager()
+        self.assertEqual(self.manager.data["group_rolls"]["2026-08-07"]["100"]["b"], "pig-b")
+        repeated = await self.manager.join_roast_reservation_by_message(attacker_id="b", attacker_name="B", **binding)
+        self.assertEqual(repeated.status, "already_joined")
+        self.assertEqual(self.manager.data["group_roll_seen_at"]["2026-08-07"]["100"]["b"], seen_at)
+        await self.manager.bind_roast_reservation_message(
+            reservation_id=joined.reservation.reservation_id, **{**binding, "message_id": "901"},
+        )
+        await self.manager.get_or_create_today_pig("c", "pig-c", date_str="2026-08-07")
+        chained = await self.manager.join_roast_reservation_by_message(
+            attacker_id="c", attacker_name="C", **{**binding, "message_id": "901"},
+        )
+        self.assertEqual(chained.reservation.reservation_id, created.reservation.reservation_id)
+        self.assertEqual(chained.reservation.participant_count, 3)
+        self.assertNotIn("b", self.manager.data["usage"])
+
+    async def test_reply_join_rejects_wrong_scope_expiry_unrolled_target_and_full(self):
+        created = await self._prepare()
+        binding = dict(bot_id="bot-1", group_id="100", message_id="900", date_str="2026-08-07")
+        await self.manager.bind_roast_reservation_message(reservation_id=created.reservation.reservation_id, **binding)
+        request = dict(**binding, attacker_id="b", attacker_name="B")
+        for changes, status in (
+            ({"bot_id": "bot-2"}, "message_not_found"),
+            ({"group_id": "200"}, "message_not_found"),
+            ({"date_str": "2026-08-08"}, "reservation_closed"),
+            ({}, "attacker_unrolled"),
+            ({"attacker_id": "target"}, "self_target"),
+        ):
+            result = await self.manager.join_roast_reservation_by_message(**{**request, **changes})
+            self.assertEqual(result.status, status)
+        for index in range(11):
+            await self._prepare(attacker_id=f"user-{index}")
+        await self.manager.get_or_create_today_pig("b", "pig-b", date_str="2026-08-07")
+        self.assertEqual((await self.manager.join_roast_reservation_by_message(**request)).status, "reservation_full")
+        raw = self.manager.data["roast_reservations"][created.reservation.reservation_id]
+        for status in ("ready", "prepared", "sending", "completed"):
+            raw["status"] = status
+            self.assertEqual((await self.manager.join_roast_reservation_by_message(**request)).status, "reservation_closed")
+        self.assertEqual(len(self.manager.data["roast_reservations"]), 1)
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -1049,6 +1186,41 @@ class ReservationDeliveryRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_feed_text_does_not_add_newline_after_image(self):
+        for has_image in (True, False):
+            with self.subTest(has_image=has_image):
+                outcome = RoastOutcome(
+                    event_type="success",
+                    render_data={"id": "food"} if has_image else None,
+                    plain_text="预约成功",
+                )
+                reservation = self._reservation()
+                prepared = RoastReservation(**{
+                    **reservation.__dict__, "status": "prepared",
+                    "outcome_snapshot": reservation_flow._serialize_outcome(outcome),
+                })
+                bot = SimpleNamespace(send_group_msg=AsyncMock())
+                mocked_store = SimpleNamespace(
+                    claim_roast_reservations=AsyncMock(return_value=SimpleNamespace(reservations=(prepared,), has_owned=True)),
+                    mark_roast_reservation_sending=AsyncMock(return_value=prepared),
+                    complete_roast_reservation=AsyncMock(return_value=True),
+                )
+                message = MessageSegment.image(b"image") if has_image else MessageSegment.text("预约成功")
+                with (
+                    patch.object(reservation_flow, "store", mocked_store),
+                    patch.object(reservation_flow, "get_bots", return_value={"bot-1": bot}),
+                    patch.object(reservation_flow, "is_group_rollpig_enabled", return_value=True),
+                    patch.object(reservation_flow, "_prepare_reservation_message", new=AsyncMock(return_value=message)),
+                    patch.object(reservation_flow, "_build_reservation_feed_text", return_value="小猪加餐成功。"),
+                ):
+                    await reservation_flow.deliver_ready_reservations("bot-1")
+                sent = bot.send_group_msg.await_args.kwargs["message"]
+                if has_image:
+                    self.assertEqual([segment.type for segment in sent], ["image", "text"])
+                    self.assertEqual(sent[-1].data["text"], "小猪加餐成功。")
+                else:
+                    self.assertEqual(sent.extract_plain_text(), "预约成功\n小猪加餐成功。")
+
     def setUp(self) -> None:
         reservation_flow._resource_backoff_until.clear()
         reservation_flow._group_backoff.clear()
@@ -1605,6 +1777,20 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CloudReservationCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_join_uses_dedicated_endpoint_and_keeps_old_cloud_unsupported(self):
+        store = object.__new__(CloudStore)
+        store._request = AsyncMock(return_value={"status": "reservation_closed"})
+        request = dict(bot_id="bot", group_id="100", message_id="900", attacker_id="b", attacker_name="B")
+        result = await store.join_roast_reservation_by_message(**request)
+        self.assertEqual(result.status, "reservation_closed")
+        self.assertEqual(store._request.await_args.args[1], "/v1/roast-reservations/join-by-message")
+        error = httpx.HTTPStatusError("missing", request=httpx.Request("POST", "https://cloud.test"), response=httpx.Response(404))
+        wrapped_error = CloudStoreError("missing")
+        wrapped_error.__cause__ = error
+        store._request = AsyncMock(side_effect=wrapped_error)
+        with self.assertRaises(CloudReservationUnsupportedError):
+            await store.join_roast_reservation_by_message(**request)
+
     async def test_normal_event_requests_feed_but_old_cloud_response_stays_silent(self):
         store = object.__new__(CloudStore)
         store._request = AsyncMock(return_value={"ok": True})

@@ -239,6 +239,18 @@ class RollpigStore(ABC):
     ) -> RoastReservationPrepareResult:
         raise NotImplementedError
 
+    async def bind_roast_reservation_message(
+        self, *, reservation_id: str, bot_id: str, group_id: str, message_id: str,
+        date_str: Optional[str] = None,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def join_roast_reservation_by_message(
+        self, *, bot_id: str, group_id: str, message_id: str,
+        attacker_id: str, attacker_name: str, date_str: Optional[str] = None,
+    ) -> RoastReservationPrepareResult:
+        raise NotImplementedError
+
     @abstractmethod
     async def claim_roast_reservations(
         self,

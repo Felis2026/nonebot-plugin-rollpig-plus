@@ -1274,6 +1274,62 @@ class PigDataManager:
             await self._atomic_save()
         return UnrolledRoastAttemptResult(target_date, user_id, count)
 
+    # ================================ 预约通知关联与回复加入 ================================ #
+
+    async def bind_roast_reservation_message(
+        self, *, reservation_id: str, bot_id: str, group_id: str, message_id: str,
+        date_str: Optional[str] = None,
+    ) -> bool:
+        """通知 ID 随预约落盘并清理，重启后仍可回复加入。"""
+        async with self._lock:
+            raw = self._find_reservation_locked(reservation_id)
+            if not raw or raw.get("group_id") != group_id or raw.get("date_str") != (date_str or rollpig_date_str()):
+                return False
+            reference = {"bot_id": bot_id, "message_id": message_id}
+            messages = raw.setdefault("messages", [])
+            if reference not in messages:
+                messages.append(reference)
+                await self._atomic_save()
+            return True
+
+    async def join_roast_reservation_by_message(
+        self, *, bot_id: str, group_id: str, message_id: str,
+        attacker_id: str, attacker_name: str, date_str: Optional[str] = None,
+    ) -> RoastReservationPrepareResult:
+        """在同一把锁内定位、检查并加入，不创建预约、不消耗充能。"""
+        target_date = date_str or rollpig_date_str()
+        async with self._lock:
+            reference = {"bot_id": bot_id, "message_id": message_id}
+            raw = next((item for item in self.data.setdefault("roast_reservations", {}).values()
+                        if isinstance(item, dict) and item.get("group_id") == group_id
+                        and reference in item.get("messages", [])), None)
+            if raw is None:
+                return RoastReservationPrepareResult("message_not_found")
+            history = self.data.setdefault("history", {}).get(target_date, {})
+            if raw.get("date_str") != target_date or raw.get("status") != "pending" or history.get(raw["target_id"]):
+                return RoastReservationPrepareResult("reservation_closed")
+            if raw["target_id"] == attacker_id:
+                return RoastReservationPrepareResult("self_target")
+            pig_id = history.get(attacker_id)
+            if not pig_id:
+                return RoastReservationPrepareResult("attacker_unrolled")
+            result = self._join_reservation_locked(raw, attacker_id, attacker_name, str(pig_id))
+            if result.status == "reservation_joined":
+                await self._atomic_save()
+            return result
+
+    def _join_reservation_locked(self, raw: dict, user_id: str, name: str, pig_id: str) -> RoastReservationPrepareResult:
+        """两种加入入口共用人数、重复判定；调用方持锁并负责保存。"""
+        participants = raw.setdefault("participants", [])
+        if any(str(item.get("user_id")) == user_id for item in participants if isinstance(item, dict)):
+            return RoastReservationPrepareResult("already_joined", self._reservation_from_raw(raw))
+        if len(participants) >= ROAST_RESERVATION_MAX_PARTICIPANTS:
+            return RoastReservationPrepareResult("reservation_full", self._reservation_from_raw(raw))
+        participants.append({"user_id": user_id, "display_name": name, "pig_id": pig_id})
+        # 回复加入也代表今日小猪在本群出现，必须与参与者名单一起落盘。
+        self._record_group_roll(raw["date_str"], raw["group_id"], user_id, pig_id)
+        return RoastReservationPrepareResult("reservation_joined", self._reservation_from_raw(raw))
+
     async def prepare_roast_reservation(
         self,
         *,
@@ -1298,19 +1354,10 @@ class PigDataManager:
             target_pig_id = self.data.setdefault("history", {}).get(target_date, {}).get(target_id)
             existing = self._find_pending_reservation_locked(target_date, str(group_id), target_id)
             if existing is not None:
-                participants = existing.setdefault("participants", [])
-                if any(str(item.get("user_id")) == attacker_id for item in participants if isinstance(item, dict)):
-                    return RoastReservationPrepareResult("already_joined", self._reservation_from_raw(existing))
-                if len(participants) >= ROAST_RESERVATION_MAX_PARTICIPANTS:
-                    return RoastReservationPrepareResult("reservation_full", self._reservation_from_raw(existing))
-                participants.append({
-                    "user_id": attacker_id,
-                    "display_name": str(attacker_name),
-                    "pig_id": str(attacker_pig_id),
-                })
-                self._mark_group_active_users_locked(target_date, str(group_id), [attacker_id])
-                await self._atomic_save()
-                return RoastReservationPrepareResult("reservation_joined", self._reservation_from_raw(existing))
+                result = self._join_reservation_locked(existing, attacker_id, str(attacker_name), str(attacker_pig_id))
+                if result.status == "reservation_joined":
+                    await self._atomic_save()
+                return result
 
             protected_users = (
                 self.data.setdefault("protected", {})

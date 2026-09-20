@@ -1104,7 +1104,7 @@ YESTERDAY_SUMMARY_TEXTS = {
 }
 
 
-# ================================ 烤箱补货文案 ================================ #
+# ================================ 烤箱续火文案 ================================ #
 
 ROAST_REFILL_INACTIVE_INITIATOR_TEXTS = [
     "补货大会现在人人都能发起，不过你今天还没在本群留下 RollPig 活动记录。先抽只猪或参与一次烤猪吧。",
@@ -1131,15 +1131,15 @@ ROAST_REFILL_EXISTING_TEXTS = [
 ]
 
 ROAST_REFILL_CREATED_TEXTS = [
-    "🔥【烤箱补货申请】\n【{initiator}】申请紧急补充烤箱燃料。\n今日已有 {active_count} 头小猪参与 RollPig，本轮需要 {required_votes} 头有效支持。{vote_rule}，且至少需要 2 名有效支持者。\n请在 10 分钟内点击本消息下方的「表情回应」。\n达标后，本群今日所有活跃小猪的烧烤次数将恢复至 {max_charges} / {max_charges}。\n今天已经成功补货 {success_count} 次。",
+    "🔥【烤箱续火申请】\n【{initiator}】申请紧急补充烤箱燃料。\n今日已有 {active_count} 头小猪参与 RollPig，本轮需要 {required_votes} 头有效支持。{vote_rule}，且至少需要 2 名有效支持者。\n请在 10 分钟内点击本消息下方的「表情回应」。\n达标后，本群今日所有活跃小猪的烧烤次数将恢复至 {max_charges} / {max_charges}。\n今天已经成功补货 {success_count} 次。",
     "🔥【烤箱燃料告急】\n【{initiator}】敲响了补货铃。今天共有 {active_count} 头活跃小猪，本轮需要 {required_votes} 头有效支持。{vote_rule}，但仍需至少 2 名有效小猪联署。\n投票限时 10 分钟，请点击本消息的「表情回应」；通过后，本群今日活跃小猪的普通烧烤配额统一恢复至 {max_charges} / {max_charges}。\n本群今天已成功补货 {success_count} 次。",
     "🧰【后厨补货表决】\n发起人：【{initiator}】\n今日活跃小猪：{active_count} 头\n本轮通过门槛：{required_votes} 头有效支持，至少 2 名有效支持者\n{vote_rule}。请在 10 分钟内点击下方「表情回应」。通过后，今日活跃小猪的普通烧烤次数全部恢复至 {max_charges} / {max_charges}。\n今日此前成功补货 {success_count} 次。",
     "🔥【继续开火投票】\n【{initiator}】申请重新装满烤箱燃料。现场登记到 {active_count} 头今日活跃小猪，本轮需要 {required_votes} 头有效支持并至少由 2 人联署；{vote_rule}。\n请在 10 分钟内点击本消息的「表情回应」。达标即为全体今日活跃小猪恢复普通烧烤配额。\n今天已完成补货 {success_count} 次。",
-    "🔧【烤箱补货动议】\n【{initiator}】把空燃料箱推到了群中央。今日有 {active_count} 头小猪参与 RollPig，本轮需要 {required_votes} 头有效支持，且不能由一只小猪独自通过。{vote_rule}。\n请在 10 分钟内点击「表情回应」。表决通过后，今日活跃小猪的普通烧烤次数恢复到 {max_charges} / {max_charges}。\n本群今日已成功补货 {success_count} 次。",
+    "🔧【烤箱续火动议】\n【{initiator}】把空燃料箱推到了群中央。今日有 {active_count} 头小猪参与 RollPig，本轮需要 {required_votes} 头有效支持，且不能由一只小猪独自通过。{vote_rule}。\n请在 10 分钟内点击「表情回应」。表决通过后，今日活跃小猪的普通烧烤次数恢复到 {max_charges} / {max_charges}。\n本群今日已成功补货 {success_count} 次。",
 ]
 
 ROAST_REFILL_SUCCESS_TEXTS = [
-    "🔧【烤箱补货成功】\n{votes} 头有效支持要求继续开火，维修人员被迫重新装满燃料。\n本群今日 {benefited} 头活跃小猪的普通烧烤配额已经恢复至 {max_charges} / {max_charges}。\n今天已经成功补货 {success_count} 次——下一轮可没这么容易。",
+    "🔧【烤箱续火成功】\n{votes} 头有效支持要求继续开火，维修人员被迫重新装满燃料。\n本群今日 {benefited} 头活跃小猪的普通烧烤配额已经恢复至 {max_charges} / {max_charges}。\n今天已经成功补货 {success_count} 次——下一轮可没这么容易。",
     "🔥【燃料重新装满】\n有效支持达到 {votes} 头，补货表决正式通过。今日 {benefited} 头活跃小猪的普通烧烤次数现已恢复为 {max_charges} / {max_charges}。\n这是本群今天第 {success_count} 次成功补货。",
     "🧰【维修人员被投票叫醒】\n{votes} 头有效支持完成联署，烤箱燃料已经补满。今日 {benefited} 头活跃小猪全部恢复普通烧烤配额 {max_charges} / {max_charges}。\n今日成功补货次数：{success_count}。",
     "🔥【后厨重新开火】\n补货申请以 {votes} 头有效支持达标。燃料仓已经放行，本群今日 {benefited} 头活跃小猪的普通烧烤次数统一回满 {max_charges} / {max_charges}。\n今天已成功补货 {success_count} 次。",
@@ -1148,7 +1148,7 @@ ROAST_REFILL_SUCCESS_TEXTS = [
 ]
 
 ROAST_REFILL_UNSUPPORTED_TEXTS = [
-    "当前 QQ 协议端不支持读取「表情回应」投票名单，烤箱补货暂时无法发起。",
+    "当前 QQ 协议端不支持读取「表情回应」投票名单，烤箱续火暂时无法发起。",
     "后厨能发消息，却看不清是谁点了「表情回应」。为避免乱算票，本次补货申请已经停止。",
     "投票接口没有正常回应。烤箱拒绝凭 QQ 显示数字直接放货，本轮申请已终止。",
     "维修人员无法核验「表情回应」名单，因此不会偷偷绕过投票重置次数。请检查协议端支持情况。",

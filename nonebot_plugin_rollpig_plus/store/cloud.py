@@ -962,6 +962,23 @@ class CloudStore(RollpigStore):
             protection_broken=bool(payload.get("protection_broken")),
         )
 
+    async def bind_roast_reservation_message(self, **kwargs) -> bool:
+        payload = await self._reservation_request(
+            "POST", "/v1/roast-reservations/bind-message",
+            json_body={**kwargs, "date_str": kwargs.get("date_str") or rollpig_date_str()},
+        )
+        return bool(payload.get("ok"))
+
+    async def join_roast_reservation_by_message(self, **kwargs) -> RoastReservationPrepareResult:
+        payload = await self._reservation_request(
+            "POST", "/v1/roast-reservations/join-by-message",
+            json_body={**kwargs, "date_str": kwargs.get("date_str") or rollpig_date_str()},
+        )
+        return RoastReservationPrepareResult(
+            status=str(payload.get("status") or "error"),
+            reservation=self._parse_reservation(payload.get("reservation")),
+        )
+
     async def claim_roast_reservations(
         self,
         delivery_bot_id: str,

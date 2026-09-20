@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.14.1-ff69b4" alt="Version 0.14.1">
+    <img src="https://img.shields.io/badge/Version-0.14.2-ff69b4" alt="Version 0.14.2">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -41,11 +41,11 @@
 | **今日小猪** | 每天抽取一只固定小猪；支持昨日回顾、明日预测、随机小猪和 PigHub 找猪。 |
 | **猪圈成长** | 收藏小猪、查看图片图鉴；重复抽取和每日一次烤猪加餐会提升 EX Lv.，并逐步触发新猪保底。 |
 | **EX 差分** | 资源包可为同一只猪提供不同 EX 等级的立绘和文案，不新增图鉴 ID，也不破坏已有成长数据。 |
-| **烤猪互动** | 今日烤猪、烤群友、随机烤猪、加急生火、预约烤猪与烤箱补货。 |
+| **烤猪互动** | 今日烤猪、烤群友、随机烤猪、加急生火、预约烤猪与烤箱续火。 |
 | **群聊总结** | 可以为指定群开启每日小猪数据总结。 |
 | **云端资源** | 公有小猪、GIF Overlay、EX 差分和共享烤猪文案可在线同步；失败时保留当前可用资源。 |
 | **多实例同步** | 默认单机本地运行；可接入 RollPig Cloud，实现多群、跨 Bot 同步成长与互动状态。 |
-| **可选 AI** | 不配置 AI 也能正常烤猪；开启后可使用 DeepSeek 生成更多文案，并与共享/本地文案共同使用。 |
+| **可选 AI** | 不配置 AI 也能正常烤猪；开启后可使用 OpenAI Chat Completions 兼容服务生成更多文案，并与共享/本地文案共同使用。 |
 
 RollPig Plus **不硬性要求接入 Cloud、 AI**。普通卡片与图鉴均使用 Pillow 渲染，默认配置即可运行基础功能。
 
@@ -111,6 +111,10 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 
 第一位发起预约的人会成为主厨，其他群友可以继续**免费**烤目标群友实现添柴；等目标完成今日抽猪后，再统一结算这场预约。
 
+也可以回复 Bot 发出的预约创建或加入通知，发送 `加入`、`加入预约` 或 `加入烤猪`。后续加入通知同样可以继续回复；仅加入这条通知对应的预约，不会新建预约或转成普通烧烤。没有回复通知时，单独发送这些短语不会触发。已结束或过期的预约不能加入；满员或重复加入会给出提示。
+
+回复加入支持 Local；Cloud 模式需要 `0.9.0+`。旧 Cloud 仍可使用原有 `烤群友 @目标` 方式加入。升级前发送的通知没有关联记录，不能用于回复加入。
+
 每天第一次通过普通 `烤群友` / `随机烤群友` 成功，或参与成功结算的普通预约时，自己的今日小猪会获得一次**烤猪加餐**并成长 `1` 级。加急、管理员后门、自烤、逃脱、反噬和特殊终态不会触发；已经达到 EX Lv.5 时保持静默，也不会占用当天机会。
 
 ### 群聊总结
@@ -141,7 +145,9 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 - 普通预约成功时，最终参与者分别尝试获得当天一次烤猪加餐；强制预约不触发。
 - Local 与 Cloud 后端均支持预约流程。
 
-#### 烤箱补货
+#### 烤箱续火
+
+- 发送 `烤箱续火` 发起投票；`烤箱补货` 等旧指令继续可用。普通烧烤次数耗尽时会提示使用此功能，不恢复加急生火次数。
 
 - 本群当日有效活跃用户均可发起；未参与当天 RollPig 的成员不能创建新申请。
 - 投票持续 `10` 分钟。
@@ -174,7 +180,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `烤群友 @目标` | 用魔法烤箱把群友做成美味的烤猪；目标未抽猪时自动进入预约流程。 |
 | `随机烤猪` | 从当前群已有记录中随机选择目标烤。 |
 | `加急生火 @目标` | 使用加急模式烤群友。 |
-| `烤箱补货` | 当日活跃用户发起群体烧烤次数补货投票。 |
+| `烤箱续火` | 当日活跃用户发起群体烧烤次数补货投票。 |
 | `小猪日报 状态` | 查看当前群日报状态。 |
 | `小猪日报 开启` / `小猪日报 关闭` | 群主或管理员控制当前群日报。 |
 | `同步小猪资源` | SUPERUSER 手动触发资源同步。 |
@@ -340,7 +346,9 @@ fonts/LXGWWenKaiTC-Bold.ttf
 | 配置项 | 默认值 | 作用 |
 | --- | --- | --- |
 | `rollpig_ai_enabled` | `false` | 是否开启 AI 烤猪。 |
-| `rollpig_model` | `deepseek-v4-flash` | AI 模型名称。 |
+| `rollpig_ai_api_key` | `null` | AI 服务 API Key；未配置时读取旧 `rollpig_deepseek_key`。 |
+| `rollpig_ai_base_url` | `null` | OpenAI Chat Completions 兼容服务地址；未配置时读取旧 `rollpig_deepseek_base`，默认 `https://api.deepseek.com`。 |
+| `rollpig_ai_model` | `null` | 模型名称；未配置时读取旧 `rollpig_model`，默认 `deepseek-v4-flash`。 |
 | `rollpig_roast_cooldown_hours` | `8` | 普通烧烤恢复 1 次所需小时数。 |
 | `rollpig_roast_charge_max` | `2` | 普通烧烤最大储存次数。 |
 | `rollpig_storage_backend` | `local` | `local` / `cloud` 存储后端。 |
@@ -356,6 +364,8 @@ fonts/LXGWWenKaiTC-Bold.ttf
 | `rollpig_catalog_render_concurrency` | `2` | 图鉴并发绘制数；低内存部署可设为 `1`。 |
 
 更多参数和默认值以 [`rollpig_config.example.json`](rollpig_config.example.json) 及当前版本源码为准。
+
+AI 新旧字段可以混用，逐项以新字段为准；旧配置不必修改。只有 DeepSeek 官方地址会将旧模型名 `deepseek-chat` / `deepseek-reasoner` 转为对应的 V4 Flash 非思考 / 思考模式，其他服务的模型名原样传入，不附加 DeepSeek 专用参数。此处支持兼容接口，不直接支持其他厂商的原生协议。
 
 </details>
 
@@ -449,7 +459,7 @@ Cloud 主要负责把需要一致性的成长与互动状态放到统一后端�
 - 抽猪规则：`roll_flow.py`
 - 烤群友：`roast_flow.py`
 - 预约：`reservation_flow.py` / `reservation_delivery.py`
-- 烤箱补货：`roast_refill.py`
+- 烤箱续火：`roast_refill.py`
 - 资源同步：`resource_manager.py`
 - PigHub：`pighub_service.py`
 - AI / 共享烤猪文案：`roast_manager.py`

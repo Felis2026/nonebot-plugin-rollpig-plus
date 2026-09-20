@@ -1,6 +1,6 @@
 import random
 
-from nonebot import on_command
+from nonebot import on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, MessageSegment
 from nonebot.log import logger
 
@@ -32,8 +32,10 @@ from ..helpers import (
 )
 from ..reservation_delivery import register_owned_reservation
 from ..reservation_flow import deliver_newly_ready_reservations
+from ..roast_refill import extract_message_id
 from ..store import store
-from ..store.cloud import CloudReservationUnsupportedError
+from ..store.cloud import CloudReservationUnsupportedError, CloudStoreError
+from ..data_manager import LocalStoreUnavailableError
 from ..store.models import RoastEvent
 from ..texts import (
     AUTO_ROLL_ROAST_TEXTS,
@@ -65,6 +67,72 @@ def _register_preparation_owner(preparation, current_bot_id: str) -> None:
     reservation = preparation.reservation
     if reservation and reservation.delivery_bot_id == str(current_bot_id):
         register_owned_reservation(str(current_bot_id))
+
+
+# ================================ 回复预约通知加入 ================================ #
+
+
+def _is_reservation_reply(event: GroupMessageEvent) -> bool:
+    """只接收回复当前 Bot 的完整短语，避免抢占普通聊天和其他 Bot。"""
+    return bool(
+        event.reply
+        and str(event.reply.sender.user_id) == str(event.self_id)
+        and event.get_plaintext().strip() in {"加入", "加入预约", "加入烤猪"}
+        and all(segment.type in {"text", "reply"} or (
+            segment.type == "at" and str(segment.data.get("qq")) == str(event.self_id)
+        ) for segment in event.get_message())
+    )
+
+
+async def _send_reservation_notice(matcher, event, preparation, *, attacker_name: str, target_name: str, prefix: str = ""):
+    """发送后绑定实际消息 ID；关联失败不能将已成功的预约误报为失败。"""
+    result = await matcher.send(
+        MessageSegment.reply(event.message_id) + prefix + pick_reservation_prepare_text(
+            preparation, attacker_name=attacker_name, target_name=target_name,
+        )
+    )
+    if preparation.reservation and preparation.status in {"reservation_created", "reservation_joined", "already_joined"}:
+        message_id = extract_message_id(result)
+        if message_id:
+            try:
+                bound = await store.bind_roast_reservation_message(
+                    reservation_id=preparation.reservation.reservation_id,
+                    bot_id=str(event.self_id), group_id=str(event.group_id), message_id=str(message_id),
+                    date_str=preparation.reservation.date_str,
+                )
+                if not bound:
+                    logger.warning("预约通知关联未保存，仍可通过烤群友 @目标加入")
+            except CloudReservationUnsupportedError:
+                pass
+            except (CloudStoreError, LocalStoreUnavailableError) as error:
+                logger.warning(f"预约已完成，但通知关联保存失败: {error}")
+    await matcher.finish()
+
+
+cmd_join_reservation = on_message(rule=_is_reservation_reply, block=False)
+
+
+@cmd_join_reservation.handle()
+@guard_group_enabled(cmd_join_reservation)
+@guard_store_errors(cmd_join_reservation)
+async def _join_reservation_reply(event: GroupMessageEvent):
+    """复用预约加入结果文案，新通知也保存关联，允许连续回复加入。"""
+    name = get_event_user_name(event)
+    try:
+        preparation = await store.join_roast_reservation_by_message(
+            bot_id=str(event.self_id), group_id=str(event.group_id), message_id=str(event.reply.message_id),
+            attacker_id=str(event.user_id), attacker_name=name,
+        )
+    except CloudReservationUnsupportedError:
+        return
+    if preparation.status == "message_not_found":
+        return
+    cmd_join_reservation.stop_propagation()
+    _register_preparation_owner(preparation, str(event.self_id))
+    await _send_reservation_notice(
+        cmd_join_reservation, event, preparation, attacker_name=name,
+        target_name=preparation.reservation.target_name if preparation.reservation else "",
+    )
 
 
 def _classify_roast_target(attacker_id: str, target_id: str, bot_id: str) -> str:
@@ -337,14 +405,9 @@ async def _(bot: Bot, event: GroupMessageEvent):
             prefix = ""
             if preparation.protection_broken:
                 prefix = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name) + "\n"
-            await cmd_roast_member.finish(
-                MessageSegment.reply(event.message_id)
-                + prefix
-                + pick_reservation_prepare_text(
-                    preparation,
-                    attacker_name=attacker_name,
-                    target_name=target_name,
-                )
+            await _send_reservation_notice(
+                cmd_roast_member, event, preparation,
+                attacker_name=attacker_name, target_name=target_name, prefix=prefix,
             )
             return
         target_pig = get_pig_by_id(preparation.target_pig_id)
