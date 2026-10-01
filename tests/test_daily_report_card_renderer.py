@@ -241,8 +241,8 @@ class DailyReportCardRendererTests(unittest.TestCase):
                     "u2",
                     1,
                     reservation_id="r1",
-                    participant_ids=["u1", "u3"],
-                    participant_count=2,
+                    participant_ids=["u1", "u3", "u4"],
+                    participant_count=3,
                 )
             ],
         )
@@ -256,17 +256,6 @@ class DailyReportCardRendererTests(unittest.TestCase):
             any(
                 marker in text
                 for marker in (
-                    "召集 1 名群友",
-                    "另外 1 名群友",
-                    "2 人预约队伍",
-                    "2 把烤叉",
-                )
-            )
-        )
-        self.assertFalse(
-            any(
-                marker in text
-                for marker in (
                     "召集 2 名群友",
                     "另外 2 名群友",
                     "3 人预约队伍",
@@ -274,8 +263,19 @@ class DailyReportCardRendererTests(unittest.TestCase):
                 )
             )
         )
-        self.assertIn("2 人参与", data.headline.tags)
-        self.assertNotIn("3 人参与", data.headline.tags)
+        self.assertFalse(
+            any(
+                marker in text
+                for marker in (
+                    "召集 3 名群友",
+                    "另外 3 名群友",
+                    "4 人预约队伍",
+                    "4 把烤叉",
+                )
+            )
+        )
+        self.assertIn("3 人参与", data.headline.tags)
+        self.assertNotIn("4 人参与", data.headline.tags)
 
     def test_headline_tags_use_rollpig_wording(self) -> None:
         cases = (
@@ -339,8 +339,8 @@ class DailyReportCardRendererTests(unittest.TestCase):
                         "u2",
                         1,
                         reservation_id=f"r-{index}",
-                        participant_ids=["u1", "u3"],
-                        participant_count=2,
+                        participant_ids=["u1", "u3", "u4"],
+                        participant_count=3,
                     )
                 ],
             )
@@ -350,7 +350,7 @@ class DailyReportCardRendererTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(rendered_texts), 2)
 
-    def test_single_person_reservation_never_mentions_zero_teammates(self) -> None:
+    def test_single_person_reservation_is_not_a_headline(self) -> None:
         report = build_daily_report(
             date_str=DATE,
             group_id=GROUP,
@@ -370,16 +370,7 @@ class DailyReportCardRendererTests(unittest.TestCase):
 
         data = build_daily_report_card_data(report)
 
-        assert data.headline is not None
-        text = "".join(span.text for span in data.headline.spans)
-        self.assertTrue(
-            any(
-                marker in text
-                for marker in ("独自守着", "独自", "单人预约", "1 把烤叉")
-            )
-        )
-        self.assertNotIn("0 名群友", text)
-        self.assertIn("1 人参与", data.headline.tags)
+        self.assertIsNone(data.headline)
 
     def test_all_declared_assets_exist_and_are_decodable(self) -> None:
         manifest_path = DAILY_REPORT_CARD_RESOURCE_DIR / "manifest.json"

@@ -311,7 +311,7 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
                 max_charges=4,
             )
         self.assertIn("4 / 4", created)
-        self.assertIn("管理员每人按 2 头有效支持计算", created)
+        self.assertIn("管理及以上按 2 头计", created)
         self.assertIn("4 / 4", succeeded)
 
     def test_refill_created_text_does_not_promise_double_votes_to_old_cloud(self):
@@ -331,8 +331,58 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
                 manager_double_vote=False,
             )
 
-        self.assertIn("当前 Cloud 按每名有效支持者 1 头计算", text)
-        self.assertNotIn("管理员每人按 2 头有效支持计算", text)
+        self.assertIn("每人按 1 头计", text)
+        self.assertNotIn("管理及以上按 2 头计", text)
+
+    def test_refill_created_text_hides_zero_previous_successes(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="member",
+            initiator_name="普通小猪",
+            delivery_bot_id="bot",
+            required_votes=3,
+            success_count_before=0,
+        )
+        with patch.object(roast_refill.random, "choice", side_effect=lambda choices: choices[0]):
+            text = roast_refill.format_refill_created(request, max_charges=4)
+
+        self.assertNotIn("今日已续火", text)
+        self.assertFalse(text.endswith("\n"))
+
+    def test_existing_refill_uses_plain_head_and_people_counts(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="member",
+            initiator_name="普通小猪",
+            delivery_bot_id="bot",
+            required_votes=4,
+        )
+        with patch.object(roast_refill.random, "choice", side_effect=lambda choices: choices[0]):
+            text = roast_refill.format_existing_refill(request, supporters=1, votes=2)
+
+        self.assertIn("当前 2/4 头，还差 2 头，且至少再来 1 人", text)
+        self.assertNotIn("有效支持者", text)
+        self.assertNotIn("票", text)
+
+    def test_existing_refill_reports_reached_threshold_as_settling(self):
+        request = GroupRoastRefillRequest(
+            request_id="request",
+            date_str=DATE_STR,
+            group_id="100",
+            initiator_id="member",
+            initiator_name="普通小猪",
+            delivery_bot_id="bot",
+            required_votes=4,
+        )
+
+        self.assertEqual(
+            roast_refill.format_existing_refill(request, supporters=2, votes=4),
+            "续火支持已经达标，正在结算。",
+        )
 
     def test_refill_created_message_places_image_before_text(self):
         request = GroupRoastRefillRequest(
@@ -352,6 +402,7 @@ class RoastRefillReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([segment.type for segment in message], ["image", "text"])
         self.assertTrue(message[0].data["file"].startswith("base64://"))
         self.assertIn("4 / 4", message[1].data["text"])
+        self.assertFalse(message[1].data["text"].startswith("\n"))
 
     def test_refill_multiline_texts_do_not_insert_blank_lines(self):
         for template in (*roast_refill.ROAST_REFILL_CREATED_TEXTS, *roast_refill.ROAST_REFILL_SUCCESS_TEXTS):

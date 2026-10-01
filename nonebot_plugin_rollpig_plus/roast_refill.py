@@ -303,12 +303,16 @@ def format_refill_created(
         initiator=request.initiator_name or request.initiator_id,
         active_count=request.active_count_snapshot,
         required_votes=request.required_votes,
-        success_count=request.success_count_before,
+        success_summary=(
+            f"\n今日已续火 {request.success_count_before} 次。"
+            if request.success_count_before > 0
+            else ""
+        ),
         max_charges=max_charges,
         vote_rule=(
-            "群主和管理员每人按 2 头有效支持计算，普通成员按 1 头计算"
+            "管理及以上按 2 头计"
             if manager_double_vote
-            else "当前 Cloud 按每名有效支持者 1 头计算"
+            else "每人按 1 头计"
         ),
     )
 
@@ -322,7 +326,7 @@ def build_refill_created_message(
     """按图片在前、申请文案在后的顺序构造消息；图片内嵌以兼容跨容器 OneBot。"""
 
     return MessageSegment.image(ROAST_REFILL_IMAGE_PATH.read_bytes()) + MessageSegment.text(
-        "\n" + format_refill_created(
+        format_refill_created(
             request,
             max_charges,
             manager_double_vote=manager_double_vote,
@@ -346,12 +350,13 @@ def _refill_requirement_hint(request: GroupRoastRefillRequest, supporters: int, 
 
     missing_votes = max(0, request.required_votes - votes)
     missing_supporters = max(0, ROAST_REFILL_MIN_DISTINCT_VOTERS - supporters)
-    requirements: list[str] = []
+    if missing_votes and missing_supporters:
+        return f"，还差 {missing_votes} 头，且至少再来 {missing_supporters} 人"
     if missing_votes:
-        requirements.append(f"{missing_votes} 票")
+        return f"，还差 {missing_votes} 头"
     if missing_supporters:
-        requirements.append(f"{missing_supporters} 名有效支持者")
-    return "，还需" + "，并需".join(requirements) if requirements else "，已经达到门槛"
+        return f"，至少再来 {missing_supporters} 人"
+    return ""
 
 
 def format_existing_refill(
@@ -359,6 +364,8 @@ def format_existing_refill(
     supporters: int,
     votes: int,
 ) -> str:
+    if votes >= request.required_votes and supporters >= ROAST_REFILL_MIN_DISTINCT_VOTERS:
+        return "续火支持已经达标，正在结算。"
     return random.choice(ROAST_REFILL_EXISTING_TEXTS).format(
         current=votes,
         required=request.required_votes,

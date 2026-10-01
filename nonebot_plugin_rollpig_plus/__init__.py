@@ -34,8 +34,9 @@ __plugin_meta__ = PluginMetadata(
     我的猪圈 - 查看解锁进度
     小猪图鉴 - 生成图片版小猪图鉴
     本周小猪 - 生成本周猪猪总结长图
+    猪圈日报 - 查看本群最近一期已封版的日报卡
     小猪投稿 - 前往 RollPig 投稿平台提交创意、完整小猪或 EX 等级差分
-    小猪日报 开启/关闭/状态 - 控制本群猪圈日报推送
+    小猪日报 开启/关闭/状态 - 控制本群猪圈日报推送，不影响主动查卡
     """,
     type="application",
     homepage="https://github.com/Felis2026/nonebot-plugin-rollpig-plus",

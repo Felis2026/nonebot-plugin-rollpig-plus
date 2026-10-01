@@ -122,8 +122,8 @@ class Config(BaseModel):
     rollpig_private_resource_manifests: list[PrivateResourceManifestConfig | str | dict[str, Any]] = Field(default_factory=list)
 
     # --- 定时日报 ---
-    # 默认关闭，避免新部署实例在管理员未确认前主动向群里推送日报。
-    # 开启后会执行日报推送，并刷新日报派生的次日保护（集火）名单。
+    # 日报推送默认关闭，避免新部署实例在管理员未确认前主动向群里发卡。
+    # 次日保护独立结算，关闭推送不妨碍主动查阅已封版日报。
     rollpig_daily_summary_enabled: bool = False
 
     # --- 普通小猪卡片渲染 ---
