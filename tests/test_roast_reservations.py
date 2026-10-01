@@ -7,11 +7,11 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import nonebot
-from nonebot.adapters.onebot.v11 import Message, MessageSegment
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 from nonebot.plugin import get_plugin
 from nonebot.rule import CommandRule, TrieRule
 
@@ -147,24 +147,42 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         for status in ("message_not_found", "reservation_closed", "reservation_joined"):
             reservation = SimpleNamespace(target_name="目标", delivery_bot_id="1000") if status == "reservation_joined" else None
             preparation = SimpleNamespace(status=status, reservation=reservation)
+            matcher = SimpleNamespace(stop_propagation=Mock())
             with (
                 patch.object(roast_handler, "store") as store,
                 patch.object(roast_handler, "get_event_user_name", return_value="参与者"),
                 patch.object(roast_handler, "register_owned_reservation"),
-                patch.object(roast_handler.cmd_join_reservation, "stop_propagation") as stop,
                 patch.object(roast_handler, "_send_reservation_notice", new_callable=AsyncMock) as send,
             ):
                 store.join_roast_reservation_by_message = AsyncMock(return_value=preparation)
-                await handler(event)
+                await handler(matcher, event)
                 store.join_roast_reservation_by_message.assert_awaited_once_with(
                     bot_id="1000", group_id="100", message_id="900", attacker_id="123", attacker_name="参与者",
                 )
                 if status == "message_not_found":
-                    stop.assert_not_called()
+                    matcher.stop_propagation.assert_not_called()
                     send.assert_not_awaited()
                 else:
-                    stop.assert_called_once()
+                    matcher.stop_propagation.assert_called_once()
                     send.assert_awaited_once()
+                    self.assertIs(send.await_args.args[0], matcher)
+
+    async def test_registered_reply_handler_injects_matcher_instance(self):
+        message = Message("加入")
+        event = GroupMessageEvent.model_validate({
+            "time": 0, "self_id": 1000, "post_type": "message", "sub_type": "normal",
+            "user_id": 123, "message_type": "group", "message_id": 1,
+            "message": message, "original_message": message, "raw_message": "加入",
+            "font": 0, "sender": {"user_id": 123, "nickname": "甲"}, "group_id": 100,
+        })
+        matcher = roast_handler.cmd_join_reservation()
+
+        solved = await roast_handler.cmd_join_reservation.handlers[0].solve(matcher=matcher, event=event)
+
+        self.assertIs(solved["matcher"], matcher)
+        self.assertIs(solved["event"], event)
+        matcher.stop_propagation()
+        self.assertTrue(matcher.block)
 
     def test_pigsty_summary_advertises_submission_command(self):
         summary = build_pigsty_growth_summary(

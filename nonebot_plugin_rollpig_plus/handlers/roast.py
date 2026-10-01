@@ -3,6 +3,7 @@ import random
 from nonebot import on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, MessageSegment
 from nonebot.log import logger
+from nonebot.matcher import Matcher
 
 from ..roast_flow import (
     RoastFoodMissingError,
@@ -115,7 +116,7 @@ cmd_join_reservation = on_message(rule=_is_reservation_reply, block=False)
 @cmd_join_reservation.handle()
 @guard_group_enabled(cmd_join_reservation)
 @guard_store_errors(cmd_join_reservation)
-async def _join_reservation_reply(event: GroupMessageEvent):
+async def _join_reservation_reply(matcher: Matcher, event: GroupMessageEvent):
     """复用预约加入结果文案，新通知也保存关联，允许连续回复加入。"""
     name = get_event_user_name(event)
     try:
@@ -127,10 +128,10 @@ async def _join_reservation_reply(event: GroupMessageEvent):
         return
     if preparation.status == "message_not_found":
         return
-    cmd_join_reservation.stop_propagation()
+    matcher.stop_propagation()
     _register_preparation_owner(preparation, str(event.self_id))
     await _send_reservation_notice(
-        cmd_join_reservation, event, preparation, attacker_name=name,
+        matcher, event, preparation, attacker_name=name,
         target_name=preparation.reservation.target_name if preparation.reservation else "",
     )
 
