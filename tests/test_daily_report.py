@@ -315,6 +315,25 @@ class DailyReportObservationTests(unittest.TestCase):
         )
         self.assertEqual(collision_report.observation.kind, "collision")  # type: ignore[union-attr]
 
+    def test_small_active_day_uses_observation_without_inventing_headline(self) -> None:
+        cases = (
+            ("success", ["success", "success", "success"]),
+            ("escape", ["escape", "escape", "success"]),
+            ("backfire", ["backfire", "backfire", "success"]),
+        )
+        for expected_kind, results in cases:
+            with self.subTest(expected_kind=expected_kind):
+                report = build_daily_report(
+                    date_str=DATE, group_id=GROUP, group_rolls={},
+                    raw_events=[
+                        event(f"event-{index}", result, f"a{index}", f"b{index}", index + 1)
+                        for index, result in enumerate(results)
+                    ],
+                )
+                self.assertEqual(report.observation.kind, expected_kind)  # type: ignore[union-attr]
+                if expected_kind == "success":
+                    self.assertIsNone(report.headline)
+
 
 class DailyReportHeadlineTests(unittest.TestCase):
     def test_low_score_normal_event_is_hidden_but_bot_backfire_qualifies(self) -> None:
@@ -331,7 +350,7 @@ class DailyReportHeadlineTests(unittest.TestCase):
         self.assertIsNotNone(headline)
         assert headline is not None
         self.assertEqual(headline.kind, "bot_backfire")
-        self.assertEqual(headline.score, 50)
+        self.assertEqual(headline.score, 60)
 
     def test_reservation_score_uses_participants_size_and_repeat_bonus(self) -> None:
         normalized = normalize_daily_events(
@@ -355,7 +374,7 @@ class DailyReportHeadlineTests(unittest.TestCase):
         self.assertIsNotNone(headline)
         assert headline is not None
         self.assertEqual(headline.kind, "reservation_escape")
-        self.assertEqual(headline.score, 100)
+        self.assertEqual(headline.score, 80)
         self.assertEqual(headline.repeated_pair_events, 1)
 
     def test_special_target_is_split_for_renderer_asset_selection(self) -> None:
@@ -391,6 +410,84 @@ class DailyReportHeadlineTests(unittest.TestCase):
         self.assertEqual(headline.kind, "self_roast")  # type: ignore[union-attr]
         self.assertEqual(headline.score, 50)  # type: ignore[union-attr]
 
+    def test_solo_reservation_never_steals_headline(self) -> None:
+        normalized = normalize_daily_events([
+            event("solo", "success", "a", "b", 1, reservation_id="r1", participant_count=1),
+            event("ordinary", "backfire", "c", "d", 2),
+            event("escape", "escape", "e", "f", 3),
+        ], group_id=GROUP)
+
+        headline = select_headline(normalized)
+
+        self.assertEqual(headline.kind, "normal_backfire")  # type: ignore[union-attr]
+        self.assertEqual(headline.score, 45)  # type: ignore[union-attr]
+
+    def test_two_person_reservation_needs_context_unless_result_is_unusual(self) -> None:
+        for result in ("success", "escape"):
+            with self.subTest(result=result):
+                small_reservation = event(
+                    "small", result, "a", "b", 1, reservation_id="r1", participant_count=2,
+                )
+                single = normalize_daily_events([small_reservation], group_id=GROUP)
+                self.assertIsNone(select_headline(single))
+
+                active = normalize_daily_events([
+                    small_reservation,
+                    event("ordinary", "backfire", "c", "d", 2),
+                    event("other", "success", "e", "f", 3),
+                ], group_id=GROUP)
+                self.assertIsNotNone(select_headline(active))
+
+        unusual = normalize_daily_events([
+            event("small", "backfire", "a", "b", 1, reservation_id="r1", participant_count=2),
+        ], group_id=GROUP)
+        self.assertEqual(select_headline(unusual).kind, "reservation_backfire")  # type: ignore[union-attr]
+
+    def test_three_person_reservation_qualifies_alone(self) -> None:
+        normalized = normalize_daily_events([
+            event("team", "success", "a", "b", 1, reservation_id="r1", participant_count=3),
+        ], group_id=GROUP)
+        self.assertEqual(select_headline(normalized).score, 45)  # type: ignore[union-attr]
+
+    def test_large_reservation_bonus_stops_growing_after_ten_people(self) -> None:
+        scores = []
+        for participants in (6, 10, 12):
+            normalized = normalize_daily_events([
+                event(
+                    "team", "success", "a", "b", 1,
+                    reservation_id="r1", participant_count=participants,
+                ),
+            ], group_id=GROUP)
+            scores.append(select_headline(normalized).score)  # type: ignore[union-attr]
+        self.assertEqual(scores, [70, 75, 75])
+
+    def test_normal_events_need_a_story_not_just_volume(self) -> None:
+        uniform = normalize_daily_events([
+            event(f"success-{index}", "success", f"a{index}", f"b{index}", index + 1)
+            for index in range(5)
+        ], group_id=GROUP)
+        self.assertIsNone(select_headline(uniform))
+
+        repeated = normalize_daily_events([
+            event("first", "success", "a", "b", 1),
+            event("second", "success", "a", "b", 2),
+            event("third", "success", "c", "d", 3),
+        ], group_id=GROUP)
+        self.assertIsNotNone(select_headline(repeated))
+
+    def test_legacy_participants_without_owner_use_same_count_as_card(self) -> None:
+        normalized = normalize_daily_events([
+            event("legacy", "success", "a", "b", 1, reservation_id="r1", participant_ids=["c", "d"]),
+        ], group_id=GROUP)
+        self.assertEqual(select_headline(normalized).event.event_id, "legacy")  # type: ignore[union-attr]
+
+    def test_legacy_party_size_uses_same_tie_break_as_new_events(self) -> None:
+        normalized = normalize_daily_events([
+            event("legacy", "success", "a", "b", 1, reservation_id="r1", participant_ids=["c", "d"]),
+            event("new", "success", "e", "f", 2, reservation_id="r2", participant_count=3),
+        ], group_id=GROUP)
+        self.assertEqual(select_headline(normalized).event.event_id, "legacy")  # type: ignore[union-attr]
+
     def test_all_reservation_headline_assets_have_reachable_kinds(self) -> None:
         cases = (
             ("success", "", "reservation_success"),
@@ -412,7 +509,7 @@ class DailyReportHeadlineTests(unittest.TestCase):
                             "b",
                             8,
                             reservation_id="r1",
-                            participant_count=2,
+                            participant_count=3,
                             special_reason=special_reason,
                         )
                     ],

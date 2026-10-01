@@ -186,6 +186,7 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
             collection_handler.cmd_sty,
             collection_handler.cmd_submit_pig,
             collection_handler.cmd_week,
+            control_handler.cmd_daily_report_card,
             refill_handler.cmd_roast_refill,
         )
         for matcher in matchers:
@@ -199,6 +200,8 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await _matches(collection_handler.cmd_submit_pig, Message("/小猪投稿")))
         self.assertTrue(await _matches(collection_handler.cmd_submit_pig, Message("/投稿小猪")))
         self.assertFalse(await _matches(collection_handler.cmd_submit_pig, Message("/小猪投稿测试")))
+        self.assertTrue(await _matches(control_handler.cmd_daily_report_card, Message("/猪圈日报")))
+        self.assertFalse(await _matches(control_handler.cmd_daily_report_card, Message("/猪圈日报测试")))
 
         self.assertTrue(await _matches(roast_handler.cmd_roast_member, Message("/烤群友 张三")))
         self.assertFalse(await _matches(roast_handler.cmd_roast_member, Message("/烤群友张三")))

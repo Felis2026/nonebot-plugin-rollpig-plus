@@ -31,6 +31,7 @@ from .daily_report import (
     RankingKind,
     TimelineKind,
     TimelineSelection,
+    reservation_party_size,
 )
 from .resource_manager import get_pig_by_id, pig_resource_manager
 from .texts import (
@@ -2241,12 +2242,7 @@ def _observation_card(report: DailyReport) -> Observation | None:
 def _reservation_size(event: NormalizedDailyEvent) -> tuple[int, int]:
     """返回 (加入人数, 总人数)。"""
 
-    participant_ids = set(event.participant_ids)
-    total_count = max(
-        1,
-        event.participant_count,
-        len(participant_ids) + (0 if event.attacker_id in participant_ids else 1),
-    )
+    total_count = reservation_party_size(event)
     return max(0, total_count - 1), total_count
 
 

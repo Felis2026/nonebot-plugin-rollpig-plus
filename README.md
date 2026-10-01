@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.14.2-ff69b4" alt="Version 0.14.2">
+    <img src="https://img.shields.io/badge/Version-0.14.3-ff69b4" alt="Version 0.14.3">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -123,7 +123,7 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 
 `本周小猪` 会生成个人一周总结长图。
 
-群主或管理员还可以通过 `小猪日报 开启` 为当前群开启猪圈日报；默认关闭，不会在安装后自动向群里推送。
+群内发送 `猪圈日报` 可查看最近一期已封版的日报卡；23:45 至次日 00:10 为出刊时段，暂不开放查卡。查询不触发推送或次日保护结算；本期没有活动时只返回休刊提示。群主或管理员可通过 `小猪日报 开启` 开启本群的**日报推送**；推送默认关闭，不影响主动查卡。
 
 <details>
 <summary><strong>展开查看烤群友、预约与补货的详细规则</strong></summary>
@@ -181,8 +181,9 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `随机烤猪` | 从当前群已有记录中随机选择目标烤。 |
 | `加急生火 @目标` | 使用加急模式烤群友。 |
 | `烤箱续火` | 当日活跃用户发起群体烧烤次数补货投票。 |
-| `小猪日报 状态` | 查看当前群日报状态。 |
-| `小猪日报 开启` / `小猪日报 关闭` | 群主或管理员控制当前群日报。 |
+| `猪圈日报` | 查看本群最近一期已封版的日报卡。 |
+| `小猪日报 状态` | 查看当前群日报推送状态。 |
+| `小猪日报 开启` / `小猪日报 关闭` | 群主或管理员控制当前群日报推送。 |
 | `同步小猪资源` | SUPERUSER 手动触发资源同步。 |
 
 ---
@@ -201,7 +202,7 @@ RollPig Plus 自带完整默认值，**不写 `.env`、不创建 JSON 配置文�
 - 公有小猪资源同步开启；
 -  GIF 小猪 Overlay 随资源同步启用；
 - 图片版小猪图鉴开启；
-- 猪圈日报默认关闭；
+- 猪圈日报自动推送默认关闭；主动查卡不受推送开关影响。
 - Cloud 关闭。
 
 配置优先级：
@@ -356,7 +357,7 @@ fonts/LXGWWenKaiTC-Bold.ttf
 | `rollpig_resource_sync_enabled` | `true` | 是否自动同步公共资源。 |
 | `rollpig_resource_sync_interval_hours` | `24` | 自动检查资源更新间隔。 |
 | `rollpig_roast_library_manifest_url` | RollPig Resources | 共享烤猪文案源；设为 `""` / `null` 可关闭。 |
-| `rollpig_daily_summary_enabled` | `false` | 未单独设置的群是否默认启用日报。 |
+| `rollpig_daily_summary_enabled` | `false` | 未单独设置的群是否默认启用日报推送。 |
 | `rollpig_card_font_path` | `null` | 普通小猪卡片与猪圈日报动态正文的字体；可设置完整 Noto Serif SC Bold 还原日报设计字体。 |
 | `rollpig_yesterday_card_title_font_path` | `null` | 昨日回顾卡标题字体；留空使用内置 ZCOOL 快乐体。 |
 | `rollpig_yesterday_card_body_font_path` | `null` | 昨日回顾卡正文字体；留空使用内置思源黑体。 |

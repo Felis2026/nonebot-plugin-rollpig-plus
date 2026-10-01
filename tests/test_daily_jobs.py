@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import nonebot
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, PrivateMessageEvent
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.plugin import get_plugin
 
@@ -24,7 +25,9 @@ if get_plugin("nonebot_plugin_rollpig_plus") is None:
 
 from nonebot_plugin_rollpig_plus import jobs
 from nonebot_plugin_rollpig_plus import data_manager as data_manager_module
+from nonebot_plugin_rollpig_plus.daily_report import build_daily_report
 from nonebot_plugin_rollpig_plus.data_manager import PigDataManager
+from nonebot_plugin_rollpig_plus.handlers import control as control_handler
 from nonebot_plugin_rollpig_plus.store import local_json as local_json_module
 from nonebot_plugin_rollpig_plus.store.base import RollpigStore
 from nonebot_plugin_rollpig_plus.store.cloud import (
@@ -76,6 +79,137 @@ class DailyReportBotRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(resolved), {"300"})
         self.assertIs(resolved["300"], bot_b)
         self.assertNotIn("400", resolved)
+
+
+class DailyReportQueryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        jobs.daily_report_query_cache.clear()
+        jobs.daily_report_query_tasks.clear()
+
+    def test_latest_report_waits_for_delivery_window_to_close(self) -> None:
+        timezone = jobs.ROLLPIG_TIMEZONE
+        cases = (
+            (dt.datetime(2026, 9, 23, 23, 44, tzinfo=timezone), "2026-09-22"),
+            (dt.datetime(2026, 9, 23, 23, 45, tzinfo=timezone), None),
+            (dt.datetime(2026, 9, 24, 0, 9, tzinfo=timezone), None),
+            (dt.datetime(2026, 9, 24, 0, 10, tzinfo=timezone), "2026-09-23"),
+        )
+        for current, expected in cases:
+            with self.subTest(current=current):
+                self.assertEqual(jobs.latest_daily_report_query_date(current), expected)
+
+    async def test_query_reads_only_confirmed_protection(self) -> None:
+        report = build_daily_report(
+            date_str="2026-09-22", group_id="100", group_rolls={"user": "pig-a"},
+            raw_events=[], user_profiles={},
+        )
+        bot = SimpleNamespace(self_id="bot-a")
+        for protected in (True, False):
+            with (
+                self.subTest(protected=protected),
+                patch.object(jobs, "store") as report_store,
+                patch.object(jobs, "load_group_daily_report", new=AsyncMock(return_value=report)) as load,
+                patch.object(jobs, "select_daily_protected_user_ids", return_value=["user"]),
+                patch.object(jobs, "render_daily_report_card", new=AsyncMock(return_value=SimpleNamespace(data=b"card"))) as render,
+            ):
+                report_store.is_protected = AsyncMock(return_value=protected)
+                result = await jobs._build_daily_report_query_card(bot, "100", "2026-09-22")
+
+                self.assertEqual(result, (b"card", not protected))
+                self.assertEqual(len(render.await_args.args[0].protections), int(protected))
+                report_store.is_protected.assert_awaited_once_with("100", "user", "2026-09-23")
+                self.assertEqual(load.await_args.kwargs["cutoff_at"], "2026-09-22T23:45:00+08:00")
+                report_store.replace_group_protections.assert_not_called()
+                report_store.claim_daily_report_deliveries.assert_not_called()
+                report_store.transition_daily_report_delivery.assert_not_called()
+
+    async def test_query_reuses_rendered_card_and_coalesces_concurrent_requests(self) -> None:
+        bot = SimpleNamespace(self_id="bot-a")
+        with patch.object(
+            jobs, "_build_daily_report_query_card",
+            new=AsyncMock(return_value=(b"card", False)),
+        ) as build:
+            first, second = await asyncio.gather(
+                jobs.render_latest_daily_report_query_card(bot, "100", "2026-09-22"),
+                jobs.render_latest_daily_report_query_card(bot, "100", "2026-09-22"),
+            )
+            cached = await jobs.render_latest_daily_report_query_card(bot, "100", "2026-09-22")
+
+        self.assertEqual((first, second, cached), ((b"card", False),) * 3)
+        build.assert_awaited_once()
+
+    async def test_query_without_activity_does_not_render_or_check_protection(self) -> None:
+        report = build_daily_report(
+            date_str="2026-09-22", group_id="100", group_rolls={}, raw_events=[],
+        )
+        with (
+            patch.object(jobs, "load_group_daily_report", new=AsyncMock(return_value=report)),
+            patch.object(jobs, "store") as report_store,
+            patch.object(jobs, "render_daily_report_card", new=AsyncMock()) as render,
+        ):
+            self.assertEqual(
+                await jobs._build_daily_report_query_card(SimpleNamespace(self_id="bot-a"), "100", "2026-09-22"),
+                (None, False),
+            )
+            report_store.is_protected.assert_not_called()
+            render.assert_not_awaited()
+
+
+class DailyReportQueryHandlerTests(unittest.IsolatedAsyncioTestCase):
+    def _event(self, *, private: bool = False):
+        message = Message("猪圈日报")
+        payload = {
+            "time": 0, "self_id": 1000, "post_type": "message", "sub_type": "normal",
+            "user_id": 123, "message_id": 1, "message": message,
+            "original_message": message, "raw_message": "猪圈日报", "font": 0,
+            "sender": {"user_id": 123, "nickname": "甲"},
+        }
+        if private:
+            payload["message_type"] = "private"
+            return PrivateMessageEvent.model_validate(payload)
+        payload.update(message_type="group", group_id=100)
+        return GroupMessageEvent.model_validate(payload)
+
+    async def _call(self, event, report_date, card):
+        with (
+            patch("nonebot_plugin_rollpig_plus.helpers.is_group_rollpig_enabled", return_value=True),
+            patch("nonebot_plugin_rollpig_plus.helpers.schedule_opportunistic_delivery"),
+            patch.object(control_handler, "latest_daily_report_query_date", return_value=report_date),
+            patch.object(control_handler, "render_latest_daily_report_query_card", new=AsyncMock(return_value=card)) as render,
+            patch.object(control_handler.cmd_daily_report_card, "finish", new=AsyncMock()) as finish,
+        ):
+            await control_handler.cmd_daily_report_card.handlers[0].call(
+                SimpleNamespace(self_id="1000"), event,
+            )
+            return render, finish.await_args.args[0]
+
+    async def test_query_returns_card_even_when_push_is_disabled(self) -> None:
+        event = self._event()
+        with patch.object(control_handler, "get_daily_report_group_status", return_value=(False, "default")):
+            render, response = await self._call(event, "2026-09-22", (b"card", False))
+        render.assert_awaited_once()
+        self.assertEqual([segment.type for segment in response], ["reply", "image"])
+
+    async def test_query_reports_unconfirmed_protection_without_extra_message(self) -> None:
+        _, response = await self._call(self._event(), "2026-09-22", (b"card", True))
+        self.assertEqual([segment.type for segment in response], ["reply", "image", "text"])
+        self.assertIn("保护结算暂未确认", response.extract_plain_text())
+
+    async def test_query_during_delivery_window_and_empty_report(self) -> None:
+        for report_date, card, expected in (
+            (None, (b"card", False), "正在出刊"),
+            ("2026-09-22", (None, False), "休刊"),
+        ):
+            with self.subTest(report_date=report_date):
+                render, response = await self._call(self._event(), report_date, card)
+                self.assertIn(expected, response.extract_plain_text())
+                if report_date is None:
+                    render.assert_not_awaited()
+
+    async def test_private_query_is_rejected_without_loading_report(self) -> None:
+        render, response = await self._call(self._event(private=True), "2026-09-22", (b"card", False))
+        render.assert_not_awaited()
+        self.assertIn("请在群里发送", response.extract_plain_text())
 
 
 class DataMaintenanceTests(unittest.IsolatedAsyncioTestCase):

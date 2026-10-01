@@ -480,6 +480,8 @@ def select_observation(
         )
 
     candidates: dict[ObservationKind, ObservationSelection] = {}
+    # 保留原有大样本门槛；三四次互动的小群日必须至少两次同结果，
+    # 避免一次偶发结果就被写成全天趋势。
     if overview.reservation_count >= 3 or (
         overview.reservation_count >= 2
         and total_roasts > 0
@@ -494,7 +496,11 @@ def select_observation(
             reservation_results["escape"],
             reservation_results["backfire"],
         )
-    if total_roasts >= 4 and overview.backfire_count / total_roasts >= 0.30:
+    if (total_roasts >= 4 and overview.backfire_count / total_roasts >= 0.30) or (
+        total_roasts >= 3
+        and overview.backfire_count >= 2
+        and overview.backfire_count / total_roasts >= 0.50
+    ):
         candidates["backfire"] = ObservationSelection(
             "backfire",
             total_roasts,
@@ -503,7 +509,11 @@ def select_observation(
             escape_count=all_results["escape"],
             backfire_count=all_results["backfire"],
         )
-    if total_roasts >= 5 and overview.escape_count / total_roasts >= 0.40:
+    if (total_roasts >= 5 and overview.escape_count / total_roasts >= 0.40) or (
+        total_roasts >= 3
+        and overview.escape_count >= 2
+        and overview.escape_count / total_roasts >= 0.50
+    ):
         candidates["escape"] = ObservationSelection(
             "escape",
             total_roasts,
@@ -515,6 +525,10 @@ def select_observation(
     if (
         overview.ordinary_roast_count >= 5
         and overview.ordinary_success_count / overview.ordinary_roast_count >= 0.60
+    ) or (
+        overview.ordinary_roast_count >= 3
+        and overview.ordinary_success_count >= 3
+        and overview.ordinary_success_count / overview.ordinary_roast_count >= 0.75
     ):
         candidates["success"] = ObservationSelection(
             "success",
@@ -556,18 +570,18 @@ def select_observation(
 
 
 _HEADLINE_BASE_SCORE: dict[HeadlineKind, int] = {
-    "normal_success": 20,
-    "normal_escape": 25,
-    "normal_backfire": 30,
-    "self_roast": 30,
-    "bot_backfire": 50,
-    "reservation_success": 50,
-    "reservation_escape": 55,
-    "reservation_backfire": 65,
-    "reservation_human": 60,
-    "reservation_food": 60,
-    "reservation_eaten": 60,
-    "reservation_sold": 60,
+    "normal_success": 35,
+    "normal_escape": 40,
+    "normal_backfire": 45,
+    "self_roast": 35,
+    "bot_backfire": 60,
+    "reservation_success": 35,
+    "reservation_escape": 40,
+    "reservation_backfire": 50,
+    "reservation_human": 50,
+    "reservation_food": 50,
+    "reservation_eaten": 50,
+    "reservation_sold": 50,
 }
 
 
@@ -596,39 +610,66 @@ def _headline_kind(event: NormalizedDailyEvent) -> HeadlineKind | None:
 def _pair_key(event: NormalizedDailyEvent) -> tuple[str, str] | None:
     if not event.attacker_id or not event.target_id:
         return None
-    # 自烤使用 (user, user) 作为重复关系；否则基础 30 分永远无法达到头条门槛。
+    # 自烤保留 (user, user)，以便沿用同一人多次自烤的既有候选条件。
     return tuple(sorted((event.attacker_id, event.target_id)))
 
 
+def reservation_party_size(event: NormalizedDailyEvent) -> int:
+    """统一预约总人数口径；旧事件若未把主厨写入名单，仍补算主厨。"""
+
+    participant_ids = set(event.participant_ids)
+    return max(
+        1,
+        event.participant_count,
+        len(participant_ids) + (0 if event.attacker_id in participant_ids else 1),
+    )
+
+
 def select_headline(events: Sequence[NormalizedDailyEvent]) -> HeadlineSelection | None:
-    """对真实结构化事件评分，低于 50 分时不生成头条。"""
+    """先按事件规模与当天互动选候选，再稳定比较事件分数。"""
 
     pair_counts = Counter(pair for event in events if (pair := _pair_key(event)) is not None)
+    interaction_events = tuple(event for event in events if event.event_type != "self_roast")
+    active_day = len(interaction_events) >= 3
+    mixed_results = len({event.result_kind for event in interaction_events}) >= 2
     candidates: list[HeadlineSelection] = []
     for event in events:
         kind = _headline_kind(event)
         if kind is None:
             continue
         repeated_pair_events = max(0, pair_counts.get(_pair_key(event), 0) - 1)
-        participant_count = event.participant_count if event.is_reservation else 0
-        size_bonus = 20 if participant_count >= 10 else 10 if participant_count >= 6 else 0
+        participant_count = reservation_party_size(event) if event.is_reservation else 0
+
+        # 单人预约不因“预约”身份压过真正的群事件；两人预约普通结果
+        # 只有在当天另有交锋或结局反转时才进入候选。
+        if event.is_reservation:
+            if participant_count == 1:
+                continue
+            if participant_count == 2 and kind in {"reservation_success", "reservation_escape"}:
+                if not active_day or not (mixed_results or repeated_pair_events):
+                    continue
+        elif kind in {"normal_success", "normal_escape", "normal_backfire"}:
+            if not active_day or not (mixed_results or repeated_pair_events):
+                continue
+        elif kind == "self_roast" and repeated_pair_events < 4:
+            continue
+
+        # 六人后协作价值递减；十二人上限不该把普通预约堆到双倍于 Bot 反噬。
+        size_bonus = 15 if participant_count >= 10 else 10 if participant_count >= 6 else 0
         score = (
             _HEADLINE_BASE_SCORE[kind]
-            + participant_count * 5
+            + min(max(0, participant_count - 1), 5) * 5
             + size_bonus
-            + repeated_pair_events * 5
+            + min(repeated_pair_events, 3) * 5
         )
-        if score >= 50:
-            candidates.append(
-                HeadlineSelection(kind, score, repeated_pair_events, event)
-            )
+        candidates.append(HeadlineSelection(kind, score, repeated_pair_events, event))
     if not candidates:
         return None
     return min(
         candidates,
         key=lambda item: (
             -item.score,
-            -item.event.participant_count,
+            -reservation_party_size(item.event) if item.event.is_reservation else 0,
             -_HEADLINE_BASE_SCORE[item.kind],
             _timestamp_key(item.event.created_at),
             item.event.event_id,

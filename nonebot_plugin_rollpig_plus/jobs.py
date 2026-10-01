@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import random
+import time
 import uuid
 from collections import Counter
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import replace
 
 from nonebot import get_bots, get_driver
 from nonebot.adapters.onebot.v11 import Bot, MessageSegment
@@ -62,6 +64,11 @@ DAILY_REPORT_SCHEDULE_TIME = dt.time(23, 45)
 DAILY_REPORT_RETRY_CUTOFF = dt.time(0, 10)
 DAILY_REPORT_TRANSITION_RETRY_SECONDS = 30
 PROTECTION_SETTLEMENT_RETRY_DELAYS = (0.0, 1.0, 3.0)
+DAILY_REPORT_QUERY_CACHE_SECONDS = 300
+DAILY_REPORT_QUERY_UNCONFIRMED_CACHE_SECONDS = 30
+DAILY_REPORT_QUERY_CACHE_LIMIT = 12
+daily_report_query_cache: dict[tuple[str, str, str, str], tuple[float, bytes | None, bool]] = {}
+daily_report_query_tasks: dict[tuple[str, str, str, str], asyncio.Task[tuple[bytes | None, bool]]] = {}
 
 
 # ================================ 运行时生命周期 ================================ #
@@ -493,16 +500,15 @@ async def settle_daily_protections_safely(
         logger.exception(f"[猪圈日报] 次日保护结算异常，继续处理日报: error={error}")
 
 
-async def build_group_daily_report(
+async def load_group_daily_report(
     report_store: RollpigStore,
     bot: Bot,
     *,
     date_str: str,
-    protect_date: str,
     group_id: str,
     cutoff_at: str,
 ) -> DailyReport:
-    """读取固定日期快照、写入次日保护，再返回可安全承诺保护结果的日报。"""
+    """只读地装配固定截止点的群日报，供定时投递与主动查询共用。"""
 
     group_rolls, event_query = await asyncio.gather(
         report_store.get_group_rolls(
@@ -538,6 +544,8 @@ async def build_group_daily_report(
         bot_user_ids=bot_user_ids,
         cutoff_at=cutoff_at,
     )
+    if not preliminary.has_activity:
+        return preliminary
     member_names = await load_daily_group_member_names(bot, group_id)
     profiles = await build_daily_user_profiles(
         report_store,
@@ -548,7 +556,7 @@ async def build_group_daily_report(
         group_rolls=group_rolls,
         member_names=member_names,
     )
-    report = build_daily_report(
+    return build_daily_report(
         date_str=date_str,
         group_id=group_id,
         group_rolls=group_rolls,
@@ -557,6 +565,47 @@ async def build_group_daily_report(
         bot_user_ids=bot_user_ids,
         user_profiles=profiles,
         cutoff_at=cutoff_at,
+    )
+
+
+def _with_daily_protections(
+    report: DailyReport,
+    protect_date: str,
+    user_ids: Sequence[str],
+) -> DailyReport:
+    """仅把已确认写入的保护名单填入卡片，不在展示层推断权益。"""
+
+    expires_at = dt.datetime.combine(
+        dt.date.fromisoformat(protect_date),
+        dt.time(23, 59),
+        tzinfo=ROLLPIG_TIMEZONE,
+    ).isoformat()
+    return replace(
+        report,
+        protections=tuple(
+            ProtectionReportItem(
+                user_id=user_id,
+                display_name=report.display_names.get(user_id, ""),
+                expires_at=expires_at,
+            )
+            for user_id in user_ids
+        ),
+    )
+
+
+async def build_group_daily_report(
+    report_store: RollpigStore,
+    bot: Bot,
+    *,
+    date_str: str,
+    protect_date: str,
+    group_id: str,
+    cutoff_at: str,
+) -> DailyReport:
+    """定时投递专用：读取日报、写入次日保护，再装配保护券。"""
+
+    report = await load_group_daily_report(
+        report_store, bot, date_str=date_str, group_id=group_id, cutoff_at=cutoff_at,
     )
     if not report.has_activity:
         return report
@@ -566,35 +615,88 @@ async def build_group_daily_report(
         protected_ids,
         protect_date,
     )
+    return _with_daily_protections(report, protect_date, protected_ids)
 
-    expires_at = dt.datetime.combine(
-        dt.date.fromisoformat(protect_date),
-        dt.time(23, 59),
+
+# ================================ 主动查询最近一期日报 ================================ #
+
+
+def latest_daily_report_query_date(now: dt.datetime | None = None) -> str | None:
+    """日报投递和保护结算窗口结束后，才开放昨天的正式卡片。"""
+
+    current = (now or dt.datetime.now(ROLLPIG_TIMEZONE)).astimezone(ROLLPIG_TIMEZONE)
+    wall_time = current.time().replace(tzinfo=None)
+    if wall_time >= DAILY_REPORT_SCHEDULE_TIME or wall_time < DAILY_REPORT_RETRY_CUTOFF:
+        return None
+    return (current.date() - dt.timedelta(days=1)).isoformat()
+
+
+async def _build_daily_report_query_card(
+    bot: Bot,
+    group_id: str,
+    date_str: str,
+) -> tuple[bytes | None, bool]:
+    """只读重建封版数据，并用已生效记录核对唯一保护候选。"""
+
+    cutoff_at = dt.datetime.combine(
+        dt.date.fromisoformat(date_str), DAILY_REPORT_SCHEDULE_TIME,
         tzinfo=ROLLPIG_TIMEZONE,
     ).isoformat()
-    protections = tuple(
-        ProtectionReportItem(
-            user_id=user_id,
-            display_name=profiles.get(
-                user_id,
-                DailyUserReportProfile(user_id=user_id),
-            ).display_name
-            or report.display_names.get(user_id, ""),
-            expires_at=expires_at,
+    protect_date = (dt.date.fromisoformat(date_str) + dt.timedelta(days=1)).isoformat()
+    report = await load_group_daily_report(
+        store, bot, date_str=date_str, group_id=group_id, cutoff_at=cutoff_at,
+    )
+    if not report.has_activity:
+        return None, False
+
+    candidates = select_daily_protected_user_ids(report.events)
+    confirmed = [
+        user_id for user_id in candidates
+        if await store.is_protected(group_id, user_id, protect_date)
+    ]
+    report = _with_daily_protections(report, protect_date, confirmed)
+    rendered = await render_daily_report_card(
+        report, cutoff_time=DAILY_REPORT_SCHEDULE_TIME.strftime("%H:%M"),
+    )
+    return rendered.data, bool(candidates and not confirmed)
+
+
+async def render_latest_daily_report_query_card(
+    bot: Bot,
+    group_id: str,
+    date_str: str,
+) -> tuple[bytes | None, bool]:
+    """同群同日合并并发查卡，短暂复用成图以限制重复渲染。"""
+
+    key = (group_id, date_str, str(bot.self_id), pig_resource_manager.resource_version)
+    now = time.monotonic()
+    cached = daily_report_query_cache.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1], cached[2]
+
+    task = daily_report_query_tasks.get(key)
+    if task is None:
+        task = asyncio.create_task(_build_daily_report_query_card(bot, group_id, date_str))
+        daily_report_query_tasks[key] = task
+        task.add_done_callback(
+            lambda finished: daily_report_query_tasks.pop(key, None)
+            if daily_report_query_tasks.get(key) is finished else None
         )
-        for user_id in protected_ids
+    result = await asyncio.shield(task)
+    daily_report_query_cache[key] = (
+        time.monotonic() + (
+            DAILY_REPORT_QUERY_UNCONFIRMED_CACHE_SECONDS
+            if result[1] else DAILY_REPORT_QUERY_CACHE_SECONDS
+        ),
+        *result,
     )
-    return build_daily_report(
-        date_str=date_str,
-        group_id=group_id,
-        group_rolls=group_rolls,
-        raw_events=event_query.items,
-        active_user_ids=active_user_ids,
-        bot_user_ids=bot_user_ids,
-        user_profiles=profiles,
-        protections=protections,
-        cutoff_at=cutoff_at,
-    )
+    for expired_key, value in list(daily_report_query_cache.items()):
+        if value[0] <= now:
+            daily_report_query_cache.pop(expired_key, None)
+    while len(daily_report_query_cache) > DAILY_REPORT_QUERY_CACHE_LIMIT:
+        oldest_key = min(daily_report_query_cache, key=lambda item: daily_report_query_cache[item][0])
+        daily_report_query_cache.pop(oldest_key)
+    return result
 
 
 def _daily_report_message_id(response: object) -> str:
@@ -912,7 +1014,7 @@ async def daily_report_job(
 
         # ================================ 控制台开关过滤 ================================ #
         # rollpig 总开关关闭的群既不推日报，也不参与次日保护结算，
-        # 保证"彻底关闭"；日报开关只控制通知投递，不影响游戏结算。
+        # 保证"彻底关闭"；日报推送开关只控制通知投递，不影响游戏结算。
         enabled_active_groups = [
             group_id for group_id in sorted(active_groups)
             if is_group_rollpig_enabled(group_id)

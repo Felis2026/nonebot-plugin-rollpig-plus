@@ -173,7 +173,7 @@ def get_daily_report_group_status(group_id: str | int) -> tuple[bool, str]:
             _check_optional_group_switch(
                 _daily_report_checker,
                 normalized_group_id,
-                switch_name="日报开关",
+                switch_name="日报推送开关",
             ),
             _daily_report_source_name,
         )
@@ -195,7 +195,7 @@ async def set_daily_report_group_enabled(group_id: str | int, enabled: bool) -> 
 
     if _daily_report_checker is not None:
         if _daily_report_setter is None:
-            raise RuntimeError("当前日报开关由外部控制器接管，但未提供命令写入接口")
+            raise RuntimeError("当前日报推送开关由外部控制器接管，但未提供命令写入接口")
         result = _daily_report_setter(normalized_group_id, enabled)
         if hasattr(result, "__await__"):
             await result
