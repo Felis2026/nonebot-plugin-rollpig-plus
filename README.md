@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.14.3-ff69b4" alt="Version 0.14.3">
+    <img src="https://img.shields.io/badge/Version-0.14.4-ff69b4" alt="Version 0.14.4">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -124,6 +124,8 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 `本周小猪` 会生成个人一周总结长图。
 
 群内发送 `猪圈日报` 可查看最近一期已封版的日报卡；23:45 至次日 00:10 为出刊时段，暂不开放查卡。查询不触发推送或次日保护结算；本期没有活动时只返回休刊提示。群主或管理员可通过 `小猪日报 开启` 开启本群的**日报推送**；推送默认关闭，不影响主动查卡。
+
+查卡时若暂时无法核对次日保护，仍返回日报，隐藏保护券并提示未确认，30 秒后可重新核对。未开启日报推送的群若保护结算失败，会保存失败群并按 30、60、120、300、600 秒间隔最多补试 5 次；重启继续使用原次数和截止点。补偿可在 00:10 后继续，但只补保护、不发送日报；关闭 RollPig 或保护日已过则停止。
 
 <details>
 <summary><strong>展开查看烤群友、预约与补货的详细规则</strong></summary>

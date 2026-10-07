@@ -5,7 +5,6 @@ import datetime as dt
 import random
 import time
 import uuid
-from collections import Counter
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import replace
@@ -15,14 +14,16 @@ from nonebot.adapters.onebot.v11 import Bot, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
+import nonebot_plugin_localstore as localstore
 
 from .card_renderer import shutdown_card_renderer
 from .catalog_renderer import shutdown_catalog_renderer
 from .config import plugin_config
+from .data_manager import LocalStoreUnavailableError
+from .daily_protection import ProtectionRecoveryQueue, select_daily_protected_user_ids
 from .daily_report import (
     DailyReport,
     DailyUserReportProfile,
-    NormalizedDailyEvent,
     ProtectionReportItem,
     build_daily_report,
     normalize_daily_events,
@@ -64,6 +65,10 @@ DAILY_REPORT_SCHEDULE_TIME = dt.time(23, 45)
 DAILY_REPORT_RETRY_CUTOFF = dt.time(0, 10)
 DAILY_REPORT_TRANSITION_RETRY_SECONDS = 30
 PROTECTION_SETTLEMENT_RETRY_DELAYS = (0.0, 1.0, 3.0)
+protection_recovery_queue = ProtectionRecoveryQueue(
+    localstore.get_plugin_data_file("daily_protection_recovery.json")
+)
+protection_recovery_task: asyncio.Task[None] | None = None
 DAILY_REPORT_QUERY_CACHE_SECONDS = 300
 DAILY_REPORT_QUERY_UNCONFIRMED_CACHE_SECONDS = 30
 DAILY_REPORT_QUERY_CACHE_LIMIT = 12
@@ -226,13 +231,15 @@ def _group_ids_from_response(response: object) -> set[str] | None:
         response = response.get("data")
     if not isinstance(response, list):
         return None
-    return {
-        str(group_id)
-        for item in response
-        if isinstance(item, dict)
-        for group_id in (item.get("group_id") or item.get("groupId"),)
-        if group_id not in {None, ""}
-    }
+    group_ids: set[str] = set()
+    for item in response:
+        if not isinstance(item, dict):
+            return None
+        group_id = item.get("group_id") or item.get("groupId")
+        if not isinstance(group_id, (int, str)) or not str(group_id).strip():
+            return None
+        group_ids.add(str(group_id))
+    return group_ids
 
 
 async def resolve_daily_report_bots(group_ids: list[str]) -> dict[str, Bot]:
@@ -241,6 +248,7 @@ async def resolve_daily_report_bots(group_ids: list[str]) -> dict[str, Bot]:
     unresolved = {str(group_id) for group_id in group_ids if group_id}
     resolved: dict[str, Bot] = {}
     bots = sorted(get_bots().items(), key=lambda item: str(item[0]))
+    fallback_bots: list[tuple[str, Bot]] = []
     if not bots:
         return resolved
 
@@ -250,9 +258,11 @@ async def resolve_daily_report_bots(group_ids: list[str]) -> dict[str, Bot]:
             visible_group_ids = _group_ids_from_response(await bot.get_group_list())
         except Exception as error:
             logger.warning(f"[猪圈日报] Bot 群列表读取失败，准备逐群确认: bot={self_id} error={error}")
+            fallback_bots.append((self_id, bot))
             continue
         if visible_group_ids is None:
             logger.warning(f"[猪圈日报] Bot 群列表格式无效，准备逐群确认: bot={self_id}")
+            fallback_bots.append((self_id, bot))
             continue
         for group_id in sorted(unresolved & visible_group_ids):
             resolved[group_id] = bot
@@ -260,12 +270,22 @@ async def resolve_daily_report_bots(group_ids: list[str]) -> dict[str, Bot]:
         if not unresolved:
             return resolved
 
-    # 列表接口失败时逐群确认，避免向未知群发送
+    # 成功读取的群列表已经给出明确成员范围，不能再用旧群资料把退群 Bot 捞回来。
+    # 只有列表不可用时才实时确认 Bot 本人的成员身份；群资料可查询不代表仍在群。
     for group_id in sorted(unresolved):
-        for self_id, bot in bots:
+        for self_id, bot in fallback_bots:
             try:
-                await bot.get_group_info(group_id=int(group_id), no_cache=False)
+                member = await bot.get_group_member_info(
+                    group_id=int(group_id), user_id=int(bot.self_id), no_cache=True,
+                )
             except Exception:
+                continue
+            if isinstance(member, dict) and isinstance(member.get("data"), dict):
+                member = member["data"]
+            if not isinstance(member, dict) or (
+                str(member.get("group_id")) != group_id
+                or str(member.get("user_id")) != str(bot.self_id)
+            ):
                 continue
             resolved[group_id] = bot
             break
@@ -397,25 +417,6 @@ async def build_daily_user_profiles(
     return profiles
 
 
-def select_daily_protected_user_ids(
-    events: Sequence[NormalizedDailyEvent],
-) -> list[str]:
-    """沿用现有规则：被成功烤至少两次且次数最高的一人获得次日保护。"""
-
-    roasted_counter: Counter[str] = Counter()
-    for event in events:
-        if (
-            event.event_type == "success"
-            and event.target_id
-            and event.target_id != event.attacker_id
-        ):
-            roasted_counter[event.target_id] += 1
-    if not roasted_counter:
-        return []
-    user_id, count = roasted_counter.most_common(1)[0]
-    return [user_id] if count >= 2 else []
-
-
 async def settle_daily_protections(
     group_ids: Sequence[str],
     *,
@@ -434,15 +435,28 @@ async def settle_daily_protections(
         return
 
     # ================================ 查询隔离与写入重试 ================================ #
-    try:
-        event_query = await store.query_daily_events(date_str=date_str, cutoff_at=cutoff_at)
-    except Exception as error:
-        logger.warning(f"[猪圈日报] 保护结算事件查询失败，已跳过: error={error}")
-        return
-    if not event_query.available:
-        # 与投递路径的严格语义一致：事件记录不可用时宁可跳过结算，
-        # 也不能把保护名单误写成空。
-        logger.warning("[猪圈日报] 事件记录暂时不可用，跳过未投递群的次日保护结算")
+    event_query = None
+    for attempt, delay in enumerate(PROTECTION_SETTLEMENT_RETRY_DELAYS, start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            result = await store.query_daily_events(date_str=date_str, cutoff_at=cutoff_at)
+            if not result.available:
+                raise CloudStoreError("保护结算事件记录暂时不可用")
+            event_query = result
+            break
+        except Exception as error:
+            logger.warning(
+                f"[猪圈日报] 保护结算事件查询失败: "
+                f"attempt={attempt}/{len(PROTECTION_SETTLEMENT_RETRY_DELAYS)} error={error}"
+            )
+    if event_query is None:
+        # 不可用不等于零事件；仅保存失败群及固定截止点，后续逐群补查。
+        for group_id in group_ids:
+            if is_group_rollpig_enabled(group_id):
+                await protection_recovery_queue.enqueue(
+                    group_id, date_str, protect_date, cutoff_at, protected_ids=None,
+                )
         return
     events_by_group: dict[str, list[dict]] = {}
     for item in event_query.items:
@@ -451,6 +465,8 @@ async def settle_daily_protections(
             events_by_group.setdefault(group_id, []).append(item)
     failures: list[str] = []
     for group_id in group_ids:
+        if not is_group_rollpig_enabled(group_id):
+            continue
         events = normalize_daily_events(
             events_by_group.get(group_id, ()),
             group_id=group_id,
@@ -462,9 +478,12 @@ async def settle_daily_protections(
         for attempt, delay in enumerate(PROTECTION_SETTLEMENT_RETRY_DELAYS, start=1):
             if delay:
                 await asyncio.sleep(delay)
+            if not is_group_rollpig_enabled(group_id):
+                break
             try:
                 await store.replace_group_protections(group_id, protected_ids, protect_date)
                 settled = True
+                await protection_recovery_queue.discard(date_str, group_id)
                 break
             except Exception as error:
                 last_error = error
@@ -474,6 +493,10 @@ async def settle_daily_protections(
                 )
         if not settled:
             failures.append(f"{group_id}={last_error}")
+            if is_group_rollpig_enabled(group_id):
+                await protection_recovery_queue.enqueue(
+                    group_id, date_str, protect_date, cutoff_at, protected_ids=protected_ids,
+                )
     if failures:
         logger.warning(f"[猪圈日报] 部分群次日保护结算失败: {'; '.join(failures)}")
         return
@@ -498,6 +521,43 @@ async def settle_daily_protections_safely(
         )
     except Exception as error:
         logger.exception(f"[猪圈日报] 次日保护结算异常，继续处理日报: error={error}")
+
+
+# ================================ 失败保护结算恢复 ================================ #
+
+
+async def _run_protection_recovery() -> None:
+    """只补写失败群的保护，不领取日报或发送消息。"""
+
+    try:
+        await protection_recovery_queue.run_due(store)
+    except Exception as error:
+        logger.exception(f"[猪圈日报] 保护补偿任务异常: error={error}")
+
+
+def schedule_protection_recovery() -> None:
+    """合并启动和定时检查，纳入 shutdown 收束以免关闭 Store 后仍在写入。"""
+
+    global protection_recovery_task
+    if protection_recovery_task is not None and not protection_recovery_task.done():
+        return
+    protection_recovery_task = asyncio.create_task(_run_protection_recovery())
+    background_maintenance_tasks.add(protection_recovery_task)
+    protection_recovery_task.add_done_callback(background_maintenance_tasks.discard)
+
+
+@get_driver().on_startup
+async def startup_protection_recovery() -> None:
+    """重启后从本地补偿记录恢复原次数与下一次时间，不依赖 Bot 连接。"""
+
+    schedule_protection_recovery()
+
+
+@scheduler.scheduled_job("interval", seconds=30, id="rollpig_protection_recovery", max_instances=1)
+async def protection_recovery_job() -> None:
+    """轻量检查失败队列；没有待补偿群时不查询 Cloud。"""
+
+    schedule_protection_recovery()
 
 
 async def load_group_daily_report(
@@ -650,10 +710,16 @@ async def _build_daily_report_query_card(
         return None, False
 
     candidates = select_daily_protected_user_ids(report.events)
-    confirmed = [
-        user_id for user_id in candidates
-        if await store.is_protected(group_id, user_id, protect_date)
-    ]
+    try:
+        confirmed = [
+            user_id for user_id in candidates
+            if await store.is_protected(group_id, user_id, protect_date)
+        ]
+    except (CloudStoreError, LocalStoreUnavailableError) as error:
+        # 附加权益查询失败不能挡住日报主体；只展示确已生效的保护，
+        # 未确认结果沿用 30 秒短缓存与图片后的提示，不在查卡路径补写。
+        confirmed = []
+        logger.warning(f"[猪圈日报] 查卡保护未确认，隐藏保护券: group={group_id} error={error}")
     report = _with_daily_protections(report, protect_date, confirmed)
     rendered = await render_daily_report_card(
         report, cutoff_time=DAILY_REPORT_SCHEDULE_TIME.strftime("%H:%M"),
