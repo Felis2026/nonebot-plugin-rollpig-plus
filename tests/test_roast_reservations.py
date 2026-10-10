@@ -11,7 +11,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import nonebot
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
+from nonebot.adapters.onebot.v11.bot import _check_at_me, _check_reply
 from nonebot.plugin import get_plugin
 from nonebot.rule import CommandRule, TrieRule
 
@@ -246,6 +247,267 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(matcher=matcher):
                 self.assertIsNone(_command_rule(matcher).force_whitespace)
+
+
+# ================================ 前置 At 与统一目标解析 ================================ #
+
+
+class LeadingAtRoastTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _event(message: Message) -> GroupMessageEvent:
+        """保留独立原始消息，按真实 OneBot 群事件测试分段输入。"""
+
+        return GroupMessageEvent.model_validate({
+            "time": 0, "self_id": 1000, "post_type": "message", "sub_type": "normal",
+            "user_id": 123, "message_type": "group", "message_id": 1,
+            "message": message.copy(), "original_message": message.copy(), "raw_message": str(message),
+            "font": 0, "sender": {"user_id": 123, "nickname": "甲"}, "group_id": 100,
+        })
+
+    async def _preprocessed_event(self, message: Message, reply_author: int | None = None):
+        """调用适配器实际预处理，覆盖自动回复 At 与 Bot At 被消费的情况。"""
+
+        event = self._event(message)
+        bot = SimpleNamespace(get_msg=AsyncMock(return_value={
+            "time": 0, "message_type": "group", "message_id": 900, "real_id": 900,
+            "sender": {"user_id": reply_author, "nickname": "被回复者"}, "message": Message("旧消息"),
+        }))
+        await _check_reply(bot, event)
+        _check_at_me(bot, event)
+        return event
+
+    async def _routes(self, event: GroupMessageEvent):
+        state = {}
+        TrieRule.get_value(None, event, state)
+        old = await roast_handler.cmd_roast_member.rule(None, event, state)
+        new = await roast_handler.cmd_roast_member_leading_at.rule(None, event, state)
+        return old, new
+
+    async def test_exact_commands_have_mutually_exclusive_routes(self):
+        for message in (
+            MessageSegment.at(222) + "/烤群友",
+            MessageSegment.at(222) + " /烤群友 ",
+            Message(" \n") + MessageSegment.at(222) + " /烤群友\n",
+        ):
+            with self.subTest(message=str(message)):
+                self.assertEqual(await self._routes(self._event(message)), (False, True))
+        for message in (
+            Message("/烤群友") + MessageSegment.at(222),
+            Message("/烤群友 ") + MessageSegment.at(222),
+            Message("/加急生火 ") + MessageSegment.at(222),
+            Message("/烤群友 强行点火 ") + MessageSegment.at(222),
+        ):
+            with self.subTest(message=str(message)):
+                self.assertEqual(await self._routes(self._event(message)), (True, False))
+
+    def test_leading_at_respects_configured_command_starts(self):
+        for starts, accepted, rejected in (
+            ({""}, "烤群友", "/烤群友"),
+            ({"/"}, "/烤群友", "烤群友"),
+            ({"!"}, "!烤群友", "/烤群友"),
+        ):
+            with self.subTest(starts=starts), patch.object(nonebot.get_driver().config, "command_start", starts):
+                self.assertTrue(helpers.leading_at_roast_has_valid_command(self._event(MessageSegment.at(222) + accepted)))
+                self.assertFalse(helpers.leading_at_roast_has_valid_command(self._event(MessageSegment.at(222) + rejected)))
+
+    def test_chat_attachments_and_split_commands_are_not_claimed(self):
+        for message in (
+            MessageSegment.at(222) + " /烤群友吧",
+            MessageSegment.at(222) + " /烤群友 今天",
+            MessageSegment.at(222) + " 你要不要烤群友",
+            MessageSegment.at(222) + " /加急生火",
+            MessageSegment.at(222) + " /今日烤猪",
+            MessageSegment.at(222) + " /烤群友 加急生火",
+            MessageSegment.at(222) + " /烤 " + MessageSegment.at(333) + "群友",
+            MessageSegment.at(222) + " /烤群友" + MessageSegment.image("file:///pig.png"),
+        ):
+            with self.subTest(message=str(message)):
+                self.assertFalse(helpers.leading_at_roast_has_valid_command(self._event(message)))
+
+    async def test_disabled_group_does_not_claim_leading_at(self):
+        event = self._event(MessageSegment.at(222) + " /烤群友")
+        with patch.object(helpers, "is_group_rollpig_enabled", return_value=False):
+            self.assertEqual(await self._routes(event), (False, False))
+
+    async def test_explicit_target_wins_over_reply_in_both_command_orders(self):
+        for reply_author in (111, 1000):
+            for command in (
+                MessageSegment.at(222) + " /烤群友",
+                Message("/烤群友 ") + MessageSegment.at(222),
+            ):
+                message = MessageSegment.reply(900) + MessageSegment.at(reply_author) + " " + command
+                event = await self._preprocessed_event(message, reply_author)
+                original = event.original_message.copy()
+                bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"card": "乙"}))
+                with self.subTest(reply_author=reply_author, command=str(command)):
+                    target = await helpers.resolve_roast_target(bot, event)
+                    self.assertEqual(target.target_id, "222")
+                    bot.get_group_member_info.assert_awaited_once_with(group_id=100, user_id=222)
+                    self.assertEqual(event.original_message, original)
+                    old, new = await self._routes(event)
+                    self.assertNotEqual(old, new)
+
+    async def test_reply_without_explicit_target_uses_reply_author(self):
+        for reply_author in (111, 1000):
+            event = await self._preprocessed_event(
+                MessageSegment.reply(900) + MessageSegment.at(reply_author) + " /烤群友", reply_author,
+            )
+            bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"nickname": "原作者"}))
+            target = await helpers.resolve_roast_target(bot, event)
+            self.assertEqual(target.target_id, str(reply_author))
+            self.assertEqual(await self._routes(event), (True, False))
+
+    async def test_consumed_bot_at_overrides_reply_but_not_another_explicit_target(self):
+        for command in (
+            MessageSegment.at(1000) + " /烤群友",
+            Message("/烤群友 ") + MessageSegment.at(1000),
+        ):
+            event = await self._preprocessed_event(
+                MessageSegment.reply(900) + MessageSegment.at(111) + " " + command, 111,
+            )
+            bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"nickname": "Bot"}))
+            self.assertEqual((await helpers.resolve_roast_target(bot, event)).target_id, "1000")
+            self.assertEqual(await self._routes(event), (True, False))
+        event = await self._preprocessed_event(MessageSegment.at(1000) + " /烤群友 " + MessageSegment.at(222))
+        self.assertEqual((await helpers.resolve_roast_target(bot, event)).target_id, "222")
+
+    async def test_duplicate_at_is_one_target_and_resolution_does_not_mutate_messages(self):
+        event = self._event(MessageSegment.at(222) + " /烤群友 " + MessageSegment.at(222))
+        message = event.message.copy()
+        original = event.original_message.copy()
+        bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"nickname": "乙"}))
+        self.assertEqual((await helpers.resolve_roast_target(bot, event)).target_id, "222")
+        bot.get_group_member_info.assert_awaited_once()
+        self.assertEqual(event.message, message)
+        self.assertEqual(event.original_message, original)
+
+    async def test_invalid_and_multiple_targets_finish_before_member_lookup_or_writes(self):
+        for targets, expected in (
+            (MessageSegment.at(222) + MessageSegment.at(333), "请只 @ 一位"),
+            (MessageSegment.at("all"), "不能烤全体成员"),
+            (MessageSegment.at("invalid"), "不能烤全体成员"),
+        ):
+            for message in (targets + " /烤群友", Message("/烤群友 ") + targets):
+                with self.subTest(message=str(message)), patch.object(roast_handler, "store") as store:
+                    matcher = SimpleNamespace(finish=AsyncMock())
+                    bot = SimpleNamespace(get_group_member_info=AsyncMock())
+                    await roast_handler._handle_member_roast(matcher, bot, self._event(message))
+                    matcher.finish.assert_awaited_once()
+                    self.assertIn(expected, str(matcher.finish.await_args.args[0]))
+                    bot.get_group_member_info.assert_not_awaited()
+                    self.assertFalse(store.mock_calls)
+
+    async def test_both_registered_handlers_inject_instances_and_share_one_flow(self):
+        event = self._event(MessageSegment.at(222) + " /烤群友")
+        bot = Mock(spec=Bot)
+        for matcher_class, handler in (
+            (roast_handler.cmd_roast_member, roast_handler._roast_member_command),
+            (roast_handler.cmd_roast_member_leading_at, roast_handler._roast_member_leading_at),
+        ):
+            matcher = matcher_class()
+            solved = await matcher_class.handlers[0].solve(matcher=matcher, bot=bot, event=event)
+            self.assertIs(solved["matcher"], matcher)
+            with patch.object(roast_handler, "_handle_member_roast", new_callable=AsyncMock) as flow:
+                await handler.__wrapped__.__wrapped__(matcher, bot, event)
+                flow.assert_awaited_once_with(matcher, bot, event)
+            self.assertTrue(matcher.block)
+        self.assertFalse(roast_handler.cmd_roast_member_leading_at.block)
+
+    # ================================ 原烧烤业务回归 ================================ #
+
+    async def test_both_entries_keep_single_cooldown_outcome_and_feed_eligibility(self):
+        cases = (
+            (roast_handler._roast_member_leading_at, MessageSegment.at(222) + " /烤群友", None),
+            (roast_handler._roast_member_command, Message("/烤群友 ") + MessageSegment.at(222), None),
+            (roast_handler._roast_member_command, Message("/加急生火 ") + MessageSegment.at(222), "normal"),
+            (roast_handler._roast_member_command, Message("/烤群友 强行点火 ") + MessageSegment.at(222), "super"),
+        )
+        for handler, message, force_mode in cases:
+            with (
+                self.subTest(message=str(message)),
+                patch.object(nonebot.get_driver().config, "superusers", {"123"}),
+                patch.object(roast_handler, "store") as store,
+                patch.object(roast_handler, "_load_attacker_pig_or_finish", new_callable=AsyncMock, return_value={"id": "attacker-pig"}),
+                patch.object(roast_handler, "get_pig_by_id", return_value={"id": "target-pig", "name": "程序猪"}),
+                patch.object(roast_handler, "pick_member_target_block_text", return_value=""),
+                patch.object(roast_handler, "build_member_roast_outcome", new_callable=AsyncMock, return_value=RoastOutcome(event_type="roast_success", food_name="烤乳猪")) as build,
+                patch.object(roast_handler, "finish_roast_outcome", new_callable=AsyncMock) as finish,
+            ):
+                store.prepare_roast_reservation = AsyncMock(return_value=SimpleNamespace(
+                    status="target_ready", target_pig_id="target-pig", reservation=None, protection_broken=False,
+                ))
+                store.mark_group_roll_seen = AsyncMock()
+                store.consume_roast_cooldown = AsyncMock(return_value=SimpleNamespace(allowed=True))
+                store.consume_force_usage = AsyncMock(return_value=True)
+                bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"nickname": "乙"}))
+                matcher = SimpleNamespace(stop_propagation=Mock(), finish=AsyncMock())
+                event = self._event(message)
+                await handler.__wrapped__.__wrapped__(matcher, bot, event)
+                store.prepare_roast_reservation.assert_awaited_once()
+                self.assertEqual(store.prepare_roast_reservation.await_args.kwargs["force_mode"], force_mode)
+                self.assertEqual(store.mark_group_roll_seen.await_count, 2)
+                self.assertEqual(store.consume_roast_cooldown.await_count, int(force_mode is None))
+                self.assertEqual(store.consume_force_usage.await_count, int(force_mode == "normal"))
+                build.assert_awaited_once()
+                finish.assert_awaited_once()
+                self.assertIs(finish.await_args.args[0], matcher)
+                self.assertEqual(finish.await_args.kwargs["target_id"], "222")
+                self.assertEqual(finish.await_args.kwargs["daily_feed_eligible"], force_mode is None)
+
+    async def test_both_entries_keep_reservation_preparation_and_notice(self):
+        for handler, message in (
+            (roast_handler._roast_member_leading_at, MessageSegment.at(222) + " /烤群友"),
+            (roast_handler._roast_member_command, Message("/烤群友 ") + MessageSegment.at(222)),
+        ):
+            with (
+                self.subTest(message=str(message)),
+                patch.object(roast_handler, "store") as store,
+                patch.object(roast_handler, "_load_attacker_pig_or_finish", new_callable=AsyncMock, return_value={"id": "attacker-pig"}),
+                patch.object(roast_handler, "register_owned_reservation") as register,
+                patch.object(roast_handler, "_send_reservation_notice", new_callable=AsyncMock) as send,
+                patch.object(roast_handler, "build_member_roast_outcome", new_callable=AsyncMock) as build,
+            ):
+                reservation = SimpleNamespace(delivery_bot_id="1000")
+                store.prepare_roast_reservation = AsyncMock(return_value=SimpleNamespace(
+                    status="reservation_created", reservation=reservation, protection_broken=False,
+                ))
+                store.mark_group_roll_seen = AsyncMock()
+                bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"nickname": "乙"}))
+                matcher = SimpleNamespace(stop_propagation=Mock(), finish=AsyncMock())
+                await handler.__wrapped__.__wrapped__(matcher, bot, self._event(message))
+                store.prepare_roast_reservation.assert_awaited_once()
+                register.assert_called_once_with("1000")
+                send.assert_awaited_once()
+                self.assertIs(send.await_args.args[0], matcher)
+                build.assert_not_awaited()
+                store.consume_roast_cooldown.assert_not_called()
+
+    async def test_bot_backfire_and_denied_admin_mode_keep_existing_rules(self):
+        for message, expected_event_count in (
+            (MessageSegment.at(1000) + " /烤群友", 1),
+            (Message("/烤群友 强行点火 ") + MessageSegment.at(222), 0),
+        ):
+            with (
+                self.subTest(message=str(message)),
+                patch.object(nonebot.get_driver().config, "superusers", set()),
+                patch.object(roast_handler, "store") as store,
+                patch.object(roast_handler, "pick_food_pig", return_value={"name": "烤乳猪"}),
+                patch.object(roast_handler, "_load_attacker_pig_or_finish", new_callable=AsyncMock) as load,
+            ):
+                event = await self._preprocessed_event(message)
+                store.append_roast_event = AsyncMock()
+                matcher = SimpleNamespace(finish=AsyncMock())
+                bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"nickname": "Bot"}))
+                await roast_handler._handle_member_roast(matcher, bot, event)
+                self.assertEqual(store.append_roast_event.await_count, expected_event_count)
+                if expected_event_count:
+                    self.assertEqual(store.append_roast_event.await_args.args[0].event_type, "bot_backfire")
+                else:
+                    self.assertIn("仅 superuser 可用", str(matcher.finish.await_args.args[0]))
+                matcher.finish.assert_awaited_once()
+                load.assert_not_awaited()
+                store.prepare_roast_reservation.assert_not_called()
+                store.consume_roast_cooldown.assert_not_called()
 
 
 class StoreErrorGuardTests(unittest.IsolatedAsyncioTestCase):

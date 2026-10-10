@@ -793,7 +793,7 @@ class ExVariantSyncTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
         staging_dir = self.root / "private-staging"
         download_mock = AsyncMock()
         manifest = {
-            "pig_json": {},
+            "pig_json": {"path": "pig.json"},
             "optional_files": {"pig_ex_variants": None},
             "variant_images": [],
             "images": [],
@@ -813,7 +813,7 @@ class ExVariantSyncTests(ExVariantFixtureMixin, unittest.IsolatedAsyncioTestCase
     async def test_private_manifest_rejects_nonempty_or_malformed_variant_images(self) -> None:
         manager = RollPigResourceManager()
         base_manifest = {
-            "pig_json": {},
+            "pig_json": {"path": "pig.json"},
             "optional_files": {},
             "images": [],
         }

@@ -314,6 +314,7 @@ def _build_cache_key(data: CatalogData, snapshot: CatalogSnapshot) -> str:
     favorite = data.favorite
     key_payload = {
         "resource_version": pig_resource_manager.resource_version,
+        "resource_revision": pig_resource_manager.resource_revision,
         # 页码必须使用业务层钳制后的实际页，避免 999/1000 等请求重复缓存同一张末页图片。
         "page": stats.page,
         "page_size": CATALOG_PAGE_SIZE,

@@ -940,6 +940,7 @@ class RoastManager:
         *,
         force: bool = False,
         wait_if_busy: bool = True,
+        redownload: bool = False,
     ) -> RoastLibrarySyncResult:
         """下载并无损合并共享快照；显式空 URL 时只清理纯共享内容。"""
 
@@ -994,8 +995,14 @@ class RoastManager:
                     for flags_by_hash in self._source_flags.values()
                     for flags in flags_by_hash.values()
                 )
+                # 共享正文只有一个 JSON：复用的是未合并的远端快照，不能把本地 AI 文案当下载缓存。
+                library_bytes = None
+                if not redownload:
+                    library_bytes = await asyncio.to_thread(
+                        self._verified_shared_snapshot, expected_size, expected_sha256,
+                    )
                 if (
-                    not force
+                    library_bytes is not None
                     and state.get("manifest_url") == manifest_url
                     and state.get("resource_version") == resource_version
                     and state.get("sha256") == expected_sha256
@@ -1011,13 +1018,14 @@ class RoastManager:
                         message=f"共享文案：已是最新（{resource_version}）",
                     )
 
-                library_url = self._resolve_shared_library_url(manifest_url, relative_path)
-                library_bytes = await self._read_resource_bytes(
-                    client,
-                    library_url,
-                    max_size=min(expected_size, self._resource_file_limit()),
-                    label="共享文案正文",
-                )
+                if library_bytes is None:
+                    library_url = self._resolve_shared_library_url(manifest_url, relative_path)
+                    library_bytes = await self._read_resource_bytes(
+                        client,
+                        library_url,
+                        max_size=min(expected_size, self._resource_file_limit()),
+                        label="共享文案正文",
+                    )
             if len(library_bytes) != expected_size:
                 raise ValueError(
                     f"共享文案正文大小不符: manifest={expected_size}, actual={len(library_bytes)}"
@@ -1101,6 +1109,17 @@ class RoastManager:
                     f"新增 {added} 条｜移除 {removed} 条｜本地保留 {local_count} 条"
                 ),
             )
+
+    def _verified_shared_snapshot(self, expected_size: int, expected_hash: str) -> bytes | None:
+        """校验独立共享快照；缺失或损坏时仅重新获取正文，不影响本地来源。"""
+
+        try:
+            if self.snapshot_file.is_symlink() or self.snapshot_file.stat().st_size != expected_size:
+                return None
+            data = self.snapshot_file.read_bytes()
+            return data if hashlib.sha256(data).hexdigest() == expected_hash else None
+        except OSError:
+            return None
 
     def _format_text(self, text: str, origin: str, food: str, killer: str = None, victim: str = None) -> str:
         res = text.replace("{origin}", origin).replace("{food}", food)
