@@ -45,8 +45,9 @@ PIG_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 PRIVATE_SOURCE_NAME_PATTERN = re.compile(r"[^a-z0-9_-]+")
 # GIF 资源应优先于同名 PNG，让资源包把某只猪替换为动态版时无需改 pig.json。
-IMAGE_SUFFIX_PRIORITY = (".gif", ".png")
+IMAGE_SUFFIX_PRIORITY = (".gif", ".png", ".jpg", ".jpeg")
 ALLOWED_IMAGE_SUFFIXES = set(IMAGE_SUFFIX_PRIORITY)
+VARIANT_IMAGE_SUFFIXES = {".png", ".gif"}
 VARIANT_IMAGE_MANIFEST_FIELDS = frozenset({"pig_id", "level", "filename", "path", "size", "sha256"})
 RESOURCE_MANIFEST_MAX_SIZE = 1 * 1024 * 1024
 RESOURCE_PIG_JSON_MAX_SIZE = 2 * 1024 * 1024
@@ -59,6 +60,10 @@ RESOURCE_MAX_VARIANT_IMAGES = 500
 RESOURCE_MAX_FILES = 700
 RESOURCE_SYNC_TIMEOUT_MIN_SECONDS = 1.0
 RESOURCE_SYNC_TIMEOUT_MAX_SECONDS = 240.0
+# 小并发减少图片请求的串行等待；包级同步仍由同一把锁串行执行。
+RESOURCE_DOWNLOAD_CONCURRENCY = 4
+# 客户端内部摘要随目录切换，不属于远端资源协议；旧客户端可以忽略它。
+RESOURCE_SNAPSHOT_FILENAME = ".sync.json"
 
 
 def _resource_sync_timeout() -> float:
@@ -74,6 +79,29 @@ class ResourceSyncResult:
     skipped: bool
     resource_version: str = ""
     message: str = ""
+
+
+@dataclass(frozen=True)
+class _ResourceFile:
+    """把远端条目绑定到固定的本地路径，区分下载来源和激活后的目录结构。"""
+
+    relative_path: str
+    meta: dict[str, Any]
+    max_size: int
+
+
+@dataclass
+class _ResourceTransfer:
+    """一次包同步的复用计划与实际传输统计；只统计成功写入暂存目录的文件。"""
+
+    active_dir: Path
+    staging_dir: Path
+    reusable: set[str]
+    old_files: set[str]
+    reused: int = 0
+    added: int = 0
+    replaced: int = 0
+    downloaded_bytes: int = 0
 
 
 @dataclass
@@ -154,6 +182,7 @@ class RollPigResourceManager:
         self.ex_variants: dict[str, dict[int, PigExVariant]] = {}
         self.variant_blocked_pig_ids: set[str] = set()
         self.resource_version: str = "builtin"
+        self.resource_revision: str = "builtin"
 
     # ================================ 资源读取与内存快照 ================================ #
     # 资源读取统一走这里，命令层继续使用 PIG_LIST/find_image_file 这类旧接口，减少侵入面。
@@ -264,6 +293,10 @@ class RollPigResourceManager:
         # 避免达到 EX 等级后又突然被官方图片或文案覆盖回去。
         self.variant_blocked_pig_ids.update(overridden_ids)
         self.resource_version = f"{self.resource_version}+{resource_version or 'private'}"
+        # 顺序也属于渲染输入；同版本内容变化或撤销覆盖不能继续命中旧图鉴缓存。
+        self.resource_revision = hashlib.sha256(
+            f"{self.resource_revision}+{self._directory_revision(resource_dir / 'images')}".encode("utf-8")
+        ).hexdigest()
         logger.info(
             f"rollpig 私有资源已叠加: version={resource_version}, private_pigs={len(private_pigs)}, total={len(self.pig_list)}"
         )
@@ -294,6 +327,7 @@ class RollPigResourceManager:
             f"rollpig 资源已加载: version={resource_version}, pigs={len(pig_list)}, "
             f"variant_pigs={len(ex_variants)}, variants={variant_count}"
         )
+        self.resource_revision = self._directory_revision(image_dirs[0])
 
     def find_image_file(self, pig_id: str) -> Path | None:
         for image_dir in self.image_dirs:
@@ -438,75 +472,8 @@ class RollPigResourceManager:
         except Exception:
             return "cloud"
 
-    def _active_variant_assets_complete(self, manifest: Mapping[str, Any]) -> bool:
-        """核对当前 active 是否已完整保存 manifest 声明的差分资源。"""
-
-        optional_files = manifest.get("optional_files") or {}
-        raw_variant_items = manifest.get("variant_images", [])
-        if not isinstance(optional_files, dict) or not isinstance(raw_variant_items, list):
-            return False
-        if len(raw_variant_items) > RESOURCE_MAX_VARIANT_IMAGES:
-            return False
-
-        variants_meta = optional_files.get("pig_ex_variants")
-        if variants_meta is None and not raw_variant_items:
-            return True
-        if not isinstance(variants_meta, dict):
-            return False
-
-        try:
-            self._validate_required_manifest_meta(
-                variants_meta,
-                label="optional_files.pig_ex_variants",
-                expected_path="pig_ex_variants.json",
-            )
-            variants_path = ACTIVE_RESOURCE_DIR / "pig_ex_variants.json"
-            if not self._local_file_matches_meta(variants_path, variants_meta):
-                return False
-            active_pigs = self._read_pig_json(ACTIVE_RESOURCE_DIR / "pig.json")
-            variant_specs = self._read_ex_variant_specs(
-                variants_path,
-                pig_ids={str(item["id"]) for item in active_pigs},
-                strict=True,
-            )
-            image_specs = {
-                key: spec.filename
-                for key, spec in variant_specs.items()
-                if spec.filename is not None
-            }
-
-            seen_keys: set[tuple[str, int]] = set()
-            for index, image_meta in enumerate(raw_variant_items):
-                if not isinstance(image_meta, dict):
-                    return False
-                if set(image_meta) - VARIANT_IMAGE_MANIFEST_FIELDS:
-                    return False
-                pig_id = str(image_meta.get("pig_id") or "")
-                raw_level = image_meta.get("level")
-                if isinstance(raw_level, bool) or not isinstance(raw_level, int):
-                    return False
-                level = int(raw_level)
-                filename = str(image_meta.get("filename") or "")
-                self._validate_variant_image_filename(filename, pig_id=pig_id, level=level)
-                self._validate_required_manifest_meta(
-                    image_meta,
-                    label=f"variant_images[{index}]",
-                    expected_path=f"images/{filename}",
-                )
-                key = (pig_id, level)
-                if key in seen_keys:
-                    return False
-                seen_keys.add(key)
-                if image_specs.get(key) != filename:
-                    return False
-                if not self._local_file_matches_meta(ACTIVE_IMAGE_DIR / filename, image_meta):
-                    return False
-        except (OSError, TypeError, ValueError):
-            return False
-        return set(image_specs) == seen_keys
-
     def _local_file_matches_meta(self, path: Path, meta: Mapping[str, Any]) -> bool:
-        """校验 active 文件大小与 SHA256；仅在同版本跳过下载前在线程中调用。"""
+        """在线程中校验 active 文件大小与 SHA256，不以版本号或修改时间替代内容。"""
 
         if not path.is_file() or path.is_symlink():
             return False
@@ -662,8 +629,10 @@ class RollPigResourceManager:
         )
 
     # ================================ 云端同步 ================================ #
-    # 同步流程采用“临时目录下载 -> 完整校验 -> 原子替换 active”的方式，避免半包覆盖。
-    async def sync_all(self, *, force: bool = False, wait_if_busy: bool = True) -> tuple[ResourceSyncResult, ResourceSyncResult]:
+    # 文件传输可以增量，但 active 始终是完整快照，不能在旧目录上直接补丁式更新。
+    async def sync_all(
+        self, *, force: bool = False, wait_if_busy: bool = True, redownload: bool = False,
+    ) -> tuple[ResourceSyncResult, ResourceSyncResult]:
         """串行同步公有包与所有私有 overlay；手动同步等待，后台同步可选择忙时跳过。"""
         if not wait_if_busy and self._sync_lock.locked():
             return (
@@ -671,29 +640,46 @@ class RollPigResourceManager:
                 ResourceSyncResult(updated=False, skipped=True, message=""),
         )
         async with self._sync_lock:
-            public_result = await self._sync_from_remote_unlocked(force=force)
-            private_result = await self._sync_private_overlays_from_remote_unlocked(force=force)
-            if public_result.updated or private_result.updated:
+            try:
+                try:
+                    public_result = await self._sync_from_remote_unlocked(force=force, redownload=redownload)
+                except Exception as error:
+                    # 公有包失败不阻断附加包；它们仍基于保留的旧基础包验证后更新。
+                    logger.warning(f"rollpig 公有资源同步失败，继续使用当前资源: {error}")
+                    public_result = ResourceSyncResult(
+                        False, False, message=f"公有资源：同步失败，继续使用当前资源（{error}）",
+                    )
+                try:
+                    private_result = await self._sync_private_overlays_from_remote_unlocked(
+                        force=force, redownload=redownload,
+                    )
+                except Exception as error:
+                    logger.warning(f"rollpig 附加资源同步失败: {error}")
+                    private_result = ResourceSyncResult(
+                        False, False, message=f"附加资源：同步失败（{error}）",
+                    )
+                return public_result, private_result
+            finally:
+                # 包独立提交。后续包失败或任务取消时，内存仍须反映已经激活的包。
                 self.reload()
-            return public_result, private_result
 
-    async def sync_from_remote(self, *, force: bool = False) -> ResourceSyncResult:
+    async def sync_from_remote(self, *, force: bool = False, redownload: bool = False) -> ResourceSyncResult:
         """兼容旧调用：单独同步公有包时也进入同一把锁。"""
         async with self._sync_lock:
-            result = await self._sync_from_remote_unlocked(force=force)
+            result = await self._sync_from_remote_unlocked(force=force, redownload=redownload)
             if result.updated:
                 self.reload()
             return result
 
-    async def sync_private_from_remote(self, *, force: bool = False) -> ResourceSyncResult:
+    async def sync_private_from_remote(self, *, force: bool = False, redownload: bool = False) -> ResourceSyncResult:
         """兼容旧调用：单独同步私有包时也进入同一把锁，返回多 overlay 聚合结果。"""
         async with self._sync_lock:
-            result = await self._sync_private_overlays_from_remote_unlocked(force=force)
-            if result.updated:
+            try:
+                return await self._sync_private_overlays_from_remote_unlocked(force=force, redownload=redownload)
+            finally:
                 self.reload()
-            return result
 
-    async def _sync_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
+    async def _sync_from_remote_unlocked(self, *, force: bool = False, redownload: bool = False) -> ResourceSyncResult:
         if not plugin_config.rollpig_resource_sync_enabled and not force:
             return ResourceSyncResult(updated=False, skipped=True, message="资源同步未启用")
 
@@ -709,52 +695,16 @@ class RollPigResourceManager:
             resource_version = str(manifest.get("resource_version") or "").strip()
             if not resource_version:
                 raise ValueError("manifest 缺少 resource_version")
-            if not force and resource_version == self._read_state_version():
-                # 旧客户端会忽略新 manifest 字段，却仍写入最新 resource_version。
-                # 升级到支持差分的客户端后必须检查实体完整性，不能因版本号相同永久漏下差分。
-                variants_complete = await asyncio.to_thread(self._active_variant_assets_complete, manifest)
-                if variants_complete:
-                    return ResourceSyncResult(
-                        updated=False,
-                        skipped=True,
-                        resource_version=resource_version,
-                        message=f"公有资源：已是最新（{resource_version}）",
-                    )
-                logger.info(f"rollpig 当前版本的 EX 差分资源不完整，将重新同步: {resource_version}")
+            return await self._sync_pack(
+                client, manifest_url=manifest_url, manifest=manifest,
+                active_dir=ACTIVE_RESOURCE_DIR, state_file=STATE_FILE,
+                resource_version=resource_version, max_size=max_file_size,
+                redownload=redownload,
+            )
 
-            staging_dir = self._new_staging_dir("incoming")
-            (staging_dir / "images").mkdir(parents=True, exist_ok=True)
-
-            try:
-                await self._download_manifest_files(
-                    client,
-                    manifest_url=manifest_url,
-                    manifest=manifest,
-                    staging_dir=staging_dir,
-                    max_size=max_file_size,
-                )
-                pig_list = self._read_pig_json(staging_dir / "pig.json")
-                self._ensure_images_exist(pig_list, [staging_dir / "images"])
-                self._load_ex_variants(
-                    staging_dir / "pig_ex_variants.json",
-                    pig_ids={str(item["id"]) for item in pig_list},
-                    image_dir=staging_dir / "images",
-                    strict=True,
-                )
-                self._activate_staging_dir(staging_dir, resource_version)
-            except Exception:
-                if staging_dir.exists():
-                    shutil.rmtree(staging_dir)
-                raise
-
-        return ResourceSyncResult(
-            updated=True,
-            skipped=False,
-            resource_version=resource_version,
-            message=f"公有资源：已更新（{resource_version}）",
-        )
-
-    async def _sync_private_overlays_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
+    async def _sync_private_overlays_from_remote_unlocked(
+        self, *, force: bool = False, redownload: bool = False,
+    ) -> ResourceSyncResult:
         if not plugin_config.rollpig_resource_sync_enabled and not force:
             return ResourceSyncResult(updated=False, skipped=True, message="")
         sources = self._resolve_private_sources(plugin_config)
@@ -764,7 +714,9 @@ class RollPigResourceManager:
         results: list[ResourceSyncResult] = []
         for source in sources:
             try:
-                results.append(await self._sync_private_source_from_remote_unlocked(source, force=force))
+                results.append(await self._sync_private_source_from_remote_unlocked(
+                    source, force=force, redownload=redownload,
+                ))
             except Exception as error:
                 # 私有 overlay 是附加包：某个包失败必须报告，但不能让公有包或其它私有包失效。
                 logger.warning(f"rollpig 私有资源同步失败，继续使用当前缓存: name={source.name} error={error}")
@@ -789,6 +741,7 @@ class RollPigResourceManager:
         source: _PrivateResourceSource,
         *,
         force: bool = False,
+        redownload: bool = False,
     ) -> ResourceSyncResult:
         timeout = _resource_sync_timeout()
         headers: dict[str, str] = {}
@@ -805,39 +758,12 @@ class RollPigResourceManager:
             resource_version = str(manifest.get("resource_version") or "").strip()
             if not resource_version:
                 raise ValueError(f"私有资源 manifest 缺少 resource_version: {source.name}")
-            if not force and resource_version == self._read_private_state_version(source):
-                return ResourceSyncResult(
-                    updated=False,
-                    skipped=True,
-                    resource_version=resource_version,
-                    message=f"{self._private_source_label(source)}：已是最新（{resource_version}）",
-                )
-
-            staging_dir = self._new_staging_dir(f"incoming_private_{source.name}")
-            (staging_dir / "images").mkdir(parents=True, exist_ok=True)
-
-            try:
-                await self._download_private_manifest_files(
-                    client,
-                    manifest_url=source.manifest_url,
-                    manifest=manifest,
-                    staging_dir=staging_dir,
-                    max_size=max_file_size,
-                )
-                private_pigs = self._read_pig_json(staging_dir / "pig.json")
-                self._ensure_images_exist(private_pigs, [staging_dir / "images"])
-                self._activate_private_staging_dir(source, staging_dir, resource_version)
-            except Exception:
-                if staging_dir.exists():
-                    shutil.rmtree(staging_dir)
-                raise
-
-        return ResourceSyncResult(
-            updated=True,
-            skipped=False,
-            resource_version=resource_version,
-            message=f"{self._private_source_label(source)}：已更新（{resource_version}）",
-        )
+            return await self._sync_pack(
+                client, manifest_url=source.manifest_url, manifest=manifest,
+                active_dir=source.active_dir, state_file=source.state_file,
+                resource_version=resource_version, max_size=max_file_size,
+                redownload=redownload, source=source,
+            )
 
     def _private_source_label(self, source: _PrivateResourceSource) -> str:
         """把内部 overlay 名转成面向 QQ 消息的短标签，避免把缓存名直接暴露给用户。"""
@@ -848,222 +774,370 @@ class RollPigResourceManager:
             return "旧版私有资源"
         return f"私有资源 {source.name}"
 
-    async def _download_manifest_files(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        manifest_url: str,
-        manifest: dict[str, Any],
-        staging_dir: Path,
-        max_size: int,
-    ) -> None:
-        pig_json_meta = manifest.get("pig_json")
-        if not isinstance(pig_json_meta, dict):
+    # ================================ 文件计划与增量传输 ================================ #
+    def _manifest_files(
+        self, manifest: Mapping[str, Any], *, max_size: int, private: bool,
+    ) -> list[_ResourceFile]:
+        """归一化完整目标清单；下载来源可不同，本地落盘路径始终由客户端决定。"""
+
+        # ================================ JSON条目与包类型 ================================ #
+        if manifest.get("schema_version", 1) != 1:
+            raise ValueError("不支持的资源 schema_version")
+        if not private and manifest.get("overlay"):
+            raise ValueError("公有基础资源不能使用 Overlay manifest")
+        pig_meta = manifest.get("pig_json")
+        if not isinstance(pig_meta, dict):
             raise ValueError("manifest 缺少 pig_json")
-        budget = _DownloadBudget(max_total_size=RESOURCE_PACKAGE_MAX_SIZE, max_file_count=RESOURCE_MAX_FILES)
-        await self._download_file_by_meta(
-            client,
-            manifest_url=manifest_url,
-            meta=pig_json_meta,
-            target=staging_dir / "pig.json",
-            max_size=min(max_size, RESOURCE_PIG_JSON_MAX_SIZE),
-            budget=budget,
-        )
-
-        optional_files = manifest.get("optional_files") or {}
-        if not isinstance(optional_files, dict):
+        files = [_ResourceFile("pig.json", pig_meta, min(max_size, RESOURCE_PIG_JSON_MAX_SIZE))]
+        optional = manifest.get("optional_files") or {}
+        if not isinstance(optional, dict):
             raise ValueError("manifest optional_files 必须是 object")
-        rules_meta = optional_files.get("pig_rules")
-        if isinstance(rules_meta, dict):
-            await self._download_file_by_meta(
-                client,
-                manifest_url=manifest_url,
-                meta=rules_meta,
-                target=staging_dir / "pig_rules.json",
-                max_size=min(max_size, RESOURCE_RULES_JSON_MAX_SIZE),
-                budget=budget,
-            )
+        if private:
+            if optional.get("pig_ex_variants") is not None:
+                raise ValueError("当前版本暂不支持私有 Overlay 提供 EX 等级差分")
+            variants = manifest.get("variant_images")
+            if variants is not None and (not isinstance(variants, list) or variants):
+                raise ValueError("私有资源 variant_images 不支持 EX 等级差分")
+        elif optional.get("pig_overrides") is not None:
+            raise ValueError("公有基础资源不支持 pig_overrides")
 
-        pig_list = self._read_pig_json(staging_dir / "pig.json")
-        pig_ids = {str(item["id"]) for item in pig_list}
-        variant_specs: dict[tuple[str, int], _PigExVariantSpec] = {}
-        variants_meta = optional_files.get("pig_ex_variants")
-        if "pig_ex_variants" in optional_files:
-            if not isinstance(variants_meta, dict):
-                raise ValueError("optional_files.pig_ex_variants 必须是 object")
-            self._validate_required_manifest_meta(
-                variants_meta,
-                label="optional_files.pig_ex_variants",
-                expected_path="pig_ex_variants.json",
-            )
-            await self._download_file_by_meta(
-                client,
-                manifest_url=manifest_url,
-                meta=variants_meta,
-                target=staging_dir / "pig_ex_variants.json",
-                max_size=min(max_size, RESOURCE_EX_VARIANTS_JSON_MAX_SIZE),
-                budget=budget,
-            )
-            variant_specs = self._read_ex_variant_specs(
-                staging_dir / "pig_ex_variants.json",
-                pig_ids=pig_ids,
-                strict=True,
-            )
-        image_variant_specs = {
-            key: spec.filename
-            for key, spec in variant_specs.items()
-            if spec.filename is not None
+        for key in ("pig_rules", "pig_overrides") if private else ("pig_rules", "pig_ex_variants"):
+            meta = optional.get(key)
+            if meta is None and (key != "pig_ex_variants" or key not in optional):
+                continue
+            if not isinstance(meta, dict):
+                raise ValueError(f"optional_files.{key} 必须是 object")
+            limit = RESOURCE_EX_VARIANTS_JSON_MAX_SIZE if key == "pig_ex_variants" else RESOURCE_RULES_JSON_MAX_SIZE
+            if key == "pig_ex_variants":
+                self._validate_required_manifest_meta(
+                    meta, label=f"optional_files.{key}", expected_path=f"{key}.json",
+                )
+            files.append(_ResourceFile(f"{key}.json", meta, min(max_size, limit)))
+
+        # ================================ 图片条目与路径冲突 ================================ #
+        # 清单先做完整检查，重复本地路径不能在并发下载时互相覆盖。
+        images = manifest.get("images", [] if private else None)
+        if not isinstance(images, list):
+            raise ValueError("manifest 缺少 images 列表")
+        if len(images) > RESOURCE_MAX_IMAGES:
+            raise ValueError("manifest images 数量超过上限")
+        for meta in images:
+            if not isinstance(meta, dict):
+                raise ValueError("manifest images 存在非法条目")
+            filename = str(meta.get("filename") or "")
+            self._validate_image_filename(filename)
+            files.append(_ResourceFile(f"images/{filename}", meta, max_size))
+        if not private:
+            variants = manifest.get("variant_images", [])
+            if not isinstance(variants, list):
+                raise ValueError("manifest variant_images 必须是 list")
+            if len(variants) > RESOURCE_MAX_VARIANT_IMAGES:
+                raise ValueError("manifest variant_images 数量超过上限")
+            for index, meta in enumerate(variants):
+                if not isinstance(meta, dict):
+                    raise ValueError(f"manifest variant_images[{index}] 必须是 object")
+                if set(meta) - VARIANT_IMAGE_MANIFEST_FIELDS:
+                    raise ValueError(f"manifest variant_images[{index}] 含未支持字段")
+                level = meta.get("level")
+                if isinstance(level, bool) or not isinstance(level, int):
+                    raise ValueError(f"manifest variant_images[{index}].level 必须是整数")
+                filename = str(meta.get("filename") or "")
+                self._validate_variant_image_filename(
+                    filename, pig_id=str(meta.get("pig_id") or ""), level=level,
+                )
+                self._validate_required_manifest_meta(
+                    meta, label=f"variant_images[{index}]", expected_path=f"images/{filename}",
+                )
+                files.append(_ResourceFile(f"images/{filename}", meta, max_size))
+
+        # ================================ 完整目标包预算 ================================ #
+        seen: set[str] = set()
+        declared_budget = _DownloadBudget(RESOURCE_PACKAGE_MAX_SIZE, RESOURCE_MAX_FILES)
+        for file in files:
+            # Windows 路径不区分大小写；跨平台都拒绝这种冲突，不能依赖任务完成顺序。
+            local_key = file.relative_path.casefold()
+            if local_key in seen:
+                raise ValueError(f"差分图片与基础图片路径冲突或重复声明文件: {file.relative_path}")
+            seen.add(local_key)
+            remote_path = str(file.meta.get("path") or file.meta.get("filename") or "").strip()
+            if not remote_path:
+                raise ValueError("manifest 文件条目缺少 path")
+            self._validate_manifest_path(remote_path)
+            size = file.meta.get("size")
+            if size is not None:
+                if isinstance(size, bool) or int(size) < 0:
+                    raise ValueError(f"文件大小非法: {remote_path}")
+                if int(size) > file.max_size:
+                    raise ValueError(f"文件超过大小上限: {remote_path}")
+            # 声明预算提前检查；兼容缺少元数据的旧包时，实际预算在传输后再次统计。
+            declared_budget.add_file(path=remote_path, size=int(size or 0))
+        return files
+
+    def _pack_state(
+        self, manifest: Mapping[str, Any], files: list[_ResourceFile], manifest_url: str,
+    ) -> dict[str, Any]:
+        """保存内容清单摘要；忽略构建时间和 JSON 排版，保留真正影响加载的字段。"""
+
+        file_map = {file.relative_path: dict(file.meta) for file in files}
+        semantic = {key: manifest[key] for key in (
+            "schema_version", "overlay", "overlay_name", "allow_override", "base_manifest_url", "min_plugin_version",
+        ) if key in manifest}
+        semantic["files"] = file_map
+        canonical = json.dumps(semantic, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return {
+            "manifest_url": manifest_url, "resource_version": str(manifest["resource_version"]).strip(),
+            "manifest_fingerprint": digest, "files": file_map,
         }
 
-        image_items = manifest.get("images")
-        if not isinstance(image_items, list):
-            raise ValueError("manifest 缺少 images 列表")
-        if len(image_items) > RESOURCE_MAX_IMAGES:
-            raise ValueError(f"manifest images 数量超过上限: {len(image_items)}/{RESOURCE_MAX_IMAGES}")
-        base_image_filenames: set[str] = set()
-        for image_meta in image_items:
-            if not isinstance(image_meta, dict):
-                raise ValueError("manifest images 存在非法条目")
-            filename = str(image_meta.get("filename") or "")
-            self._validate_image_filename(filename)
-            if filename in base_image_filenames:
-                raise ValueError(f"manifest images 重复声明文件: {filename}")
-            base_image_filenames.add(filename)
-            await self._download_file_by_meta(
-                client,
-                manifest_url=manifest_url,
-                meta=image_meta,
-                target=staging_dir / "images" / filename,
-                max_size=max_size,
-                budget=budget,
+    def _read_pack_state(self, path: Path) -> dict[str, Any]:
+        """状态是可重建缓存；旧版或损坏状态只触发重新核对，不阻断同步。"""
+
+        try:
+            data = json.loads(self._read_json_text(path))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError, UnicodeError):
+            return {}
+
+    def _directory_revision(self, image_dir: Path) -> str:
+        """读取随资源目录切换的摘要，避免依赖外部 state 与 active 的短暂先后顺序。"""
+
+        state = self._read_pack_state(image_dir.parent / RESOURCE_SNAPSHOT_FILENAME)
+        return str(state.get("manifest_fingerprint") or f"legacy:{image_dir}")
+
+    def _plan_reuse(
+        self, active_dir: Path, files: list[_ResourceFile],
+        previous_state: Mapping[str, Any], redownload: bool = False,
+    ) -> tuple[set[str], set[str]]:
+        """核对本地实体；已知内容变化的文件直接下载，旧缓存则逐个校验后复用。"""
+
+        old_files = {
+            path.relative_to(active_dir).as_posix() for path in active_dir.rglob("*")
+            if (path.is_file() or path.is_symlink())
+            and path.relative_to(active_dir).as_posix() != RESOURCE_SNAPSHOT_FILENAME
+        }
+        old_meta = previous_state.get("files")
+        old_meta = old_meta if isinstance(old_meta, dict) else {}
+        reusable: set[str] = set()
+        if redownload:
+            return reusable, old_files
+        for file in files:
+            previous = old_meta.get(file.relative_path)
+            if isinstance(previous, dict) and previous.get("sha256") != file.meta.get("sha256"):
+                continue
+            local = active_dir / file.relative_path
+            linked_parent = any(
+                parent.is_symlink() for parent in local.parents
+                if parent != active_dir and active_dir in parent.parents
             )
+            if active_dir.is_symlink() or linked_parent:
+                continue
+            try:
+                if self._local_file_matches_meta(local, file.meta):
+                    reusable.add(file.relative_path)
+            except OSError:
+                continue
+        return reusable, old_files
 
-        # ================================ EX差分Manifest对应校验 ================================ #
-        # JSON、manifest 和实体图片必须一一对应；先完整检查元数据，再开始下载差分图。
-        raw_variant_items = manifest.get("variant_images", [])
-        if not isinstance(raw_variant_items, list):
-            raise ValueError("manifest variant_images 必须是 list")
-        if len(raw_variant_items) > RESOURCE_MAX_VARIANT_IMAGES:
-            raise ValueError(
-                f"manifest variant_images 数量超过上限: "
-                f"{len(raw_variant_items)}/{RESOURCE_MAX_VARIANT_IMAGES}"
+    async def _finish_file_io(self, function: Any, *args: Any) -> Any:
+        """等待文件操作线程收束后再传播取消，避免暂存文件仍被读写时清理目录。"""
+
+        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except Exception:
+                pass
+            raise
+
+    async def _sync_pack(
+        self, client: httpx.AsyncClient, *, manifest_url: str, manifest: dict[str, Any],
+        active_dir: Path, state_file: Path, resource_version: str, max_size: int,
+        redownload: bool, source: _PrivateResourceSource | None = None,
+    ) -> ResourceSyncResult:
+        """按清单组装完整快照；成功后提交目录与状态，失败时保留当前包。"""
+
+        # ================================ 清单比较与本地完整性 ================================ #
+        files = self._manifest_files(manifest, max_size=max_size, private=source is not None)
+        next_state = self._pack_state(manifest, files, manifest_url)
+        previous_state = await asyncio.to_thread(self._read_pack_state, state_file)
+        reusable, old_files = await asyncio.to_thread(
+            self._plan_reuse, active_dir, files, previous_state, redownload,
+        )
+        label = self._private_source_label(source) if source else "公有资源"
+        wanted = {file.relative_path for file in files}
+        directory_state = await asyncio.to_thread(self._read_pack_state, active_dir / RESOURCE_SNAPSHOT_FILENAME)
+        state_keys = ("manifest_url", "resource_version", "manifest_fingerprint", "files")
+        if not redownload and reusable == wanted and old_files == wanted and all(
+            previous_state.get(key) == next_state[key] == directory_state.get(key)
+            for key in state_keys
+        ):
+            await asyncio.to_thread(self._validate_pack, active_dir, manifest, source)
+            return ResourceSyncResult(False, True, resource_version, f"{label}：已是最新（{resource_version}）")
+
+        # ================================ 暂存快照与整体切换 ================================ #
+        staging = self._new_staging_dir(f"incoming_{source.name}" if source else "incoming")
+        (staging / "images").mkdir(parents=True, exist_ok=True)
+        transfer = _ResourceTransfer(active_dir, staging, set() if redownload else reusable, old_files)
+        try:
+            downloader = self._download_private_manifest_files if source else self._download_manifest_files
+            await downloader(
+                client, manifest_url=manifest_url, manifest=manifest,
+                staging_dir=staging, max_size=max_size, transfer=transfer,
             )
-        if not isinstance(variants_meta, dict) and raw_variant_items:
-            raise ValueError("manifest 声明了 variant_images，但缺少 pig_ex_variants.json")
+            await self._finish_file_io(self._validate_pack, staging, manifest, source)
+            await self._finish_file_io(self._write_pack_snapshot, staging, next_state)
+            if source:
+                self._activate_private_staging_dir(source, staging, resource_version)
+            else:
+                self._activate_staging_dir(staging, resource_version)
+        except BaseException:
+            # CancelledError 也必须清理；各传输任务已在 downloader 中取消并等待退出。
+            await self._finish_file_io(shutil.rmtree, staging, True)
+            raise
 
-        seen_variant_keys: set[tuple[str, int]] = set()
-        variant_downloads: list[tuple[dict[str, Any], str]] = []
-        for index, image_meta in enumerate(raw_variant_items):
-            if not isinstance(image_meta, dict):
-                raise ValueError(f"manifest variant_images[{index}] 必须是 object")
-            unknown_fields = sorted(set(image_meta) - VARIANT_IMAGE_MANIFEST_FIELDS)
-            if unknown_fields:
-                raise ValueError(
-                    f"manifest variant_images[{index}] 含未支持字段: {', '.join(unknown_fields)}"
-                )
-            pig_id = str(image_meta.get("pig_id") or "")
-            raw_level = image_meta.get("level")
-            if isinstance(raw_level, bool) or not isinstance(raw_level, int):
-                raise ValueError(f"manifest variant_images[{index}].level 必须是整数")
-            level = int(raw_level)
-            filename = str(image_meta.get("filename") or "")
-            self._validate_variant_image_filename(filename, pig_id=pig_id, level=level)
-            if filename in base_image_filenames:
-                raise ValueError(f"差分图片与基础图片路径冲突: images/{filename}")
-            expected_path = f"images/{filename}"
-            self._validate_required_manifest_meta(
-                image_meta,
-                label=f"variant_images[{index}]",
-                expected_path=expected_path,
-            )
+        removed = len(old_files - wanted)
+        message = (
+            f"{label}：已更新（{resource_version}）\n"
+            f"新增 {transfer.added}｜替换 {transfer.replaced}｜移除 {removed}｜复用 {transfer.reused}\n"
+            f"下载 {transfer.downloaded_bytes / 1024:.1f} KB"
+        )
+        logger.info(f"rollpig 资源同步完成: {message}")
+        return ResourceSyncResult(True, False, resource_version, message)
 
-            key = (pig_id, level)
-            if key in seen_variant_keys:
-                raise ValueError(f"manifest 重复声明差分图片: {pig_id}/EX{level}")
-            seen_variant_keys.add(key)
-            if image_variant_specs.get(key) != filename:
-                raise ValueError(f"manifest 差分图片未与 JSON 对应: {pig_id}/EX{level}")
-            variant_downloads.append((image_meta, filename))
+    def _write_pack_snapshot(self, staging: Path, state: Mapping[str, Any]) -> None:
+        """摘要随目录一起激活；外部 state 保留旧客户端需要的版本字段。"""
 
-        missing_manifest_entries = sorted(set(image_variant_specs) - seen_variant_keys)
-        if missing_manifest_entries:
-            pig_id, level = missing_manifest_entries[0]
-            raise ValueError(f"差分 JSON 引用的图片未写入 manifest: {pig_id}/EX{level}")
-
-        for image_meta, filename in variant_downloads:
-            await self._download_file_by_meta(
-                client,
-                manifest_url=manifest_url,
-                meta=image_meta,
-                target=staging_dir / "images" / filename,
-                max_size=max_size,
-                budget=budget,
-            )
-
-    async def _download_private_manifest_files(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        manifest_url: str,
-        manifest: dict[str, Any],
-        staging_dir: Path,
-        max_size: int,
-    ) -> None:
-        pig_json_meta = manifest.get("pig_json")
-        if not isinstance(pig_json_meta, dict):
-            raise ValueError("私有资源 manifest 缺少 pig_json")
-        budget = _DownloadBudget(max_total_size=RESOURCE_PACKAGE_MAX_SIZE, max_file_count=RESOURCE_MAX_FILES)
-        await self._download_file_by_meta(
-            client,
-            manifest_url=manifest_url,
-            meta=pig_json_meta,
-            target=staging_dir / "pig.json",
-            max_size=min(max_size, RESOURCE_PIG_JSON_MAX_SIZE),
-            budget=budget,
+        (staging / RESOURCE_SNAPSHOT_FILENAME).write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8",
         )
 
-        optional_files = manifest.get("optional_files") or {}
-        if not isinstance(optional_files, dict):
-            raise ValueError("私有资源 optional_files 必须是 object")
-        if optional_files.get("pig_ex_variants") is not None:
-            raise ValueError("当前版本暂不支持私有 Overlay 提供 EX 等级差分")
-        private_variant_images = manifest.get("variant_images")
-        if private_variant_images is not None:
-            if not isinstance(private_variant_images, list):
-                raise ValueError("私有资源 variant_images 必须是 list 或 null")
-            # 旧版构建器可能统一写出空列表；它不包含任何差分，继续按普通 Overlay 处理。
-            if private_variant_images:
-                raise ValueError("当前版本暂不支持私有 Overlay 提供 EX 等级差分")
-        for key, filename in (("pig_rules", "pig_rules.json"), ("pig_overrides", "pig_overrides.json")):
-            file_meta = optional_files.get(key)
-            if isinstance(file_meta, dict):
+    async def _transfer_files(
+        self, client: httpx.AsyncClient, files: list[_ResourceFile], *, manifest_url: str,
+        staging_dir: Path, budget: _DownloadBudget, transfer: _ResourceTransfer | None,
+    ) -> None:
+        """限流传输；任一失败或取消时，等待所有任务退出后才交给调用方清理目录。"""
+
+        semaphore = asyncio.Semaphore(RESOURCE_DOWNLOAD_CONCURRENCY)
+
+        async def transfer_one(file: _ResourceFile) -> None:
+            async with semaphore:
                 await self._download_file_by_meta(
-                    client,
-                    manifest_url=manifest_url,
-                    meta=file_meta,
-                    target=staging_dir / filename,
-                    max_size=min(max_size, RESOURCE_RULES_JSON_MAX_SIZE),
-                    budget=budget,
+                    client, manifest_url=manifest_url, meta=file.meta,
+                    target=staging_dir / file.relative_path, max_size=file.max_size,
+                    budget=budget, transfer=transfer,
                 )
 
-        image_items = manifest.get("images") or []
-        if not isinstance(image_items, list):
-            raise ValueError("私有资源 manifest images 必须是 list")
-        if len(image_items) > RESOURCE_MAX_IMAGES:
-            raise ValueError(f"私有资源 images 数量超过上限: {len(image_items)}/{RESOURCE_MAX_IMAGES}")
-        for image_meta in image_items:
-            if not isinstance(image_meta, dict):
-                raise ValueError("私有资源 images 存在非法条目")
-            filename = str(image_meta.get("filename") or "")
-            self._validate_image_filename(filename)
-            await self._download_file_by_meta(
-                client,
-                manifest_url=manifest_url,
-                meta=image_meta,
-                target=staging_dir / "images" / filename,
-                max_size=max_size,
-                budget=budget,
+        tasks = [asyncio.create_task(transfer_one(file)) for file in files]
+        group = asyncio.gather(*tasks)
+        try:
+            # 屏蔽父任务取消，避免 gather 先取消子任务、下面再取消一次打断文件线程收束。
+            await asyncio.shield(group)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if group.done() and not group.cancelled():
+                group.exception()
+            raise
+
+    async def _download_manifest_files(
+        self, client: httpx.AsyncClient, *, manifest_url: str, manifest: dict[str, Any],
+        staging_dir: Path, max_size: int, transfer: _ResourceTransfer | None = None,
+    ) -> None:
+        """先组装 JSON 并检查 EX 对应关系，再并发获取图片。"""
+
+        files = self._manifest_files(manifest, max_size=max_size, private=False)
+        budget = _DownloadBudget(RESOURCE_PACKAGE_MAX_SIZE, RESOURCE_MAX_FILES)
+        await self._transfer_files(
+            client, [file for file in files if not file.relative_path.startswith("images/")],
+            manifest_url=manifest_url, staging_dir=staging_dir, budget=budget, transfer=transfer,
+        )
+        await self._finish_file_io(self._validate_variant_manifest, staging_dir, manifest)
+        await self._transfer_files(
+            client, [file for file in files if file.relative_path.startswith("images/")],
+            manifest_url=manifest_url, staging_dir=staging_dir, budget=budget, transfer=transfer,
+        )
+
+    async def _download_private_manifest_files(
+        self, client: httpx.AsyncClient, *, manifest_url: str, manifest: dict[str, Any],
+        staging_dir: Path, max_size: int, transfer: _ResourceTransfer | None = None,
+    ) -> None:
+        """Overlay 使用同一份文件复用与预算规则，不复用旧目录中的未声明资源。"""
+
+        files = self._manifest_files(manifest, max_size=max_size, private=True)
+        await self._transfer_files(
+            client, files, manifest_url=manifest_url, staging_dir=staging_dir,
+            budget=_DownloadBudget(RESOURCE_PACKAGE_MAX_SIZE, RESOURCE_MAX_FILES), transfer=transfer,
+        )
+
+    # ================================ 候选快照校验 ================================ #
+    def _validate_variant_manifest(self, resource_dir: Path, manifest: Mapping[str, Any]) -> None:
+        """EX JSON 与 manifest 必须逐项对应；删除声明却保留引用时拒绝更新。"""
+
+        pigs = self._read_pig_json(resource_dir / "pig.json")
+        self._validate_pig_list(pigs)
+        specs = self._read_ex_variant_specs(
+            resource_dir / "pig_ex_variants.json", pig_ids={str(pig["id"]) for pig in pigs}, strict=True,
+        )
+        expected = {key: spec.filename for key, spec in specs.items() if spec.filename is not None}
+        declared: dict[tuple[str, int], str] = {}
+        for meta in manifest.get("variant_images", []):
+            key = (str(meta["pig_id"]), meta["level"])
+            if key in declared:
+                raise ValueError(f"manifest 重复声明差分图片: {key}")
+            filename = str(meta["filename"])
+            if expected.get(key) != filename:
+                raise ValueError(f"manifest 差分图片未与 JSON 对应: {key}")
+            declared[key] = filename
+        if declared.keys() != expected.keys():
+            raise ValueError("差分 JSON 引用的图片未写入 manifest")
+
+    def _validate_pack(
+        self, resource_dir: Path, manifest: Mapping[str, Any], source: _PrivateResourceSource | None,
+    ) -> None:
+        """检查资源引用、可读性及 Overlay 合并，完整通过后才允许激活。"""
+
+        # ================================ 包内文件与图片 ================================ #
+        pigs = self._read_pig_json(resource_dir / "pig.json")
+        self._validate_pig_list(pigs)
+        self._read_rules_json(resource_dir / "pig_rules.json")
+        self._ensure_images_exist(pigs, [resource_dir / "images"])
+        for meta in [*manifest.get("images", []), *manifest.get("variant_images", [])]:
+            path = resource_dir / "images" / str(meta["filename"])
+            if not self.image_file_is_decodable(path):
+                raise ValueError(f"资源图片无法解码: {path.name}")
+        if source is None:
+            self._validate_variant_manifest(resource_dir, manifest)
+            self._load_ex_variants(
+                resource_dir / "pig_ex_variants.json", pig_ids={str(pig["id"]) for pig in pigs},
+                image_dir=resource_dir / "images", strict=True,
             )
+            return
+
+        # ================================ Overlay 目标与加载顺序 ================================ #
+        overrides = self._read_pig_overrides_json(resource_dir / "pig_overrides.json")
+        if manifest.get("allow_override") is False and overrides:
+            raise ValueError("allow_override=false 的 Overlay 不能覆盖已有小猪")
+        candidate = RollPigResourceManager()
+        if (ACTIVE_RESOURCE_DIR / "pig.json").is_file():
+            candidate._load_from_dir(ACTIVE_RESOURCE_DIR, resource_version=self._read_state_version())
+        else:
+            candidate._load_from_builtin()
+        for previous in self._resolve_private_sources(plugin_config):
+            if previous.name == source.name:
+                break
+            if (previous.active_dir / "pig.json").is_file():
+                try:
+                    candidate._apply_private_overlay(
+                        previous.active_dir, resource_version=self._read_private_state_version(previous),
+                    )
+                except (OSError, ValueError):
+                    continue
+        candidate._apply_private_overlay(resource_dir, resource_version=str(manifest["resource_version"]))
 
     async def _download_json(self, client: httpx.AsyncClient, url: str, *, max_size: int) -> dict[str, Any]:
         content = await self._download_bytes(client, url, max_size=max_size)
@@ -1081,7 +1155,10 @@ class RollPigResourceManager:
         target: Path,
         max_size: int,
         budget: _DownloadBudget,
+        transfer: _ResourceTransfer | None = None,
     ) -> None:
+        """优先复用通过校验的本地文件；复制内容再次核对，防止检查后文件被改动。"""
+
         path = str(meta.get("path") or meta.get("filename") or "").strip()
         if not path:
             raise ValueError("manifest 文件条目缺少 path")
@@ -1090,6 +1167,27 @@ class RollPigResourceManager:
         expected_size = meta.get("size")
         if expected_size is not None and int(expected_size) > max_size:
             raise ValueError(f"文件超过大小上限: {path}")
+
+        # ================================ 本地复用与原始来源读取 ================================ #
+        relative = target.relative_to(transfer.staging_dir).as_posix() if transfer else ""
+        if transfer and relative in transfer.reusable:
+            tmp: Path | None = None
+            try:
+                size, actual_hash, tmp = await self._finish_file_io(
+                    self._copy_local_file_to_temp_sync, transfer.active_dir / relative, target, max_size,
+                )
+            except (OSError, ValueError):
+                # 复用文件在检查后丢失、变大或不可读时，只重新获取这个文件。
+                pass
+            else:
+                try:
+                    if size == meta.get("size") and actual_hash == meta.get("sha256"):
+                        budget.add_file(path=path, size=size)
+                        tmp.replace(target)
+                        transfer.reused += 1
+                        return
+                finally:
+                    tmp.unlink(missing_ok=True)
 
         size, actual_hash, tmp = await self._copy_manifest_file_to_temp(
             client,
@@ -1109,6 +1207,12 @@ class RollPigResourceManager:
 
             budget.add_file(path=path, size=size)
             tmp.replace(target)
+            if transfer:
+                transfer.downloaded_bytes += size
+                if relative in transfer.old_files:
+                    transfer.replaced += 1
+                else:
+                    transfer.added += 1
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -1142,7 +1246,7 @@ class RollPigResourceManager:
 
         if self._is_local_manifest_url(manifest_url):
             source = self._local_manifest_path(manifest_url).parent / path
-            return await asyncio.to_thread(self._copy_local_file_to_temp_sync, source, target, max_size)
+            return await self._finish_file_io(self._copy_local_file_to_temp_sync, source, target, max_size)
 
         url = urljoin(manifest_url, path)
         return await self._download_file_to_temp(client, url, target, max_size=max_size)
@@ -1192,7 +1296,7 @@ class RollPigResourceManager:
                     hasher.update(chunk)
                     target_file.write(chunk)
             return total, hasher.hexdigest(), tmp
-        except Exception:
+        except BaseException:
             tmp.unlink(missing_ok=True)
             raise
 
@@ -1221,7 +1325,7 @@ class RollPigResourceManager:
                         hasher.update(chunk)
                         file.write(chunk)
             return total, hasher.hexdigest(), tmp
-        except Exception:
+        except BaseException:
             tmp.unlink(missing_ok=True)
             raise
 
@@ -1231,7 +1335,10 @@ class RollPigResourceManager:
             active_dir=ACTIVE_RESOURCE_DIR,
             previous_dir=CACHE_ROOT / "previous",
             state_file=STATE_FILE,
-            state_payload={"resource_version": resource_version, "synced_at": int(time.time())},
+            state_payload={
+                **self._read_pack_state(staging_dir / RESOURCE_SNAPSHOT_FILENAME),
+                "resource_version": resource_version, "synced_at": int(time.time()),
+            },
         )
 
     def _activate_private_staging_dir(
@@ -1245,7 +1352,11 @@ class RollPigResourceManager:
             active_dir=source.active_dir,
             previous_dir=source.previous_dir,
             state_file=source.state_file,
-            state_payload={"name": source.name, "manifest_url": source.manifest_url, "resource_version": resource_version, "synced_at": int(time.time())},
+            state_payload={
+                **self._read_pack_state(staging_dir / RESOURCE_SNAPSHOT_FILENAME),
+                "name": source.name, "manifest_url": source.manifest_url,
+                "resource_version": resource_version, "synced_at": int(time.time()),
+            },
         )
 
     def _activate_resource_dir(
@@ -1280,8 +1391,6 @@ class RollPigResourceManager:
             activated_new = True
             state_tmp.write_text(json.dumps(state_payload, ensure_ascii=False, indent=2), encoding="utf-8")
             state_tmp.replace(state_file)
-            if previous_backup_dir.exists():
-                shutil.rmtree(previous_backup_dir)
         except Exception:
             state_tmp.unlink(missing_ok=True)
             if activated_new and active_dir.exists():
@@ -1293,6 +1402,7 @@ class RollPigResourceManager:
             raise
         finally:
             if previous_backup_dir.exists():
+                # state 已提交后，旧备份清理失败不能倒退 active 并留下新旧状态不一致。
                 shutil.rmtree(previous_backup_dir, ignore_errors=True)
 
         if not old_active_backup and previous_dir.exists():
@@ -1529,7 +1639,7 @@ class RollPigResourceManager:
         path = Path(filename)
         if path.name != filename or "\\" in filename:
             raise ValueError(f"差分图片文件名不能包含路径: {filename}")
-        if path.suffix.lower() not in ALLOWED_IMAGE_SUFFIXES or path.suffix != path.suffix.lower():
+        if path.suffix.lower() not in VARIANT_IMAGE_SUFFIXES or path.suffix != path.suffix.lower():
             raise ValueError(f"差分图片格式不受支持: {filename}")
         if path.stem != f"{pig_id}_ex{level}":
             raise ValueError(f"差分图片文件名必须为 {pig_id}_ex{level}.png 或 .gif: {filename}")
@@ -1649,14 +1759,15 @@ def get_pig_by_id(pig_id: str | None) -> dict | None:
     return None
 
 
-async def sync_rollpig_resources(force: bool = False) -> str:
+async def sync_rollpig_resources(force: bool = False, *, redownload: bool = False) -> str:
     """同步小猪图片包和共享文案；任一附加包失败时保留其当前本地版本。"""
 
     messages: list[str] = []
+    sync_options = {"force": force, "wait_if_busy": force}
+    if redownload:
+        sync_options["redownload"] = True
     try:
-        public_result, private_result = await pig_resource_manager.sync_all(force=force, wait_if_busy=force)
-        if public_result.updated or private_result.updated:
-            PIG_LIST[:] = pig_resource_manager.pig_list
+        public_result, private_result = await pig_resource_manager.sync_all(**sync_options)
         for result in (public_result, private_result):
             if result.message:
                 messages.append(result.message)
@@ -1665,15 +1776,15 @@ async def sync_rollpig_resources(force: bool = False) -> str:
         # 可用的共享文案快照，不能让前者提前终止整条同步流程。
         logger.warning(f"rollpig 小猪图片资源同步失败，继续使用当前资源: {error}")
         messages.append("小猪资源：同步失败，继续使用当前资源")
+    finally:
+        # 包级部分成功后被取消，也要发布已重载的快照；列表引用保持旧调用兼容。
+        PIG_LIST[:] = pig_resource_manager.pig_list
 
     # 延迟导入避免资源模块和 AI 文案管理器在初始化阶段形成双向依赖。
     from .roast_manager import roast_manager
 
     try:
-        roast_result = await roast_manager.sync_shared_library(
-            force=force,
-            wait_if_busy=force,
-        )
+        roast_result = await roast_manager.sync_shared_library(**sync_options)
         if roast_result.message:
             if messages:
                 messages.append("")

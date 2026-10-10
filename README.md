@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
     <img src="https://img.shields.io/badge/NoneBot-2.4%2B-black" alt="NoneBot >= 2.4">
-    <img src="https://img.shields.io/badge/Version-0.14.4-ff69b4" alt="Version 0.14.4">
+    <img src="https://img.shields.io/badge/Version-0.14.5-ff69b4" alt="Version 0.14.5">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
   </p>
 
@@ -186,7 +186,8 @@ nonebot.load_plugin("nonebot_plugin_rollpig_plus")
 | `猪圈日报` | 查看本群最近一期已封版的日报卡。 |
 | `小猪日报 状态` | 查看当前群日报推送状态。 |
 | `小猪日报 开启` / `小猪日报 关闭` | 群主或管理员控制当前群日报推送。 |
-| `同步小猪资源` | SUPERUSER 手动触发资源同步。 |
+| `同步小猪资源` | SUPERUSER 立即校验并增量同步资源，保留 `刷新小猪图鉴` 别名。 |
+| `全量同步小猪资源` | SUPERUSER 忽略本地复用，重新获取完整资源包。 |
 
 ---
 
@@ -388,7 +389,11 @@ RollPig Plus 的公共资源由独立仓库维护：
 - RollPig Resources  GIF 小猪 Overlay；
 - 共享烤猪文案。
 
-资源同步采用 manifest、文件大小和 SHA-256 校验。新资源只有在完整校验通过后才会进入 active 状态；失败时继续使用当前可用缓存或插件内置资源。
+资源同步采用 manifest、文件大小和 SHA-256 校验。自动同步与 `同步小猪资源` 都按文件增量更新：复用校验一致的本地文件，只下载新增、变化或损坏的文件；同版本清单发生变化也会重新核对。需要重新下载全部内容时使用 `全量同步小猪资源`。
+
+每次更新都在独立暂存目录组装完整快照，校验通过后才切换 active。新清单移除的图片、EX 差分和可选规则文件不会残留在当前包中；删除小猪资源不删除用户抽取或收藏记录。失败时保留当前可用缓存或插件内置资源，上一版只作为回退备份，不参与当前资源加载。
+
+公有包、GIF 包和私有 Overlay 分别校验更新。共享烤猪文案按整份 JSON 快照更新，未变化时复用独立共享快照；撤下共享文案不删除本地生成的文案。同步结果列出新增、替换、移除、复用数量和实际获取的资源字节数。
 
 自己想添加的资源可以通过 Overlay 追加或覆盖，不需要直接修改插件源码。
 
