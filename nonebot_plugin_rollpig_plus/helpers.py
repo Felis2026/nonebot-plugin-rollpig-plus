@@ -47,6 +47,43 @@ def roast_command_has_valid_boundary(
     return command_arg[0].type == "at"
 
 
+# ================================ 前置 At 命令入口 ================================ #
+
+
+def leading_at_roast_has_valid_command(event: GroupMessageEvent) -> bool:
+    """只匹配前置 At 加完整普通烤群友命令，不修改消息或接管关群聊天。"""
+
+    if not isinstance(event, GroupMessageEvent) or not is_group_rollpig_enabled(str(event.group_id)):
+        return False
+
+    segments = list(event.get_message())
+    while segments and segments[0].type == "text" and not str(segments[0].data.get("text", "")).strip():
+        segments.pop(0)
+    if not segments or segments[0].type != "at":
+        return False
+
+    # At 是文本边界，不能把“烤 @另一人 群友”拼成合法命令；多个完整 At
+    # 留给统一目标校验提示，避免在 matcher 阶段静默忽略明显的用法错误。
+    text_chunks: list[str] = []
+    current_text = ""
+    for segment in segments:
+        if segment.type == "text":
+            current_text += str(segment.data.get("text", ""))
+        elif segment.type == "at":
+            if current_text.strip():
+                text_chunks.append(current_text.strip())
+            current_text = ""
+        else:
+            return False
+    if current_text.strip():
+        text_chunks.append(current_text.strip())
+
+    if len(text_chunks) != 1:
+        return False
+    command_starts = get_driver().config.command_start
+    return text_chunks[0] in {f"{prefix}烤群友" for prefix in command_starts}
+
+
 # ================================ 事件身份与群成员工具 ================================ #
 # 本板块只做事件对象解析和群成员候选筛选，不注册 matcher，也不直接承载业务判定。
 
@@ -88,22 +125,67 @@ class GroupMemberLookupError(RuntimeError):
     """当前群成员名单无法可靠读取。"""
 
 
-async def resolve_roast_target(bot: Bot, event: GroupMessageEvent) -> RoastTarget:
-    """从回复、@ 和 to_me 中解析烤群友目标，并尽量补齐群名片。"""
+class RoastTargetInputError(ValueError):
+    """明确指令包含无效或多个目标，必须在任何账本写入前结束。"""
 
-    target_id: str | None = None
+
+# ================================ 显式目标与回复兼容 ================================ #
+
+
+def _has_explicit_bot_target(event: GroupMessageEvent) -> bool:
+    """恢复适配器消费的 @Bot；不把回复附带的自动 @ 当成显式目标。"""
+
+    original = list(getattr(event, "original_message", None) or event.message)
+    if event.reply:
+        for index, segment in enumerate(original):
+            if segment.type != "reply" or str(segment.data.get("id")) != str(event.reply.message_id):
+                continue
+            original.pop(index)
+            # 与 OneBot 适配器一致，仅清除紧邻回复段、指向原作者的自动 @。
+            # 在副本上操作，不能破坏其他插件看到的原始消息。
+            if index < len(original) and original[index].type == "at" and (
+                str(original[index].data.get("qq")) == str(event.reply.sender.user_id)
+            ):
+                original.pop(index)
+            break
+    return any(
+        segment.type == "at" and str(segment.data.get("qq")) == str(event.self_id)
+        for segment in original
+    )
+
+
+def _explicit_roast_target_id(event: GroupMessageEvent) -> str | None:
+    """优先使用框架处理后的 @；多个不同目标或 @全体不自动猜测。"""
+
+    target_ids: set[str] = set()
+    for segment in event.message:
+        if segment.type != "at":
+            continue
+        user_id = str(segment.data.get("qq") or "")
+        if not user_id.isascii() or not user_id.isdecimal() or int(user_id) <= 0:
+            raise RoastTargetInputError("请 @ 一位具体群友，不能烤全体成员。")
+        target_ids.add(user_id)
+    if len(target_ids) > 1:
+        raise RoastTargetInputError("请只 @ 一位要烤的群友。")
+    if target_ids:
+        return next(iter(target_ids))
+    # @Bot 常用于唤醒命令；若框架处理后还留下其他目标，应沿用那个目标。
+    # 只有没有其他 @ 时恢复 Bot 身份，避免回复对象盖过明确的 @Bot。
+    return str(event.self_id) if _has_explicit_bot_target(event) else None
+
+
+async def resolve_roast_target(bot: Bot, event: GroupMessageEvent) -> RoastTarget:
+    """按显式 @、回复、to_me 顺序解析唯一目标，并尽量补齐群名片。"""
+
+    target_id = _explicit_roast_target_id(event)
     target_name = "群友"
     is_group_member = False
 
-    if event.reply:
+    if target_id:
+        target_name = "对方"
+    elif event.reply:
         target_id = str(event.reply.sender.user_id)
         target_name = event.reply.sender.card or event.reply.sender.nickname
-    else:
-        for seg in event.message:
-            if seg.type == "at":
-                target_id = str(seg.data["qq"])
-                target_name = "对方"
-                break
 
     # @Bot 时框架可能已经把 at 消费成 to_me，这里补一个 Bot 自身目标。
     if not target_id and event.to_me:

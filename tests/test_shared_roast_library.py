@@ -209,6 +209,50 @@ class SharedRoastLibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(_roast_text_identity("local"), persisted_hashes)
         self.assertIn(_roast_text_identity("shared"), persisted_hashes)
 
+    # ================================ 共享快照复用与显式全量 ================================ #
+    async def test_manual_sync_reuses_verified_shared_snapshot(self) -> None:
+        manifest = self._write_remote("roasts-2026-07-29.1", {"pig": {"food": ["共享文案"]}})
+        manager = self._make_manager(manifest)
+        await manager.sync_shared_library()
+        with patch.object(manager, "_read_resource_bytes", wraps=manager._read_resource_bytes) as read:
+            result = await manager.sync_shared_library(force=True)
+        self.assertTrue(result.skipped)
+        self.assertEqual(read.await_count, 1)
+        self.assertEqual(read.await_args.args[1], str(manifest))
+
+    async def test_corrupt_shared_snapshot_downloads_body_and_keeps_local_text(self) -> None:
+        manifest = self._write_remote("roasts-2026-07-29.1", {"pig": {"food": ["共享文案"]}})
+        manager = self._make_manager(manifest, library={"pig": {"food": ["本地文案"]}})
+        await manager.sync_shared_library()
+        manager.snapshot_file.write_bytes(b"x" * manager.snapshot_file.stat().st_size)
+        with patch.object(manager, "_read_resource_bytes", wraps=manager._read_resource_bytes) as read:
+            result = await manager.sync_shared_library()
+        self.assertTrue(result.updated)
+        self.assertEqual(read.await_count, 2)
+        self.assertEqual(manager.library["pig"]["food"], ["共享文案", "本地文案"])
+
+    async def test_version_only_change_reuses_body_but_commits_new_state(self) -> None:
+        library = {"pig": {"food": ["共享文案"]}}
+        manifest = self._write_remote("roasts-2026-07-29.1", library)
+        manager = self._make_manager(manifest)
+        await manager.sync_shared_library()
+        self._write_remote("roasts-2026-07-29.2", library)
+        with patch.object(manager, "_read_resource_bytes", wraps=manager._read_resource_bytes) as read:
+            result = await manager.sync_shared_library()
+        self.assertTrue(result.updated)
+        self.assertEqual(read.await_count, 1)
+        state = json.loads(manager.state_file.read_text(encoding="utf-8"))
+        self.assertEqual(state["resource_version"], "roasts-2026-07-29.2")
+
+    async def test_full_sync_fetches_shared_body_even_when_snapshot_matches(self) -> None:
+        manifest = self._write_remote("roasts-2026-07-29.1", {"pig": {"food": ["共享文案"]}})
+        manager = self._make_manager(manifest)
+        await manager.sync_shared_library()
+        with patch.object(manager, "_read_resource_bytes", wraps=manager._read_resource_bytes) as read:
+            result = await manager.sync_shared_library(force=True, redownload=True)
+        self.assertTrue(result.updated)
+        self.assertEqual(read.await_count, 2)
+
     async def test_first_sync_preserves_all_normalized_duplicate_local_entries(self) -> None:
         manifest = self._write_remote(
             "roasts-2026-07-29.1",

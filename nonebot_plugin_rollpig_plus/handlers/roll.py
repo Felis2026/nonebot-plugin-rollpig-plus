@@ -3,6 +3,7 @@ import random
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, Event, GroupMessageEvent, Message, MessageSegment
 from nonebot.log import logger
+from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 
 from ..roll_flow import (
@@ -40,23 +41,39 @@ cmd_sync_resources = on_command(
     rule=command_has_no_argument,
     block=True,
 )
+cmd_redownload_resources = on_command(
+    "全量同步小猪资源",
+    rule=command_has_no_argument,
+    block=True,
+)
 
 
 @cmd_sync_resources.handle()
 async def _(event: Event):
+    await _sync_resources_for_event(cmd_sync_resources, event, redownload=False)
+
+
+@cmd_redownload_resources.handle()
+async def _(event: Event):
+    await _sync_resources_for_event(cmd_redownload_resources, event, redownload=True)
+
+
+async def _sync_resources_for_event(matcher: type[Matcher], event: Event, *, redownload: bool) -> None:
+    """普通同步复用已校验文件；全量命令显式重下，两个入口都只允许超级用户。"""
+
     user_id = str(event.user_id)
     if not is_superuser_user(user_id):
-        await cmd_sync_resources.finish(MessageSegment.reply(event.message_id) + "只有超级用户可以同步小猪资源。")
+        await matcher.finish(MessageSegment.reply(event.message_id) + "只有超级用户可以同步小猪资源。")
         return
 
     try:
-        message = await sync_rollpig_resources(force=True)
+        message = await sync_rollpig_resources(force=True, redownload=redownload)
     except Exception as error:
         logger.error(f"rollpig 小猪资源手动同步失败: {error}")
-        await cmd_sync_resources.finish(MessageSegment.reply(event.message_id) + f"小猪资源同步失败：{error}")
+        await matcher.finish(MessageSegment.reply(event.message_id) + f"小猪资源同步失败：{error}")
         return
 
-    await cmd_sync_resources.finish(
+    await matcher.finish(
         MessageSegment.reply(event.message_id)
         + (
             "🐷 小猪资源同步结果\n"

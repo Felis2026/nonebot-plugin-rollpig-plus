@@ -28,6 +28,7 @@ from ..resource_manager import get_pig_by_id
 from ..helpers import (
     command_has_no_argument,
     finish_roast_outcome,
+    leading_at_roast_has_valid_command,
     roast_command_has_valid_boundary,
     send_rendered_pig,
 )
@@ -51,6 +52,7 @@ from ..texts import (
 from ..helpers import guard_group_enabled, guard_store_errors
 from ..helpers import (
     GroupMemberLookupError,
+    RoastTargetInputError,
     get_event_group_id,
     get_event_user_name,
     get_group_member_display_name,
@@ -272,31 +274,41 @@ cmd_roast_member = on_command(
     block=True,
 )
 
-@cmd_roast_member.handle()
-@guard_group_enabled(cmd_roast_member)
-@guard_store_errors(cmd_roast_member)
-async def _(bot: Bot, event: GroupMessageEvent):
+cmd_roast_member_leading_at = on_message(rule=leading_at_roast_has_valid_command, block=False)
+
+
+# ================================ 指定目标烧烤共用流程 ================================ #
+
+
+async def _handle_member_roast(matcher: Matcher, bot: Bot, event: GroupMessageEvent):
+    """两种命令入口共用目标校验、扣次、预约与加餐结算，避免重复执行。"""
+
     attacker_id = str(event.user_id)
     attacker_name = event.sender.card or event.sender.nickname
     group_id = str(event.group_id)
     force_mode = detect_force_roast_mode(event.get_plaintext(), attacker_id)
     if force_mode == "super_denied":
-        await cmd_roast_member.finish(
+        await matcher.finish(
             MessageSegment.reply(event.message_id) + "口令【强行点火】仅 superuser 可用。"
         )
         return
 
-    target = await resolve_roast_target(bot, event)
+    try:
+        target = await resolve_roast_target(bot, event)
+    except RoastTargetInputError as error:
+        # 目标不明确时必须在记录群活跃、消费充能或建立预约前结束。
+        await matcher.finish(MessageSegment.reply(event.message_id) + str(error))
+        return
     target_id = target.target_id
     target_name = target.target_name
     target_kind = _classify_roast_target(attacker_id, target_id, str(event.self_id))
 
     if target_kind == "missing":
-        await cmd_roast_member.finish("请 At 或回复你要烤的群友！")
+        await matcher.finish("请 At 或回复你要烤的群友！")
         return
 
     if target_kind == "self":
-        await cmd_roast_member.finish("对自己好一点，别自焚。请发送「今日烤猪」。")
+        await matcher.finish("对自己好一点，别自焚。请发送「今日烤猪」。")
         return
 
     # 检测目标是否是 Bot 自身 → 特殊反噬，不消耗 CD，纯文本回复
@@ -318,13 +330,13 @@ async def _(bot: Bot, event: GroupMessageEvent):
                 group_id=group_id,
             )
         )
-        await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + bot_text)
+        await matcher.finish(MessageSegment.reply(event.message_id) + bot_text)
         return
 
     if not target.is_group_member:
         # 被 @ 的 QQ 号可能从未在群内，回复对象也可能已经退群。未确认当前成员
         # 身份前不能把对方登记为本群日活，更不能让其影响补货门槛。
-        await cmd_roast_member.finish(
+        await matcher.finish(
             MessageSegment.reply(event.message_id) + "暂时无法确认对方仍在本群，请核对成员后再试。"
         )
         return
@@ -332,7 +344,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
     # 只有解析出真实可烤的群友后才记录“未抽猪先烤”。用法错误、自烤和 Bot
     # 特殊互动都不应消耗违规次数，更不能触发第二次反噬。
     attacker_pig = await _load_attacker_pig_or_finish(
-        cmd_roast_member,
+        matcher,
         event,
         attacker_name,
         force_mode,
@@ -361,22 +373,22 @@ async def _(bot: Bot, event: GroupMessageEvent):
     except CloudReservationUnsupportedError:
         target_pig_id = await store.get_daily_roll(target_id)
         if not target_pig_id:
-            await cmd_roast_member.finish(
+            await matcher.finish(
                 MessageSegment.reply(event.message_id) + f"【{target_name}】今天还没抽猪，没法下嘴！"
             )
             return
         target_pig = get_pig_by_id(target_pig_id)
         if not target_pig:
-            await cmd_roast_member.finish(
+            await matcher.finish(
                 MessageSegment.reply(event.message_id) + "目标的小猪记录存在，但本机资源暂时缺失，请稍后再试。"
             )
             return
         if await store.is_protected(group_id, target_id):
             if force_mode in {"normal", "super"}:
                 break_text = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name)
-                await cmd_roast_member.send(MessageSegment.reply(event.message_id) + break_text)
+                await matcher.send(MessageSegment.reply(event.message_id) + break_text)
             else:
-                await cmd_roast_member.finish(
+                await matcher.finish(
                     MessageSegment.reply(event.message_id)
                     + random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
                 )
@@ -387,19 +399,19 @@ async def _(bot: Bot, event: GroupMessageEvent):
         _register_preparation_owner(preparation, str(event.self_id))
         if preparation.status != "target_ready":
             if preparation.status == "protected":
-                await cmd_roast_member.finish(
+                await matcher.finish(
                     MessageSegment.reply(event.message_id)
                     + random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
                 )
                 return
             if preparation.status == "cooldown_denied" and preparation.cooldown:
-                await cmd_roast_member.finish(
+                await matcher.finish(
                     MessageSegment.reply(event.message_id)
                     + format_cooldown_message(preparation.cooldown.remaining_seconds)
                 )
                 return
             if preparation.status == "force_denied":
-                await cmd_roast_member.finish(
+                await matcher.finish(
                     MessageSegment.reply(event.message_id) + pick_force_limit_text(attacker_name, target_name)
                 )
                 return
@@ -407,7 +419,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
             if preparation.protection_broken:
                 prefix = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name) + "\n"
             await _send_reservation_notice(
-                cmd_roast_member, event, preparation,
+                matcher, event, preparation,
                 attacker_name=attacker_name, target_name=target_name, prefix=prefix,
             )
             return
@@ -416,23 +428,23 @@ async def _(bot: Bot, event: GroupMessageEvent):
     if preparation is not None and preparation.protection_broken:
         break_text = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name)
         logger.info(f"[烤群友] 保护被突破 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})")
-        await cmd_roast_member.send(MessageSegment.reply(event.message_id) + break_text)
+        await matcher.send(MessageSegment.reply(event.message_id) + break_text)
 
     if not target_pig:
-        await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + "目标的小猪资源缺失，暂时无法开火。")
+        await matcher.finish(MessageSegment.reply(event.message_id) + "目标的小猪资源缺失，暂时无法开火。")
         return
     await store.mark_group_roll_seen(target_id, target_pig["id"], group_id)
 
     block_text = pick_member_target_block_text(target_name, target_pig)
     if block_text:
-        await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + block_text)
+        await matcher.finish(MessageSegment.reply(event.message_id) + block_text)
         return
 
     # 模式化限制/计数
     if force_mode == "normal":
         if not await store.consume_force_usage(attacker_id):
             reject_text = pick_force_limit_text(attacker_name, target_name)
-            await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + reject_text)
+            await matcher.finish(MessageSegment.reply(event.message_id) + reject_text)
             return
     elif force_mode is None:
         cooldown_result = await store.consume_roast_cooldown(
@@ -441,7 +453,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
             max_charges=resolve_roast_charge_max(),
         )
         if not cooldown_result.allowed:
-            await cmd_roast_member.finish(
+            await matcher.finish(
                 MessageSegment.reply(event.message_id) + format_cooldown_message(cooldown_result.remaining_seconds)
             )
             return
@@ -456,7 +468,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
             force_mode=force_mode,
         )
     except RoastFoodMissingError as e:
-        await cmd_roast_member.finish(str(e))
+        await matcher.finish(str(e))
         return
 
     logger.info(
@@ -472,7 +484,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
     )
 
     await finish_roast_outcome(
-        cmd_roast_member,
+        matcher,
         event,
         outcome,
         attacker_id=attacker_id,
@@ -482,6 +494,28 @@ async def _(bot: Bot, event: GroupMessageEvent):
         group_id=group_id,
         daily_feed_eligible=(force_mode is None),
     )
+
+
+# ================================ 新旧入口分流 ================================ #
+
+
+@cmd_roast_member.handle()
+@guard_group_enabled(cmd_roast_member)
+@guard_store_errors(cmd_roast_member)
+async def _roast_member_command(matcher: Matcher, bot: Bot, event: GroupMessageEvent):
+    """保留原有命令、加急别名及后门参数，只替换共享执行入口。"""
+
+    await _handle_member_roast(matcher, bot, event)
+
+
+@cmd_roast_member_leading_at.handle()
+@guard_group_enabled(cmd_roast_member_leading_at)
+@guard_store_errors(cmd_roast_member_leading_at)
+async def _roast_member_leading_at(matcher: Matcher, bot: Bot, event: GroupMessageEvent):
+    """明确命中前置 At 命令后才停止传播，使用当前 matcher 实例。"""
+
+    matcher.stop_propagation()
+    await _handle_member_roast(matcher, bot, event)
 
 
 # ================================ 随机烤目标预检 ================================ #
