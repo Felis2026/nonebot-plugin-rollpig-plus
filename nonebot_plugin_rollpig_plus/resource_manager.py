@@ -817,6 +817,9 @@ class RollPigResourceManager:
         # ================================ 图片条目与路径冲突 ================================ #
         # 清单先做完整检查，重复本地路径不能在并发下载时互相覆盖。
         images = manifest.get("images", [] if private else None)
+        # 旧私有包构建器用 null 表示没有自带图片；只兼容私有包，不放宽公有清单。
+        if private and images is None:
+            images = []
         if not isinstance(images, list):
             raise ValueError("manifest 缺少 images 列表")
         if len(images) > RESOURCE_MAX_IMAGES:
@@ -1106,7 +1109,13 @@ class RollPigResourceManager:
         self._validate_pig_list(pigs)
         self._read_rules_json(resource_dir / "pig_rules.json")
         self._ensure_images_exist(pigs, [resource_dir / "images"])
-        for meta in [*manifest.get("images", []), *manifest.get("variant_images", [])]:
+        images = manifest.get("images", [])
+        variant_images = manifest.get("variant_images", [])
+        # 下载计划与最终校验必须同意 null 的含义；其他非法类型仍由清单检查拒绝。
+        if source is not None:
+            images = [] if images is None else images
+            variant_images = [] if variant_images is None else variant_images
+        for meta in [*images, *variant_images]:
             path = resource_dir / "images" / str(meta["filename"])
             if not self.image_file_is_decodable(path):
                 raise ValueError(f"资源图片无法解码: {path.name}")

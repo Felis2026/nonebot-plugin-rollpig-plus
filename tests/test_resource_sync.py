@@ -451,7 +451,7 @@ class ResourceSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(peak, resource_module.RESOURCE_DOWNLOAD_CONCURRENCY)
 
     # ================================ Overlay 与渲染缓存 ================================ #
-    def setup_overlay(self, files: dict[str, bytes]) -> tuple[str, Path]:
+    def setup_overlay(self, files: dict[str, bytes], *, name: str = "custom") -> tuple[str, Path]:
         """配置独立 Overlay 和空 GIF 包，核对真实加载顺序而不是只测下载函数。"""
 
         gif_url = "https://resources.test/gif/manifest.json"
@@ -459,10 +459,97 @@ class ResourceSyncTests(unittest.IsolatedAsyncioTestCase):
         official.start()
         self.addCleanup(official.stop)
         self.publish("gif-test", files={"pig.json": b"[]"}, url=gif_url, overlay=True)
-        url = "https://resources.test/custom/manifest.json"
-        self.config.rollpig_private_resource_manifests = [{"name": "custom", "manifest_url": url}]
+        url = f"https://resources.test/{name}/manifest.json"
+        self.config.rollpig_private_resource_manifests = [{"name": name, "manifest_url": url}]
         self.publish("private-1", files=files, url=url, overlay=True)
-        return url, self.cache / "overlays/custom/active"
+        return url, self.cache / f"overlays/{name}/active"
+
+    # ================================ 私有图片空清单兼容 ================================ #
+    def _set_overlay_image_lists(self, url: str, *, images_mode: str, variants_mode: str) -> None:
+        """模拟构建器的缺省、空数组和 null 三种输出，不更改文件元数据。"""
+
+        manifest = json.loads(self.responses[url])
+        for field, mode in (("images", images_mode), ("variant_images", variants_mode)):
+            if mode == "missing":
+                manifest.pop(field, None)
+            else:
+                manifest[field] = None if mode == "null" else []
+        self.responses[url] = _json_bytes(manifest)
+
+    async def test_overlay_empty_image_lists_allow_initial_sync(self) -> None:
+        await self.initial_sync()
+        for images_mode in ("missing", "empty", "null"):
+            for variants_mode in ("missing", "empty", "null"):
+                with self.subTest(images=images_mode, variant_images=variants_mode):
+                    name = f"initial-{images_mode}-{variants_mode}"
+                    files = {"pig.json": b"[]", "pig_overrides.json": _json_bytes([
+                        {"id": "pig", "description": name},
+                    ])}
+                    url, active = self.setup_overlay(files, name=name)
+                    self._set_overlay_image_lists(url, images_mode=images_mode, variants_mode=variants_mode)
+                    result = await self.manager.sync_private_from_remote()
+                    self.assertNotIn("同步失败", result.message)
+                    self.assertEqual((active / "pig_overrides.json").read_bytes(), files["pig_overrides.json"])
+                    self.assertEqual(self.manager.pig_map["pig"]["description"], name)
+
+    async def test_overlay_empty_image_lists_allow_update_and_verified_reuse(self) -> None:
+        await self.initial_sync()
+        for images_mode in ("missing", "empty", "null"):
+            for variants_mode in ("missing", "empty", "null"):
+                with self.subTest(images=images_mode, variant_images=variants_mode):
+                    name = f"update-{images_mode}-{variants_mode}"
+                    files = {"pig.json": b"[]", "pig_overrides.json": _json_bytes([
+                        {"id": "pig", "description": "旧覆盖"},
+                    ])}
+                    url, active = self.setup_overlay(files, name=name)
+                    await self.manager.sync_private_from_remote()
+                    files["pig_overrides.json"] = _json_bytes([{"id": "pig", "description": name}])
+                    self.publish("private-2", files=files, url=url, overlay=True)
+                    self._set_overlay_image_lists(url, images_mode=images_mode, variants_mode=variants_mode)
+                    result = await self.manager.sync_private_from_remote()
+                    self.assertNotIn("同步失败", result.message)
+                    self.assertEqual((active / "pig_overrides.json").read_bytes(), files["pig_overrides.json"])
+                    self.assertEqual(self.manager.pig_map["pig"]["description"], name)
+                    self.requests.clear()
+                    repeated = await self.manager.sync_private_from_remote(force=True)
+                    self.assertNotIn("同步失败", repeated.message)
+                    self.assertFalse(repeated.updated)
+                    self.assertTrue(all(request.endswith("manifest.json") for request in self.requests))
+
+    async def test_overlay_null_image_lists_remove_previously_declared_images(self) -> None:
+        await self.initial_sync()
+        files = {"pig.json": b"[]", "images/pig.png": _image_bytes("red")}
+        url, active = self.setup_overlay(files)
+        await self.manager.sync_private_from_remote()
+        self.assertEqual(self.manager.find_image_file("pig"), active / "images/pig.png")
+        self.publish("private-2", files={"pig.json": b"[]"}, url=url, overlay=True)
+        self._set_overlay_image_lists(url, images_mode="null", variants_mode="null")
+        result = await self.manager.sync_private_from_remote()
+        self.assertNotIn("同步失败", result.message)
+        self.assertFalse((active / "images/pig.png").exists())
+        self.assertEqual(self.manager.find_image_file("pig"), self.active / "images/pig.png")
+
+    def test_overlay_invalid_image_types_and_nonempty_variants_still_rejected(self) -> None:
+        manifest = self.publish(files={"pig.json": b"[]"}, overlay=True)
+        for field in ("images", "variant_images"):
+            for invalid in (False, 0, "", {}):
+                with self.subTest(field=field, value=invalid), self.assertRaises(ValueError):
+                    self.manager._manifest_files(
+                        {**manifest, field: invalid}, max_size=resource_module.RESOURCE_PIG_JSON_MAX_SIZE, private=True,
+                    )
+        with self.assertRaisesRegex(ValueError, "不支持 EX 等级差分"):
+            self.manager._manifest_files(
+                {**manifest, "variant_images": [{"pig_id": "pig", "level": 2, "filename": "pig_ex2.png"}]},
+                max_size=resource_module.RESOURCE_PIG_JSON_MAX_SIZE, private=True,
+            )
+
+    def test_public_image_lists_remain_strict(self) -> None:
+        manifest = self.publish()
+        for field in ("images", "variant_images"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "images"):
+                self.manager._manifest_files(
+                    {**manifest, field: None}, max_size=resource_module.RESOURCE_PIG_JSON_MAX_SIZE, private=False,
+                )
 
     async def test_overlay_same_version_image_change_and_corruption_are_incremental(self) -> None:
         await self.initial_sync()
