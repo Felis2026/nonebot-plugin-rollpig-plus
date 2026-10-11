@@ -473,7 +473,7 @@ class RollPigResourceManager:
             return "cloud"
 
     def _local_file_matches_meta(self, path: Path, meta: Mapping[str, Any]) -> bool:
-        """在线程中校验 active 文件大小与 SHA256，不以版本号或修改时间替代内容。"""
+        """在线程中核对已归一化的大小与 SHA256，不以版本号或修改时间替代内容。"""
 
         if not path.is_file() or path.is_symlink():
             return False
@@ -874,7 +874,19 @@ class RollPigResourceManager:
                     raise ValueError(f"文件超过大小上限: {remote_path}")
             # 声明预算提前检查；兼容缺少元数据的旧包时，实际预算在传输后再次统计。
             declared_budget.add_file(path=remote_path, size=int(size or 0))
-        return files
+
+        # ================================ 文件元数据归一化 ================================ #
+        # 旧包允许字符串大小和大写哈希；复用、复制复验与缓存摘要必须使用同一格式。
+        # 复制条目以保留原清单，EX 差分的严格协议校验仍在归一化之前执行。
+        normalized_files: list[_ResourceFile] = []
+        for file in files:
+            meta = dict(file.meta)
+            if meta.get("size") is not None:
+                meta["size"] = int(meta["size"])
+            if isinstance(meta.get("sha256"), str):
+                meta["sha256"] = meta["sha256"].lower()
+            normalized_files.append(_ResourceFile(file.relative_path, meta, file.max_size))
+        return normalized_files
 
     def _pack_state(
         self, manifest: Mapping[str, Any], files: list[_ResourceFile], manifest_url: str,
@@ -926,8 +938,12 @@ class RollPigResourceManager:
             return reusable, old_files
         for file in files:
             previous = old_meta.get(file.relative_path)
-            if isinstance(previous, dict) and previous.get("sha256") != file.meta.get("sha256"):
-                continue
+            if isinstance(previous, dict):
+                # 旧版快照保存原始哈希写法，不能把大小写差异当作内容变化。
+                previous_hash = str(previous.get("sha256") or "").lower()
+                expected_hash = str(file.meta.get("sha256") or "").lower()
+                if previous_hash != expected_hash:
+                    continue
             local = active_dir / file.relative_path
             linked_parent = any(
                 parent.is_symlink() for parent in local.parents

@@ -338,6 +338,117 @@ class ResourceSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.body_requests(), ["images/pig.png"])
         self.assertEqual((self.active / "images/pig.png").read_bytes(), self.files["images/pig.png"])
 
+    # ================================ 清单元数据兼容 ================================ #
+    def _publish_legacy_metadata(
+        self, version: str = "2026-10-10.1", *, string_sizes: bool = True, uppercase_hashes: bool = True,
+    ) -> dict:
+        """模拟旧清单允许的大小和哈希写法；EX 差分仍遵循严格协议。"""
+
+        manifest = self.publish(version)
+        for meta in [manifest["pig_json"], manifest["optional_files"]["pig_rules"], *manifest["images"]]:
+            if string_sizes:
+                meta["size"] = str(meta["size"])
+            if uppercase_hashes:
+                meta["sha256"] = meta["sha256"].upper()
+        self.responses[self.url] = _json_bytes(manifest)
+        return manifest
+
+    def test_file_plan_normalizes_metadata_without_mutating_manifest(self) -> None:
+        manifest = self._publish_legacy_metadata()
+        original = _json_bytes(manifest)
+        files = self.manager._manifest_files(
+            manifest, max_size=resource_module.RESOURCE_PIG_JSON_MAX_SIZE, private=False,
+        )
+        self.assertEqual(_json_bytes(manifest), original)
+        for file in files:
+            self.assertIsInstance(file.meta["size"], int)
+            self.assertEqual(file.meta["sha256"], file.meta["sha256"].lower())
+        standard = self.publish()
+        standard_files = self.manager._manifest_files(
+            standard, max_size=resource_module.RESOURCE_PIG_JSON_MAX_SIZE, private=False,
+        )
+        self.assertEqual(
+            self.manager._pack_state(manifest, files, self.url),
+            self.manager._pack_state(standard, standard_files, self.url),
+        )
+
+    async def test_legacy_metadata_allows_unchanged_sync_and_staged_reuse(self) -> None:
+        for string_sizes, uppercase_hashes in ((True, False), (False, True), (True, True)):
+            with self.subTest(string_sizes=string_sizes, uppercase_hashes=uppercase_hashes):
+                options = {"string_sizes": string_sizes, "uppercase_hashes": uppercase_hashes}
+                self._publish_legacy_metadata(**options)
+                await self.manager.sync_from_remote()
+                for force in (False, True):
+                    self.requests.clear()
+                    result = await self.manager.sync_from_remote(force=force)
+                    self.assertTrue(result.skipped)
+                    self.assertEqual(self.requests, [self.url])
+                self._publish_legacy_metadata("2026-10-10.2", **options)
+                self.requests.clear()
+                result = await self.manager.sync_from_remote()
+                self.assertTrue(result.updated)
+                self.assertEqual(self.body_requests(), [])
+                self.assertIn("复用 6", result.message)
+
+    async def test_legacy_raw_snapshot_metadata_is_reused_and_normalized(self) -> None:
+        manifest = self._publish_legacy_metadata()
+        await self.manager.sync_from_remote()
+        state = json.loads((self.cache / "state.json").read_text(encoding="utf-8"))
+        metadata = [manifest["pig_json"], *manifest["optional_files"].values(),
+                    *manifest["images"], *manifest["variant_images"]]
+        state["files"] = {meta["path"]: dict(meta) for meta in metadata}
+        state["manifest_fingerprint"] = "legacy-raw-metadata"
+        for path in (self.cache / "state.json", self.active / resource_module.RESOURCE_SNAPSHOT_FILENAME):
+            path.write_bytes(_json_bytes(state))
+        self.requests.clear()
+        result = await self.manager.sync_from_remote()
+        self.assertTrue(result.updated)
+        self.assertEqual(self.body_requests(), [])
+        self.assertIn("复用 6", result.message)
+        self.requests.clear()
+        self.assertTrue((await self.manager.sync_from_remote()).skipped)
+        self.assertEqual(self.requests, [self.url])
+
+    async def test_legacy_metadata_content_change_only_downloads_changed_file(self) -> None:
+        self._publish_legacy_metadata()
+        await self.manager.sync_from_remote()
+        revision = self.manager.resource_revision
+        self.files["images/pig.png"] = _image_bytes("red")
+        self._publish_legacy_metadata()
+        self.requests.clear()
+        await self.manager.sync_from_remote()
+        self.assertEqual(self.body_requests(), ["images/pig.png"])
+        self.assertEqual((self.active / "images/pig.png").read_bytes(), self.files["images/pig.png"])
+        self.assertNotEqual(self.manager.resource_revision, revision)
+
+    async def test_legacy_metadata_rechecks_reused_copy_before_activation(self) -> None:
+        self._publish_legacy_metadata()
+        await self.manager.sync_from_remote()
+        self._publish_legacy_metadata("2026-10-10.2")
+        self.requests.clear()
+        original_copy = self.manager._copy_local_file_to_temp_sync
+
+        def mutate_before_copy(source: Path, target: Path, max_size: int):
+            if source == self.active / "images/pig.png":
+                source.write_bytes(_image_bytes("red"))
+            return original_copy(source, target, max_size)
+
+        with patch.object(self.manager, "_copy_local_file_to_temp_sync", side_effect=mutate_before_copy):
+            await self.manager.sync_from_remote()
+        self.assertEqual(self.body_requests(), ["images/pig.png"])
+        self.assertEqual((self.active / "images/pig.png").read_bytes(), self.files["images/pig.png"])
+
+    def test_ex_metadata_still_requires_integer_size_and_lowercase_hash(self) -> None:
+        for field in ("size", "sha256"):
+            with self.subTest(field=field):
+                manifest = self.publish()
+                meta = manifest["variant_images"][0]
+                meta[field] = str(meta[field]) if field == "size" else meta[field].upper()
+                with self.assertRaisesRegex(ValueError, field):
+                    self.manager._manifest_files(
+                        manifest, max_size=resource_module.RESOURCE_PIG_JSON_MAX_SIZE, private=False,
+                    )
+
     # ================================ 并发与任务取消 ================================ #
     async def test_cancel_waits_for_local_copy_before_removing_staging(self) -> None:
         await self.initial_sync()
