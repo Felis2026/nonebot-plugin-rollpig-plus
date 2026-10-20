@@ -19,7 +19,7 @@ import nonebot_plugin_localstore as localstore
 from pilmoji import Pilmoji
 from pilmoji.helpers import EMOJI_REGEX, getsize as pilmoji_getsize
 from pilmoji.source import BaseSource
-from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps, ImageSequence
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageSequence
 
 RESOURCE_DIR = Path(__file__).parent / "resource"
 
@@ -28,7 +28,6 @@ CANVAS_SIZE = (800, 800)
 CONTENT_WIDTH = 720
 CONTENT_SAFE_HEIGHT = 760
 AVATAR_SIZE = 240
-AVATAR_CORNER_RADIUS = 30
 AVATAR_CACHE_MAXSIZE = 192
 GIF_TARGET_FRAMES = 60
 # 源帧按“逻辑画布像素 × 帧数”限制解码工作量，比固定帧数更贴近 CPU 开销。
@@ -47,7 +46,7 @@ GIF_SOURCE_CACHE_MAX_BYTES = 24 * 1024 * 1024
 # 固定卡片只按磁盘总字节淘汰，不另设条目数上限。
 CARD_DISK_CACHE_MAX_BYTES = 64 * 1024 * 1024
 # 修改卡片布局或编码规则时必须递增；源图、文案、字体和 Emoji 已各自包含内容指纹。
-CARD_CACHE_VERSION = 4
+CARD_CACHE_VERSION = 5
 CARD_DISK_CACHE_MAGIC = b"ROLLPIG-CARD-CACHE-V1\n"
 CARD_DISK_CACHE_HEADER_MAX_BYTES = 4096
 CARD_CACHE_DIR = localstore.get_plugin_cache_dir() / "cards"
@@ -1030,38 +1029,12 @@ def _load_animated_avatar_frames(
     return frames, retained
 
 
-@lru_cache(maxsize=8)
-def _avatar_corner_mask() -> Image.Image:
-    """生成抗锯齿圆角蒙版；透明小猪图不受影响，实底图片会获得柔和圆角。"""
-
-    scale = 3
-    mask = Image.new("L", (AVATAR_SIZE * scale, AVATAR_SIZE * scale), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle(
-        (0, 0, AVATAR_SIZE * scale, AVATAR_SIZE * scale),
-        radius=AVATAR_CORNER_RADIUS * scale,
-        fill=255,
-    )
-    return mask.resize((AVATAR_SIZE, AVATAR_SIZE), Image.Resampling.LANCZOS)
-
-
-def _prepare_avatar_for_draw(avatar: Image.Image) -> Image.Image:
-    """给头像套圆角边界；使用 ImageChops 保留原始透明通道。"""
-
-    prepared = avatar.copy()
-    alpha = prepared.getchannel("A")
-    prepared.putalpha(ImageChops.multiply(alpha, _avatar_corner_mask()))
-    return prepared
-
-
 def _draw_avatar(canvas: Image.Image, avatar: Image.Image | None, y: int) -> None:
+    """居中合成立绘并保留原图透明度，缺图时绘制占位块。"""
+
     x = (CANVAS_SIZE[0] - AVATAR_SIZE) // 2
     if avatar is not None:
-        prepared_avatar = _prepare_avatar_for_draw(avatar)
-        try:
-            canvas.alpha_composite(prepared_avatar, (x, y))
-        finally:
-            prepared_avatar.close()
+        canvas.alpha_composite(avatar, (x, y))
         return
 
     draw = ImageDraw.Draw(canvas)
@@ -1324,11 +1297,7 @@ def _build_gif_palette(
     try:
         for index, (avatar, _) in enumerate(avatar_frames, 1):
             sample = avatar_background.copy()
-            prepared_avatar = _prepare_avatar_for_draw(avatar)
-            try:
-                sample.alpha_composite(prepared_avatar, (0, 0))
-            finally:
-                prepared_avatar.close()
+            sample.alpha_composite(avatar, (0, 0))
 
             sample_rgb = sample.convert("RGB")
             sample.close()
@@ -1603,7 +1572,6 @@ def clear_card_renderer_caches() -> None:
 
     for cached_function in (
         _load_avatar_cached,
-        _avatar_corner_mask,
         _load_font,
         _emoji_spans,
         _card_render_asset_signature,
