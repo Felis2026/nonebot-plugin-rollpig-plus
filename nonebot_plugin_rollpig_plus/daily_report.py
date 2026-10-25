@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Literal, Mapping, Sequence
 
 
@@ -92,8 +92,9 @@ class ProtectionReportItem:
 
     user_id: str
     display_name: str = ""
-    scope: str = "本群免烤"
+    scope: str = "本群保护"
     expires_at: str = ""
+    base_level: int = 1
 
 
 @dataclass(frozen=True)
@@ -114,8 +115,14 @@ class NormalizedDailyEvent:
     participant_count: int = 0
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    backfire_victim_ids: tuple[str, ...] = ()
+    backfire_victim_names: tuple[str, ...] = ()
     special_reason: str = ""
     created_at: str = ""
+    force_mode: str = ""
+    protection_level: int = 0
+    reservation_owner_id: str = ""
+    reservation_owner_name: str = ""
 
     @property
     def is_reservation(self) -> bool:
@@ -214,6 +221,7 @@ class DailyReport:
     timeline: TimelineSelection | None
     rankings: tuple[DailyRanking, ...]
     protections: tuple[ProtectionReportItem, ...]
+    group_rolls: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -313,10 +321,15 @@ def normalize_daily_events(
             raw.get("participant_ids"),
             raw.get("participant_names"),
         )
+        victim_ids, victim_names = _participant_fields(raw.get("backfire_victim_ids"), raw.get("backfire_victim_names"))
         try:
             raw_participant_count = max(0, int(raw.get("participant_count") or 0))
         except (TypeError, ValueError):
             raw_participant_count = 0
+        try:
+            protection_level = max(0, min(5, int(raw.get("protection_level") or 0)))
+        except (TypeError, ValueError):
+            protection_level = 0
         event = NormalizedDailyEvent(
             event_id=_text(raw.get("event_id")) or f"legacy:{index:06d}",
             event_type=event_type,
@@ -332,8 +345,14 @@ def normalize_daily_events(
             participant_count=max(raw_participant_count, len(participant_ids)),
             backfire_victim_id=_text(raw.get("backfire_victim_id")),
             backfire_victim_name=_text(raw.get("backfire_victim_name")),
+            backfire_victim_ids=victim_ids,
+            backfire_victim_names=victim_names,
             special_reason=_text(raw.get("special_reason")),
             created_at=_text(raw.get("created_at")),
+            force_mode=_text(raw.get("force_mode")),
+            protection_level=protection_level,
+            reservation_owner_id=_text(raw.get("reservation_owner_id")),
+            reservation_owner_name=_text(raw.get("reservation_owner_name")),
         )
         event_time = _parse_timestamp(event.created_at)
         # 无时间的旧记录继续保留；当前版本写入的有效时间必须严格服从日报截止点。
@@ -366,6 +385,9 @@ def _collect_display_names(
         for user_id, display_name in zip(event.participant_ids, event.participant_names):
             if user_id and display_name and user_id not in live_name_user_ids:
                 names[user_id] = display_name
+        for user_id, display_name in zip(event.backfire_victim_ids, event.backfire_victim_names):
+            if user_id and display_name and user_id not in live_name_user_ids:
+                names[user_id] = display_name
     return names
 
 
@@ -383,6 +405,7 @@ def _collect_participants(
             users.add(event.target_id)
         users.update(event.participant_ids)
         users.add(event.backfire_victim_id)
+        users.update(event.backfire_victim_ids)
     users.discard("")
     users.difference_update(bot_user_ids)
     return tuple(sorted(users))
@@ -586,6 +609,8 @@ _HEADLINE_BASE_SCORE: dict[HeadlineKind, int] = {
 
 
 def _headline_kind(event: NormalizedDailyEvent) -> HeadlineKind | None:
+    if event.force_mode == "super" and event.event_type == "success":
+        return "normal_success"
     if event.is_reservation:
         if event.event_type == "success":
             return "reservation_success"
@@ -618,6 +643,8 @@ def reservation_party_size(event: NormalizedDailyEvent) -> int:
     """统一预约总人数口径；旧事件若未把主厨写入名单，仍补算主厨。"""
 
     participant_ids = set(event.participant_ids)
+    if event.force_mode == "super":
+        return max(1, event.participant_count, len(participant_ids))
     return max(
         1,
         event.participant_count,
@@ -642,7 +669,10 @@ def select_headline(events: Sequence[NormalizedDailyEvent]) -> HeadlineSelection
 
         # 单人预约不因“预约”身份压过真正的群事件；两人预约普通结果
         # 只有在当天另有交锋或结局反转时才进入候选。
-        if event.is_reservation:
+        if event.force_mode == "super":
+            if not event.protection_level and participant_count <= 1 and not (active_day and (mixed_results or repeated_pair_events)):
+                continue
+        elif event.is_reservation:
             if participant_count == 1:
                 continue
             if participant_count == 2 and kind in {"reservation_success", "reservation_escape"}:
@@ -657,10 +687,12 @@ def select_headline(events: Sequence[NormalizedDailyEvent]) -> HeadlineSelection
         # 六人后协作价值递减；十二人上限不该把普通预约堆到双倍于 Bot 反噬。
         size_bonus = 15 if participant_count >= 10 else 10 if participant_count >= 6 else 0
         score = (
-            _HEADLINE_BASE_SCORE[kind]
+            (45 if event.force_mode == "super" else _HEADLINE_BASE_SCORE[kind])
             + min(max(0, participant_count - 1), 5) * 5
             + size_bonus
             + min(repeated_pair_events, 3) * 5
+            + (10 + 5 * (event.protection_level - 1) if event.protection_level else 0)
+            + min(20, max(0, len(set(event.backfire_victim_ids)) - 1) * 5)
         )
         candidates.append(HeadlineSelection(kind, score, repeated_pair_events, event))
     if not candidates:
@@ -860,7 +892,7 @@ def build_rankings(
     candidates = set(participant_ids)
     success_events: dict[str, list[NormalizedDailyEvent]] = defaultdict(list)
     for event in events:
-        if event.event_type == "success" and not event.is_reservation and event.attacker_id in candidates:
+        if event.event_type == "success" and (not event.is_reservation or event.force_mode == "super") and event.attacker_id in candidates:
             success_events[event.attacker_id].append(event)
 
     ex_rows: list[tuple[str, str, int, str, str, str, str, bool]] = []
@@ -989,4 +1021,5 @@ def build_daily_report(
         timeline=timeline,
         rankings=rankings,
         protections=tuple(protections),
+        group_rolls=normalized_group_rolls,
     )

@@ -19,7 +19,7 @@ from .resource_manager import pig_resource_manager
 from .runtime import is_group_rollpig_enabled, rollpig_date_str
 from .reservation_delivery import schedule_opportunistic_delivery
 from .store import store
-from .store.cloud import CloudStoreError
+from .store.cloud import CloudProtectionUnsupportedError, CloudStoreError
 from .store.models import DailyFeedResult, RoastEvent
 from .texts import DAILY_FEED_ROAST_TEXTS
 
@@ -295,6 +295,11 @@ def guard_store_errors(matcher, message: str = "猪圈云账本暂时离线，�
                 if event is not None:
                     await matcher.finish(MessageSegment.reply(event.message_id) + local_message)
                 await matcher.finish(local_message)
+            except CloudProtectionUnsupportedError:
+                upgrade_message = "聚众烤猪需要 RollPig Cloud 0.10.0+，请先升级 Cloud。"
+                if event is not None:
+                    await matcher.finish(MessageSegment.reply(event.message_id) + upgrade_message)
+                await matcher.finish(upgrade_message)
             except CloudStoreError as error:
                 logger.warning(f"rollpig cloud store unavailable: {error}")
                 if event is not None:
@@ -442,6 +447,7 @@ async def finish_roast_outcome(
     target_name: str,
     group_id: str,
     daily_feed_eligible: bool = False,
+    force_mode: str | None = None,
 ) -> None:
     """落库并发送烤群友结果；outcome 使用 Any 避免与 roast_flow 形成循环 import。"""
 
@@ -454,6 +460,11 @@ async def finish_roast_outcome(
         food=outcome.food_name,
         group_id=group_id,
         event_id=uuid.uuid4().hex,
+        force_mode=force_mode or "",
+        backfire_victim_id=outcome.backfire_victim_id,
+        backfire_victim_name=outcome.backfire_victim_name,
+        backfire_victim_ids=outcome.backfire_victim_ids,
+        backfire_victim_names=outcome.backfire_victim_names,
     )
     feed_result = await store.append_roast_event(
         roast_event,

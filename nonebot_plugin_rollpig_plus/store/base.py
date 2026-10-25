@@ -169,6 +169,11 @@ class RollpigStore(ABC):
     async def is_protected(self, group_id: str, user_id: str, date_str: Optional[str] = None) -> bool:
         raise NotImplementedError
 
+    @abstractmethod
+    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str) -> int:
+        """读取已生效保护的起始等级；未受保护时返回零，不含当日临时升级。"""
+        raise NotImplementedError
+
     # ================================ 猪圈日报投递 ================================ #
 
     async def get_daily_report_profiles(

@@ -18,22 +18,35 @@ from .roast_flow import (
     RoastOutcome,
     build_backfire_roast_outcome,
     build_success_roast_outcome,
+    can_backfire_roast,
     is_eaten_pig,
     is_food_pig,
     is_human_pig,
     is_sold_pig,
+    pick_food_pig,
 )
 from .store import store
 from .store.models import RoastEvent, RoastReservation
 from .texts import (
     DAILY_FEED_RESERVATION_TEXTS,
+    PROTECTION_LEVEL_UP_TEXTS,
+    PROTECTED_ROAST_BACKFIRE_TEXTS,
+    PROTECTED_ROAST_ESCAPE_TEXTS,
+    PROTECTED_ROAST_SUCCESS_TEXTS,
     RESERVED_TARGET_EATEN_TEXTS,
     RESERVED_TARGET_FOOD_TEXTS,
     RESERVED_TARGET_HUMAN_TEXTS,
     RESERVED_TARGET_SOLD_TEXTS,
     ROAST_RESERVATION_BACKFIRE_TEXTS,
     ROAST_RESERVATION_ESCAPE_TEXTS,
+    ROAST_RESERVATION_MULTI_BACKFIRE_CARD_TEXTS,
+    ROAST_RESERVATION_MULTI_BACKFIRE_NO_FOOD_TEXTS,
+    ROAST_RESERVATION_MULTI_BACKFIRE_SUBTITLES,
+    ROAST_RESERVATION_MULTI_BACKFIRE_TEXTS,
+    ROAST_RESERVATION_SINGLE_ROASTABLE_BACKFIRE_CARD_TEXTS,
     ROAST_RESERVATION_SUCCESS_TEXTS,
+    SUPER_FORCE_RESERVATION_SUCCESS_TEXT,
+    SUPER_FORCE_RESERVATION_TAKEOVER_SUCCESS_TEXT,
 )
 
 
@@ -149,11 +162,32 @@ def _participants_label(reservation: RoastReservation) -> str:
 def _operator_label(reservation: RoastReservation) -> str:
     """熟食卡署名在三人以内列全名，人数更多时保持紧凑。"""
 
+    if reservation.force_operator_id:
+        return reservation.force_operator_name or reservation.force_operator_id
     names = _participant_names(reservation)
     if len(names) <= 3:
         return "、".join(names)
     owner = reservation.owner_name or reservation.owner_id or names[0]
     return f"{owner} 等 {len(names)} 人"
+
+
+def _multi_backfire_origins_label(victim_pigs: list[dict]) -> str:
+    """将多名反噬受害者的小猪名称按被卷入顺序去重，生成自然的多猪合体短语。"""
+
+    total = len(victim_pigs)
+    unique_names: list[str] = []
+    for pig in victim_pigs:
+        pig_name = str(pig.get("name") or "未知小猪").strip() or "未知小猪"
+        if pig_name not in unique_names:
+            unique_names.append(pig_name)
+    if len(unique_names) == 1:
+        return f"{total} 只【{unique_names[0]}】"
+    if total == 2 and len(unique_names) == 2:
+        return f"【{unique_names[0]}】和【{unique_names[1]}】"
+    if total == 3 and len(unique_names) == 3:
+        return f"【{unique_names[0]}】、【{unique_names[1]}】和【{unique_names[2]}】"
+    head = "、".join(f"【{name}】" for name in unique_names[:3])
+    return f"{head}等 {total} 只小猪"
 
 
 def _serialize_outcome(outcome: RoastOutcome) -> dict[str, Any]:
@@ -165,6 +199,8 @@ def _serialize_outcome(outcome: RoastOutcome) -> dict[str, Any]:
         "food_name": outcome.food_name,
         "backfire_victim_id": outcome.backfire_victim_id,
         "backfire_victim_name": outcome.backfire_victim_name,
+        "backfire_victim_ids": list(outcome.backfire_victim_ids),
+        "backfire_victim_names": list(outcome.backfire_victim_names),
         "special_reason": outcome.special_reason,
     }
 
@@ -178,6 +214,8 @@ def _deserialize_outcome(snapshot: dict[str, Any]) -> RoastOutcome:
         food_name=str(snapshot.get("food_name") or ""),
         backfire_victim_id=str(snapshot.get("backfire_victim_id") or ""),
         backfire_victim_name=str(snapshot.get("backfire_victim_name") or ""),
+        backfire_victim_ids=tuple(snapshot.get("backfire_victim_ids") or ()),
+        backfire_victim_names=tuple(snapshot.get("backfire_victim_names") or ()),
         special_reason=str(snapshot.get("special_reason") or ""),
     )
 
@@ -199,7 +237,8 @@ async def _prepare_outcome_with_retry(
                 reservation,
                 outcome_snapshot,
                 settle_daily_feed=(
-                    reservation.force_mode is None
+                    (reservation.force_feed_user_ids or reservation.force_mode is None
+                     or (reservation.protection_required and reservation.force_mode != "super"))
                     and str(outcome_snapshot.get("event_type") or "") == "success"
                 ),
             )
@@ -334,12 +373,20 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
         "target": reservation.target_name or reservation.target_id,
         "pig": target_pig.get("name", "未知小猪"),
     }
-    if reservation.force_mode in {"normal", "super"}:
+    if reservation.force_mode == "super" or (reservation.force_mode == "normal" and not reservation.protection_required):
         roll = 1
     else:
         roll = random.randint(1, 100)
     if roll <= 60:
-        prefix = random.choice(ROAST_RESERVATION_SUCCESS_TEXTS).format(**values) + "\n\n"
+        if reservation.force_mode == "super":
+            if reservation.force_operator_id:
+                text = SUPER_FORCE_RESERVATION_TAKEOVER_SUCCESS_TEXT
+            else:
+                text = SUPER_FORCE_RESERVATION_SUCCESS_TEXT
+        else:
+            pool = PROTECTED_ROAST_SUCCESS_TEXTS if reservation.protection_required else ROAST_RESERVATION_SUCCESS_TEXTS
+            text = random.choice(pool)
+        prefix = text.format(**values, operator=_operator_label(reservation)) + "\n\n"
         return await build_success_roast_outcome(
             target_pig,
             attacker_name=_operator_label(reservation),
@@ -347,31 +394,94 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
             extra_text=prefix,
         )
     if roll <= 90:
+        pool = PROTECTED_ROAST_ESCAPE_TEXTS if reservation.protection_required else ROAST_RESERVATION_ESCAPE_TEXTS
         return RoastOutcome(
             event_type="escape",
-            plain_text=random.choice(ROAST_RESERVATION_ESCAPE_TEXTS).format(**values),
+            plain_text=random.choice(pool).format(**values),
         )
 
-    victim = random.choice(reservation.participants)
-    victim_pig = get_pig_by_id(victim.pig_id)
-    if not victim_pig:
-        raise ReservationResourceUnavailableError(
-            f"预约参与者资源暂时缺失: user_id={victim.user_id} pig_id={victim.pig_id}"
+    # 每场只判定一次反噬，再等概率选取 1～N 人；完整名单随结果快照固定。
+    if len(reservation.participants) > 1:
+        victims = random.sample(reservation.participants, random.randrange(1, len(reservation.participants) + 1))
+    else:
+        victims = [random.choice(reservation.participants)]
+    victim = victims[0]
+    victim_pigs = []
+    for participant in victims:
+        pig = get_pig_by_id(participant.pig_id)
+        if not pig:
+            raise ReservationResourceUnavailableError(
+                f"预约参与者资源暂时缺失: user_id={participant.user_id} pig_id={participant.pig_id}"
+            )
+        victim_pigs.append(pig)
+    victim_pig = victim_pigs[0]
+    if len(victims) > 1:
+        # 旧客户端只认识单个受害者，优先用可烤者作代表，完整名单另存。
+        for index, pig in enumerate(victim_pigs):
+            if can_backfire_roast(pig):
+                victim = victims[index]
+                victim_pig = pig
+                break
+    names = tuple(item.display_name or item.user_id for item in victims)
+    if len(victims) > 1:
+        # 名单在图外横排；卡片原料与成菜人数仅统计可烤者，避免特殊形态被写进二次加工食材。
+        roastable_pigs = [pig for pig in victim_pigs if can_backfire_roast(pig)]
+        food = pick_food_pig() if roastable_pigs else None
+        pool = ROAST_RESERVATION_MULTI_BACKFIRE_TEXTS if food is not None else ROAST_RESERVATION_MULTI_BACKFIRE_NO_FOOD_TEXTS
+        summary = random.choice(pool).format(
+            **values,
+            count=len(victims),
+            victims="、".join(names),
         )
-    prefix = random.choice(ROAST_RESERVATION_BACKFIRE_TEXTS).format(
-        **values,
-        victim=victim.display_name or victim.user_id,
-    ) + "\n\n"
-    outcome = await build_backfire_roast_outcome(
-        victim_pig,
-        attacker_name=victim.display_name or victim.user_id,
-        target_name=reservation.target_name or reservation.target_id,
-        extra_text=prefix,
-    )
+        if food is not None:
+            render_data = dict(food)
+            food_name = str(food.get("name") or "")
+            render_data["description"] = random.choice(ROAST_RESERVATION_MULTI_BACKFIRE_SUBTITLES)
+            if len(roastable_pigs) == 1:
+                origin_name = str(roastable_pigs[0].get("name") or "未知小猪").strip() or "未知小猪"
+                render_data["analysis"] = random.choice(ROAST_RESERVATION_SINGLE_ROASTABLE_BACKFIRE_CARD_TEXTS).format(
+                    origin=origin_name,
+                    food=food_name or "熟食",
+                )
+            else:
+                render_data["analysis"] = random.choice(ROAST_RESERVATION_MULTI_BACKFIRE_CARD_TEXTS).format(
+                    origins=_multi_backfire_origins_label(roastable_pigs),
+                    count=len(roastable_pigs),
+                    food=food_name or "熟食",
+                )
+            outcome = RoastOutcome(
+                event_type="backfire",
+                render_data=render_data,
+                extra_text=summary + "\n",
+                food_name=food_name,
+            )
+        else:
+            outcome = RoastOutcome(
+                event_type="backfire",
+                plain_text=summary,
+            )
+    else:
+        backfire_pool = (
+            PROTECTED_ROAST_BACKFIRE_TEXTS
+            if reservation.protection_required
+            else ROAST_RESERVATION_BACKFIRE_TEXTS
+        )
+        prefix = random.choice(backfire_pool).format(
+            **values,
+            victim=victim.display_name or victim.user_id,
+        ) + "\n\n"
+        outcome = await build_backfire_roast_outcome(
+            victim_pig,
+            attacker_name=victim.display_name or victim.user_id,
+            target_name=reservation.target_name or reservation.target_id,
+            extra_text=prefix,
+        )
     return replace(
         outcome,
         backfire_victim_id=victim.user_id,
         backfire_victim_name=victim.display_name or victim.user_id,
+        backfire_victim_ids=tuple(item.user_id for item in victims),
+        backfire_victim_names=names,
     )
 
 
@@ -380,9 +490,9 @@ def _build_reservation_event(reservation: RoastReservation, outcome: RoastOutcom
 
     return RoastEvent(
         event_type=outcome.event_type,
-        attacker_id=reservation.owner_id,
+        attacker_id=reservation.force_operator_id or reservation.owner_id,
         target_id=reservation.target_id,
-        attacker_name=reservation.owner_name,
+        attacker_name=reservation.force_operator_name or reservation.owner_name,
         target_name=reservation.target_name,
         food=outcome.food_name,
         group_id=reservation.group_id,
@@ -392,7 +502,29 @@ def _build_reservation_event(reservation: RoastReservation, outcome: RoastOutcom
         participant_count=reservation.participant_count,
         backfire_victim_id=outcome.backfire_victim_id,
         backfire_victim_name=outcome.backfire_victim_name,
+        backfire_victim_ids=outcome.backfire_victim_ids,
+        backfire_victim_names=outcome.backfire_victim_names,
         special_reason=outcome.special_reason,
+        force_mode=reservation.force_mode or "",
+        protection_level=max(0, reservation.protection_required - 1),
+        reservation_owner_id=reservation.owner_id,
+        reservation_owner_name=reservation.owner_name,
+    )
+
+
+def _build_protection_upgrade_text(reservation: RoastReservation, outcome: RoastOutcome) -> str:
+    """保护目标被成功烤成且尚未满级时，在结算末尾追加保护升级提示。"""
+
+    if outcome.event_type != "success" or not reservation.protection_required:
+        return ""
+    before_level = max(1, reservation.protection_required - 1)
+    if before_level >= 5:
+        return ""
+    digest = hashlib.sha256(str(reservation.reservation_id or "").encode("utf-8")).digest()
+    template = PROTECTION_LEVEL_UP_TEXTS[digest[1] % len(PROTECTION_LEVEL_UP_TEXTS)]
+    return template.format(
+        name=reservation.target_name or reservation.target_id,
+        level=before_level + 1,
     )
 
 
@@ -479,9 +611,13 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> ReservationDeliver
                 reservation = replace(updated, claim_token=reservation.claim_token or updated.claim_token)
 
             message = await _prepare_reservation_message(outcome)
+            upgrade_text = _build_protection_upgrade_text(reservation, outcome)
+            if upgrade_text:
+                separator = "" if outcome.render_data else "\n"
+                message += MessageSegment.text(separator + upgrade_text)
             feed_text = _build_reservation_feed_text(reservation)
             if feed_text:
-                separator = "" if outcome.render_data else "\n"
+                separator = "\n" if (not outcome.render_data or upgrade_text) else ""
                 message += MessageSegment.text(separator + feed_text)
 
             # 群开关可能在结果生成期间变化，真正发送前必须再次确认。

@@ -113,6 +113,7 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         event = SimpleNamespace(message_id=12, self_id=1000, group_id=100)
         preparation = SimpleNamespace(status="reservation_joined", reservation=SimpleNamespace(
             reservation_id="reservation", date_str="2026-08-07", participant_count=2,
+            protection_required=0, status="pending",
         ))
         for result in ({"message_id": 900}, 900, "900", None, {}, ""):
             with self.subTest(result=result), patch.object(roast_handler, "store") as store:
@@ -135,6 +136,7 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         event = SimpleNamespace(message_id=12, self_id=1000, group_id=100)
         preparation = SimpleNamespace(status="reservation_created", reservation=SimpleNamespace(
             reservation_id="reservation", date_str="2026-08-07",
+            protection_required=0, status="pending",
         ))
         with patch.object(roast_handler, "store") as store:
             store.bind_roast_reservation_message = AsyncMock(side_effect=CloudReservationUnsupportedError("old cloud"))
@@ -238,6 +240,16 @@ class CommandBoundaryRuleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await _matches(roll_handler.cmd_roll, Message("/随机小猪3")))
         self.assertTrue(await _matches(collection_handler.cmd_catalog, Message("/小猪图鉴2")))
         self.assertTrue(await _matches(roll_handler.cmd_find, Message("/找猪玩偶")))
+
+    async def test_daily_pig_alias_uses_the_same_matcher_and_exact_boundary(self):
+        commands = _command_rule(roll_handler.cmd_today).cmds
+        for command in ("今天是什么小猪", "今日小猪", "猪来"):
+            with self.subTest(command=command):
+                self.assertIn((command,), commands)
+                self.assertTrue(await _matches(roll_handler.cmd_today, Message(f"/{command}")))
+        for text in ("/猪来了", "/猪来测试", "/猪来 再抽一次"):
+            with self.subTest(text=text):
+                self.assertFalse(await _matches(roll_handler.cmd_today, Message(text)))
 
     def test_existing_text_parameter_commands_keep_default_matching(self):
         for matcher in (
@@ -421,6 +433,7 @@ class LeadingAtRoastTests(unittest.IsolatedAsyncioTestCase):
             (roast_handler._roast_member_command, Message("/烤群友 ") + MessageSegment.at(222), None),
             (roast_handler._roast_member_command, Message("/加急生火 ") + MessageSegment.at(222), "normal"),
             (roast_handler._roast_member_command, Message("/烤群友 强行点火 ") + MessageSegment.at(222), "super"),
+            (roast_handler._roast_member_command, Message("/强行点火 ") + MessageSegment.at(222), "super"),
         )
         for handler, message, force_mode in cases:
             with (
@@ -437,6 +450,7 @@ class LeadingAtRoastTests(unittest.IsolatedAsyncioTestCase):
                     status="target_ready", target_pig_id="target-pig", reservation=None, protection_broken=False,
                 ))
                 store.mark_group_roll_seen = AsyncMock()
+                store.get_daily_roll = AsyncMock(return_value=None)
                 store.consume_roast_cooldown = AsyncMock(return_value=SimpleNamespace(allowed=True))
                 store.consume_force_usage = AsyncMock(return_value=True)
                 bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"nickname": "乙"}))
@@ -472,6 +486,7 @@ class LeadingAtRoastTests(unittest.IsolatedAsyncioTestCase):
                     status="reservation_created", reservation=reservation, protection_broken=False,
                 ))
                 store.mark_group_roll_seen = AsyncMock()
+                store.get_daily_roll = AsyncMock(return_value=None)
                 bot = SimpleNamespace(get_group_member_info=AsyncMock(return_value={"nickname": "乙"}))
                 matcher = SimpleNamespace(stop_propagation=Mock(), finish=AsyncMock())
                 await handler.__wrapped__.__wrapped__(matcher, bot, self._event(message))
@@ -887,7 +902,7 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unrolled_handler_warns_first_then_renders_temporary_food(self):
         matcher = SimpleNamespace(finish=AsyncMock())
-        event = SimpleNamespace(user_id=123, message_id=456)
+        event = SimpleNamespace(user_id=123, message_id=456, group_id=100)
         attempt_results = [
             UnrolledRoastAttemptResult("2026-08-07", "123", 1),
             UnrolledRoastAttemptResult("2026-08-07", "123", 2),
@@ -900,6 +915,7 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(roast_handler.random, "choice", side_effect=lambda pool: pool[0]),
         ):
             mocked_store.record_unrolled_roast_attempt = AsyncMock(side_effect=attempt_results)
+            mocked_store.append_roast_event = AsyncMock()
             await roast_handler._finish_unrolled_attacker_attempt(
                 matcher,
                 event,
@@ -1341,15 +1357,17 @@ class LocalRoastReservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["participant_count"], 2)
         self.assertEqual(event["backfire_victim_id"], "b")
 
-    async def test_protection_blocks_creation_but_not_joining_existing_reservation(self):
+    async def test_protection_gathers_and_allows_accelerated_contribution_upgrade(self):
         self.manager.data["protected"] = {"2026-08-07": {"100": ["target"]}}
         blocked = await self._prepare()
-        self.assertEqual(blocked.status, "protected")
-        self.assertNotIn("a", self.manager.data["usage"])
+        self.assertEqual(blocked.status, "reservation_created")
+        self.assertEqual(blocked.reservation.protection_required, 2)
+        self.assertEqual(blocked.reservation.contribution_count, 1)
 
         forced = await self._prepare(force_mode="normal")
-        self.assertEqual(forced.status, "reservation_created")
-        self.assertTrue(forced.protection_broken)
+        self.assertEqual(forced.status, "reservation_upgraded")
+        self.assertFalse(forced.protection_broken)
+        self.assertEqual(forced.reservation.contribution_count, 2)
 
         joined = await self._prepare("b")
         self.assertEqual(joined.status, "reservation_joined")
@@ -1682,12 +1700,13 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.object(reservation_flow.random, "randint", return_value=91),
                 patch.object(reservation_flow.random, "choice", side_effect=choose),
+                patch.object(reservation_flow.random, "randrange", return_value=1),
+                patch.object(reservation_flow.random, "sample", side_effect=lambda sequence, count: [sequence[1]]),
             ):
                 outcome = await reservation_flow.build_reservation_outcome(self._reservation())
                 self.assertEqual(outcome.event_type, "backfire")
 
         self.assertEqual(backfire.await_args.args[0], victim)
-        self.assertEqual(backfire.await_args.kwargs["attacker_name"], "帮厨")
         self.assertEqual(outcome.backfire_victim_id, "helper")
         self.assertEqual(outcome.backfire_victim_name, "帮厨")
 
@@ -2145,6 +2164,8 @@ class CloudReservationCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 "delivery_bot_id": "bot-1",
                 "date_str": "2026-08-07",
                 "supports_prepared": True,
+                "supports_protection_gathering": True,
+                "protection_gathering_version": 2,
                 "excluded_reservation_ids": ["reservation-a", "reservation-b"],
             },
         )

@@ -628,7 +628,8 @@ async def load_group_daily_report(
     )
 
 
-def _with_daily_protections(
+async def _with_daily_protections(
+    report_store: RollpigStore,
     report: DailyReport,
     protect_date: str,
     user_ids: Sequence[str],
@@ -640,16 +641,19 @@ def _with_daily_protections(
         dt.time(23, 59),
         tzinfo=ROLLPIG_TIMEZONE,
     ).isoformat()
-    return replace(
-        report,
-        protections=tuple(
-            ProtectionReportItem(
+    protections = []
+    for user_id in user_ids:
+        base_level = await report_store.get_protection_base_level(report.group_id, user_id, protect_date)
+        if base_level:
+            protections.append(ProtectionReportItem(
                 user_id=user_id,
                 display_name=report.display_names.get(user_id, ""),
                 expires_at=expires_at,
-            )
-            for user_id in user_ids
-        ),
+                base_level=base_level,
+            ))
+    return replace(
+        report,
+        protections=tuple(protections),
     )
 
 
@@ -675,7 +679,7 @@ async def build_group_daily_report(
         protected_ids,
         protect_date,
     )
-    return _with_daily_protections(report, protect_date, protected_ids)
+    return await _with_daily_protections(report_store, report, protect_date, protected_ids)
 
 
 # ================================ 主动查询最近一期日报 ================================ #
@@ -711,20 +715,16 @@ async def _build_daily_report_query_card(
 
     candidates = select_daily_protected_user_ids(report.events)
     try:
-        confirmed = [
-            user_id for user_id in candidates
-            if await store.is_protected(group_id, user_id, protect_date)
-        ]
+        report = await _with_daily_protections(store, report, protect_date, candidates)
     except (CloudStoreError, LocalStoreUnavailableError) as error:
         # 附加权益查询失败不能挡住日报主体；只展示确已生效的保护，
         # 未确认结果沿用 30 秒短缓存与图片后的提示，不在查卡路径补写。
-        confirmed = []
+        report = replace(report, protections=())
         logger.warning(f"[猪圈日报] 查卡保护未确认，隐藏保护券: group={group_id} error={error}")
-    report = _with_daily_protections(report, protect_date, confirmed)
     rendered = await render_daily_report_card(
         report, cutoff_time=DAILY_REPORT_SCHEDULE_TIME.strftime("%H:%M"),
     )
-    return rendered.data, bool(candidates and not confirmed)
+    return rendered.data, bool(candidates and not report.protections)
 
 
 async def render_latest_daily_report_query_card(

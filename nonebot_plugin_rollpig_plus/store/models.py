@@ -160,9 +160,15 @@ class RoastEvent:
     participant_count: int = 0
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    backfire_victim_ids: tuple[str, ...] = ()
+    backfire_victim_names: tuple[str, ...] = ()
     special_reason: str = ""
     event_id: str = ""
     created_at: str = ""
+    force_mode: str = ""
+    protection_level: int = 0
+    reservation_owner_id: str = ""
+    reservation_owner_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -271,13 +277,18 @@ class DailyReportProfileSnapshot:
 
 @dataclass(frozen=True)
 class RoastReservationParticipant:
+    """保存参与者身份与本场贡献，普通参与为一点，加急为两点。"""
+
     user_id: str
     display_name: str = ""
     pig_id: str = ""
+    contribution: int = 1
 
 
 @dataclass(frozen=True)
 class RoastReservation:
+    """保存预约场次与固定结果，保护门槛为零时使用普通预约规则。"""
+
     reservation_id: str
     date_str: str
     group_id: str
@@ -294,6 +305,16 @@ class RoastReservation:
     outcome_snapshot: Optional[dict[str, Any]] = None
     daily_feed_results: tuple[DailyFeedResult, ...] = ()
     claim_token: str = ""
+    protection_required: int = 0
+    force_operator_id: str = ""
+    force_operator_name: str = ""
+    force_feed_user_ids: tuple[str, ...] = ()
+
+    @property
+    def contribution_count(self) -> int:
+        """返回本场累计贡献点数，加急参与者按两点计算。"""
+
+        return sum(item.contribution for item in self.participants)
 
     @property
     def participant_count(self) -> int:

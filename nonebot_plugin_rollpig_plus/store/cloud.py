@@ -45,6 +45,10 @@ class CloudMakeupUnsupportedError(CloudStoreError):
     pass
 
 
+class CloudProtectionUnsupportedError(CloudStoreError):
+    """Cloud 尚未支持聚众烤猪，需要在消费前提示升级。"""
+
+
 class CloudReservationUnsupportedError(CloudStoreError):
     """旧版 Cloud 没有预约接口时抛出，handler 可只降级预约场景。"""
 
@@ -178,6 +182,7 @@ class CloudStore(RollpigStore):
                 user_id=str(item.get("user_id") or ""),
                 display_name=str(item.get("display_name") or ""),
                 pig_id=str(item.get("pig_id") or ""),
+                contribution=int(item.get("contribution") or 1),
             )
             for item in payload.get("participants", [])
             if isinstance(item, dict) and item.get("user_id")
@@ -203,6 +208,10 @@ class CloudStore(RollpigStore):
                 if (result := CloudStore._parse_daily_feed(item)) is not None
             ),
             claim_token=str(payload.get("claim_token") or ""),
+            protection_required=int(payload.get("protection_required") or 0),
+            force_operator_id=str(payload.get("force_operator_id") or ""),
+            force_operator_name=str(payload.get("force_operator_name") or ""),
+            force_feed_user_ids=tuple(payload.get("force_feed_user_ids") or ()),
         )
 
     @staticmethod
@@ -611,7 +620,13 @@ class CloudStore(RollpigStore):
             "participant_count": event.participant_count,
             "backfire_victim_id": event.backfire_victim_id,
             "backfire_victim_name": event.backfire_victim_name,
+            "backfire_victim_ids": list(event.backfire_victim_ids),
+            "backfire_victim_names": list(event.backfire_victim_names),
             "special_reason": event.special_reason,
+            "force_mode": event.force_mode,
+            "protection_level": event.protection_level,
+            "reservation_owner_id": event.reservation_owner_id,
+            "reservation_owner_name": event.reservation_owner_name,
         }
 
     async def _append_roast_event(
@@ -718,6 +733,7 @@ class CloudStore(RollpigStore):
                 "group_id": group_id,
                 "user_ids": user_ids,
                 "protect_date": protect_date or rollpig_date_str(1),
+                "initial_level": 3,
             },
         )
 
@@ -733,6 +749,16 @@ class CloudStore(RollpigStore):
             fallback={"protected": False},
         )
         return bool(payload.get("protected")) if payload else False
+
+    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str) -> int:
+        """读取 Cloud 已落库的保护起始等级，旧响应缺少等级时按一级展示。"""
+        payload = await self._request(
+            "GET", "/v1/protections/check",
+            params={"group_id": group_id, "user_id": user_id, "protect_date": date_str},
+        )
+        if not payload.get("protected"):
+            return 0
+        return min(5, max(1, int(payload.get("base_level") or 1)))
 
     # ================================ 猪圈日报投递 ================================ #
 
@@ -927,6 +953,21 @@ class CloudStore(RollpigStore):
         cooldown_seconds: Optional[int] = None,
         max_charges: Optional[int] = None,
     ) -> RoastReservationPrepareResult:
+        # 旧 Cloud 会让加急单人突破保护，须在任何消费或创建之前完成能力确认。
+        if not getattr(self, "_protection_gathering_supported", False):
+            try:
+                capabilities = await self._reservation_request("GET", "/v1/roast-reservations/capabilities")
+            except CloudReservationUnsupportedError:
+                capabilities = {}
+            if capabilities.get("protection_gathering") is True and int(capabilities.get("protection_gathering_version") or 0) >= 2:
+                self._protection_gathering_supported = True
+            else:
+                # 此处紧邻写入，查询失败必须停止，不能用普通只读接口的未保护兜底值。
+                protection = await self._request("GET", "/v1/protections/check", params={
+                    "group_id": group_id, "user_id": target_id, "protect_date": date_str or rollpig_date_str(),
+                })
+                if protection.get("protected"):
+                    raise CloudProtectionUnsupportedError("聚众烤猪需要 RollPig Cloud 0.10.0+，请先升级 Cloud。")
         payload = await self._reservation_request(
             "POST",
             "/v1/roast-reservations/prepare",
@@ -942,6 +983,8 @@ class CloudStore(RollpigStore):
                 "date_str": date_str or rollpig_date_str(),
                 "cooldown_seconds": cooldown_seconds,
                 "max_charges": max_charges,
+                "supports_protection_gathering": True,
+                "protection_gathering_version": 2,
             },
         )
         cooldown_payload = payload.get("cooldown") if isinstance(payload, dict) else None
@@ -972,7 +1015,7 @@ class CloudStore(RollpigStore):
     async def join_roast_reservation_by_message(self, **kwargs) -> RoastReservationPrepareResult:
         payload = await self._reservation_request(
             "POST", "/v1/roast-reservations/join-by-message",
-            json_body={**kwargs, "date_str": kwargs.get("date_str") or rollpig_date_str()},
+            json_body={**kwargs, "date_str": kwargs.get("date_str") or rollpig_date_str(), "protection_gathering_version": 2},
         )
         return RoastReservationPrepareResult(
             status=str(payload.get("status") or "error"),
@@ -992,6 +1035,8 @@ class CloudStore(RollpigStore):
                 "delivery_bot_id": delivery_bot_id,
                 "date_str": date_str or rollpig_date_str(),
                 "supports_prepared": True,
+                "supports_protection_gathering": True,
+                "protection_gathering_version": 2,
                 "excluded_reservation_ids": sorted(excluded_reservation_ids or ()),
             },
         )

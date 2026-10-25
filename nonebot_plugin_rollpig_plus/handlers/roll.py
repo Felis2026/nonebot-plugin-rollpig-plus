@@ -86,7 +86,7 @@ async def _sync_resources_for_event(matcher: type[Matcher], event: Event, *, red
 # 1. 今日小猪
 cmd_today = on_command(
     "今天是什么小猪",
-    aliases={"今日小猪"},
+    aliases={"今日小猪", "猪来"},
     rule=command_has_no_argument,
     block=True,
 )

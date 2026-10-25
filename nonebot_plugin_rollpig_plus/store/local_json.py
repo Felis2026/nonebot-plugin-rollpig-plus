@@ -144,7 +144,13 @@ class LocalJsonStore(RollpigStore):
             participant_count=event.participant_count,
             backfire_victim_id=event.backfire_victim_id,
             backfire_victim_name=event.backfire_victim_name,
+            backfire_victim_ids=list(event.backfire_victim_ids),
+            backfire_victim_names=list(event.backfire_victim_names),
             special_reason=event.special_reason,
+            force_mode=event.force_mode,
+            protection_level=event.protection_level,
+            reservation_owner_id=event.reservation_owner_id,
+            reservation_owner_name=event.reservation_owner_name,
             event_id=event.event_id,
             created_at=event.created_at,
             settle_daily_feed=settle_daily_feed,
@@ -180,6 +186,10 @@ class LocalJsonStore(RollpigStore):
 
     async def is_protected(self, group_id: str, user_id: str, date_str: Optional[str] = None) -> bool:
         return self.manager.is_protected(group_id, user_id, date_str=date_str)
+
+    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str) -> int:
+        """读取本地保护起始等级，旧保护记录按 Lv.1 展示。"""
+        return await self.manager.get_protection_base_level(group_id, user_id, date_str)
 
     # ================================ 猪圈日报投递 ================================ #
 

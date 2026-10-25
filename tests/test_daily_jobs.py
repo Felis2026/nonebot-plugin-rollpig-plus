@@ -142,12 +142,14 @@ class DailyReportQueryTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(jobs, "select_daily_protected_user_ids", return_value=["user"]),
                 patch.object(jobs, "render_daily_report_card", new=AsyncMock(return_value=SimpleNamespace(data=b"card"))) as render,
             ):
-                report_store.is_protected = AsyncMock(return_value=protected)
+                report_store.get_protection_base_level = AsyncMock(return_value=4 if protected else 0)
                 result = await jobs._build_daily_report_query_card(bot, "100", "2026-09-22")
 
                 self.assertEqual(result, (b"card", not protected))
                 self.assertEqual(len(render.await_args.args[0].protections), int(protected))
-                report_store.is_protected.assert_awaited_once_with("100", "user", "2026-09-23")
+                report_store.get_protection_base_level.assert_awaited_once_with("100", "user", "2026-09-23")
+                if protected:
+                    self.assertEqual(render.await_args.args[0].protections[0].base_level, 4)
                 self.assertEqual(load.await_args.kwargs["cutoff_at"], "2026-09-22T23:45:00+08:00")
                 report_store.replace_group_protections.assert_not_called()
                 report_store.claim_daily_report_deliveries.assert_not_called()
@@ -181,7 +183,7 @@ class DailyReportQueryTests(unittest.IsolatedAsyncioTestCase):
                 await jobs._build_daily_report_query_card(SimpleNamespace(self_id="bot-a"), "100", "2026-09-22"),
                 (None, False),
             )
-            report_store.is_protected.assert_not_called()
+            report_store.get_protection_base_level.assert_not_called()
             render.assert_not_awaited()
 
     async def test_protection_store_failure_hides_coupon_but_still_renders(self) -> None:
@@ -194,7 +196,7 @@ class DailyReportQueryTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(jobs, "select_daily_protected_user_ids", return_value=["user"]),
                 patch.object(jobs, "render_daily_report_card", new=AsyncMock(return_value=SimpleNamespace(data=b"card"))) as render,
             ):
-                report_store.is_protected = AsyncMock(side_effect=error)
+                report_store.get_protection_base_level = AsyncMock(side_effect=error)
                 self.assertEqual(await jobs._build_daily_report_query_card(SimpleNamespace(), "100", "2026-09-22"), (b"card", True))
                 self.assertEqual(render.await_args.args[0].protections, ())
                 report_store.replace_group_protections.assert_not_called()
@@ -214,7 +216,7 @@ class DailyReportQueryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(jobs, "select_daily_protected_user_ids", return_value=["user"]),
             patch.object(jobs, "store") as report_store,
         ):
-            report_store.is_protected = AsyncMock(side_effect=TypeError("wrong call"))
+            report_store.get_protection_base_level = AsyncMock(side_effect=TypeError("wrong call"))
             with self.assertRaises(TypeError):
                 await jobs._build_daily_report_query_card(SimpleNamespace(), "100", "2026-09-22")
 
@@ -851,6 +853,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
             get_group_active_user_ids=AsyncMock(return_value={"a", "b"}),
             get_daily_report_profiles=AsyncMock(return_value=()),
             replace_group_protections=AsyncMock(),
+            get_protection_base_level=AsyncMock(return_value=4),
         )
         bot = SimpleNamespace(
             get_group_member_list=AsyncMock(
@@ -878,6 +881,8 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(report.protections[0].user_id, "b")
         self.assertEqual(report.protections[0].display_name, "乙")
+        self.assertEqual(report.protections[0].base_level, 4)
+        summary_store.get_protection_base_level.assert_awaited_once_with("100", "b", "2026-08-27")
         summary_store.get_group_rolls.assert_awaited_once_with(
             "100",
             "2026-08-26",

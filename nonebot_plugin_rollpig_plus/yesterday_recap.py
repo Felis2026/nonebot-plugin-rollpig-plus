@@ -129,6 +129,7 @@ def _event_fingerprint(date_str: str, raw: dict) -> str:
         "reservation_id": str(raw.get("reservation_id") or ""),
         "participant_ids": sorted({str(item) for item in participant_ids if item}),
         "backfire_victim_id": str(raw.get("backfire_victim_id") or ""),
+        "backfire_victim_ids": list(raw.get("backfire_victim_ids") or ()),
         "special_reason": str(raw.get("special_reason") or ""),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -252,6 +253,14 @@ def normalize_yesterday_events(
                     participant_name_map[participant_id] = participant_name
         reservation_id = str(raw.get("reservation_id") or "")
         backfire_victim_id = str(raw.get("backfire_victim_id") or "")
+        backfire_victim_name = str(raw.get("backfire_victim_name") or "")
+        victim_ids = tuple(str(item) for item in (raw.get("backfire_victim_ids") or ()))
+        if user_id in victim_ids:
+            # 个人回顾使用当前用户的受害者视角，兼容旧事件的单人字段。
+            backfire_victim_id = user_id
+            victim_names = raw.get("backfire_victim_names") or ()
+            index = victim_ids.index(user_id)
+            backfire_victim_name = str(victim_names[index]) if index < len(victim_names) else ""
         special_reason = str(raw.get("special_reason") or "")
         if reservation_id and attacker_id and attacker_id not in participant_name_map:
             participant_id_list.append(attacker_id)
@@ -301,7 +310,7 @@ def normalize_yesterday_events(
             participant_names=participant_names,
             participant_count=participant_count,
             backfire_victim_id=backfire_victim_id,
-            backfire_victim_name=str(raw.get("backfire_victim_name") or ""),
+            backfire_victim_name=backfire_victim_name,
             special_reason=special_reason,
             fingerprint=fingerprint,
         ))
