@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -11,6 +10,7 @@ from pathlib import Path
 from nonebot.log import logger
 
 from .daily_report import NormalizedDailyEvent, normalize_daily_events
+from .roast_statistics import count_roasted_users
 from .runtime import ROLLPIG_TIMEZONE, is_group_rollpig_enabled, rollpig_now
 from .store.base import RollpigStore
 
@@ -21,12 +21,9 @@ PROTECTION_RECOVERY_DELAYS = (30, 60, 120, 300, 600)
 
 
 def select_daily_protected_user_ids(events: Sequence[NormalizedDailyEvent]) -> list[str]:
-    """沿用现有规则：被成功烤至少两次且次数最高的一人获得次日保护。"""
+    """从被烤至少两次的人中选择最高者，反噬按实际受害者计数。"""
 
-    roasted_counter: Counter[str] = Counter()
-    for event in events:
-        if event.event_type == "success" and event.target_id and event.target_id != event.attacker_id:
-            roasted_counter[event.target_id] += 1
+    roasted_counter = count_roasted_users(asdict(event) for event in events)
     if not roasted_counter:
         return []
     user_id, count = roasted_counter.most_common(1)[0]

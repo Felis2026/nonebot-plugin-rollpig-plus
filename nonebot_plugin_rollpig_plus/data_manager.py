@@ -4,6 +4,7 @@ import datetime
 import shutil
 import time
 import uuid
+from .roast_statistics import count_roasted_users
 from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
@@ -573,6 +574,7 @@ class PigDataManager:
                 user_id=str(item.get("user_id") or ""),
                 display_name=str(item.get("display_name") or ""),
                 pig_id=str(item.get("pig_id") or ""),
+                contribution=int(item.get("contribution") or 1),
             )
             for item in raw.get("participants", [])
             if isinstance(item, dict) and item.get("user_id")
@@ -600,6 +602,10 @@ class PigDataManager:
             outcome_snapshot=dict(snapshot) if isinstance(snapshot, dict) else None,
             daily_feed_results=feed_results,
             claim_token=str(raw.get("claim_token") or ""),
+            protection_required=int(raw.get("protection_required") or 0),
+            force_operator_id=str(raw.get("force_operator_id") or ""),
+            force_operator_name=str(raw.get("force_operator_name") or ""),
+            force_feed_user_ids=tuple(raw.get("force_feed_user_ids") or ()),
         )
 
     def _bind_reservation_event_locked(self, raw: dict, event: RoastEvent) -> RoastEvent:
@@ -608,9 +614,9 @@ class PigDataManager:
         reservation = self._reservation_from_raw(raw)
         return RoastEvent(
             event_type=event.event_type,
-            attacker_id=reservation.owner_id,
+            attacker_id=reservation.force_operator_id or reservation.owner_id,
             target_id=reservation.target_id,
-            attacker_name=reservation.owner_name,
+            attacker_name=reservation.force_operator_name or reservation.owner_name,
             target_name=reservation.target_name,
             food=event.food,
             group_id=reservation.group_id,
@@ -620,9 +626,15 @@ class PigDataManager:
             participant_count=reservation.participant_count,
             backfire_victim_id=event.backfire_victim_id,
             backfire_victim_name=event.backfire_victim_name,
+            backfire_victim_ids=event.backfire_victim_ids,
+            backfire_victim_names=event.backfire_victim_names,
             special_reason=event.special_reason,
             event_id=event.event_id,
             created_at=event.created_at,
+            force_mode=reservation.force_mode or "",
+            protection_level=max(0, reservation.protection_required - 1),
+            reservation_owner_id=reservation.owner_id,
+            reservation_owner_name=reservation.owner_name,
         )
 
     def _find_reservation_locked(self, reservation_id: str) -> Optional[dict]:
@@ -1252,9 +1264,7 @@ class PigDataManager:
                     and reservation.get("target_id") == user_id
                     and reservation.get("status") == "pending"
                 ):
-                    reservation["status"] = "ready"
-                    reservation["target_pig_id"] = proposed_pig_id
-                    reservation["ready_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    self._activate_reservation_locked(reservation, proposed_pig_id)
 
             await self._atomic_save()
             return result
@@ -1306,7 +1316,8 @@ class PigDataManager:
             if raw is None:
                 return RoastReservationPrepareResult("message_not_found")
             history = self.data.setdefault("history", {}).get(target_date, {})
-            if raw.get("date_str") != target_date or raw.get("status") != "pending" or history.get(raw["target_id"]):
+            if (raw.get("date_str") != target_date or raw.get("status") != "pending"
+                    or (history.get(raw["target_id"]) and not raw.get("protection_required"))):
                 return RoastReservationPrepareResult("reservation_closed")
             if raw["target_id"] == attacker_id:
                 return RoastReservationPrepareResult("self_target")
@@ -1318,17 +1329,70 @@ class PigDataManager:
                 await self._atomic_save()
             return result
 
-    def _join_reservation_locked(self, raw: dict, user_id: str, name: str, pig_id: str) -> RoastReservationPrepareResult:
-        """两种加入入口共用人数、重复判定；调用方持锁并负责保存。"""
+    def _activate_reservation_locked(self, raw: dict, pig_id: str) -> None:
+        """目标有今日小猪且集结达标时冻结本场参与者并等待投递。"""
+
+        raw["target_pig_id"] = pig_id
+        participants = raw.get("participants", [])
+        if raw.get("protection_required") and raw.get("force_mode") != "super":
+            if sum(int(item.get("contribution") or 1) for item in participants) < raw["protection_required"]:
+                return
+        raw["status"] = "ready"
+        raw["ready_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    def _protection_required_locked(self, date_str: str, group_id: str, target_id: str) -> int:
+        """按起始保护等级与当日已固化成功场次计算二至六点门槛。"""
+
+        successes = sum(
+            1 for previous in self.data.setdefault("roast_reservations", {}).values()
+            if previous.get("date_str") == date_str and previous.get("group_id") == group_id
+            and previous.get("target_id") == target_id and previous.get("protection_required")
+            and (previous.get("outcome_snapshot") or {}).get("event_type") == "success"
+        )
+        details = self.data.get("protection_details", {}).get(date_str, {}).get(group_id, {}).get(target_id, {})
+        base_level = max(1, min(5, int(details.get("base_level") or 1)))
+        return 1 + min(5, base_level + successes)
+
+    def _join_reservation_locked(self, raw: dict, user_id: str, name: str, pig_id: str, force_mode: str | None = None) -> RoastReservationPrepareResult:
+        """加入或升级本场贡献，加急会消费每日额度，调用方持锁并负责保存。"""
         participants = raw.setdefault("participants", [])
-        if any(str(item.get("user_id")) == user_id for item in participants if isinstance(item, dict)):
+        if raw.get("force_mode") == "super":
+            return RoastReservationPrepareResult("already_joined" if (raw.get("force_operator_id") or raw.get("owner_id")) == user_id else "reservation_closed", self._reservation_from_raw(raw))
+        if force_mode == "super":
+            # 接管保留其他人原有的加餐资格，执行者不占报名位置。
+            raw["force_feed_user_ids"] = [
+                str(item["user_id"]) for item in participants
+                if item.get("user_id") != user_id
+                and (raw.get("force_mode") is None or raw.get("protection_required"))
+                and (not raw.get("protection_required") or int(item.get("contribution") or 1) == 1)
+            ]
+            raw["force_operator_id"] = user_id
+            raw["force_operator_name"] = name
+            raw["force_mode"] = "super"
+            self._record_group_roll(raw["date_str"], raw["group_id"], user_id, pig_id)
+            if raw.get("target_pig_id"):
+                self._activate_reservation_locked(raw, raw["target_pig_id"])
+            return RoastReservationPrepareResult("reservation_joined", self._reservation_from_raw(raw))
+        participant = next((item for item in participants if isinstance(item, dict) and str(item.get("user_id")) == user_id), None)
+        boosted = bool(raw.get("protection_required") and force_mode == "normal")
+        if participant is not None and not (boosted and int(participant.get("contribution") or 1) < 2) and force_mode != "super":
             return RoastReservationPrepareResult("already_joined", self._reservation_from_raw(raw))
-        if len(participants) >= ROAST_RESERVATION_MAX_PARTICIPANTS:
+        if participant is None and len(participants) >= ROAST_RESERVATION_MAX_PARTICIPANTS:
             return RoastReservationPrepareResult("reservation_full", self._reservation_from_raw(raw))
-        participants.append({"user_id": user_id, "display_name": name, "pig_id": pig_id})
+        if boosted and not self._consume_force_usage_locked(user_id, raw["date_str"]):
+            return RoastReservationPrepareResult("force_denied")
+        upgraded = participant is not None and boosted
+        if participant is None:
+            participants.append({"user_id": user_id, "display_name": name, "pig_id": pig_id, "contribution": 2 if boosted else 1})
+        elif boosted:
+            participant["contribution"] = 2
+        if force_mode == "super" and raw.get("protection_required"):
+            raw["force_mode"] = "super"
         # 回复加入也代表今日小猪在本群出现，必须与参与者名单一起落盘。
         self._record_group_roll(raw["date_str"], raw["group_id"], user_id, pig_id)
-        return RoastReservationPrepareResult("reservation_joined", self._reservation_from_raw(raw))
+        if raw.get("target_pig_id"):
+            self._activate_reservation_locked(raw, raw["target_pig_id"])
+        return RoastReservationPrepareResult("reservation_upgraded" if upgraded else "reservation_joined", self._reservation_from_raw(raw))
 
     async def prepare_roast_reservation(
         self,
@@ -1345,30 +1409,30 @@ class PigDataManager:
         cooldown_seconds: Optional[int] = None,
         max_charges: Optional[int] = None,
     ) -> RoastReservationPrepareResult:
-        """原子完成目标检查、免费加入或扣资源创建预约。"""
+        """原子检查保护、加入或创建预约，并消费对应充能或加急额度。"""
 
         target_date = date_str or rollpig_date_str()
         attacker_id = str(attacker_id)
         target_id = str(target_id)
         async with self._lock:
             target_pig_id = self.data.setdefault("history", {}).get(target_date, {}).get(target_id)
+            protected = self.is_protected(str(group_id), target_id, target_date)
             existing = self._find_pending_reservation_locked(target_date, str(group_id), target_id)
+            if (protected or force_mode == "super") and existing is None:
+                existing = next((raw for raw in self.data.setdefault("roast_reservations", {}).values()
+                                 if raw.get("date_str") == target_date and raw.get("group_id") == str(group_id)
+                                 and raw.get("target_id") == target_id and raw.get("status") in {"ready", "processing", "prepared", "sending"}), None)
             if existing is not None:
-                result = self._join_reservation_locked(existing, attacker_id, str(attacker_name), str(attacker_pig_id))
-                if result.status == "reservation_joined":
+                if existing.get("status") != "pending":
+                    return RoastReservationPrepareResult("reservation_busy", self._reservation_from_raw(existing))
+                result = self._join_reservation_locked(existing, attacker_id, str(attacker_name), str(attacker_pig_id), force_mode)
+                if result.status in {"reservation_joined", "reservation_upgraded"}:
                     await self._atomic_save()
                 return result
 
-            protected_users = (
-                self.data.setdefault("protected", {})
-                .get(target_date, {})
-                .get(str(group_id), [])
-            )
-            is_protected = target_id in {str(user_id) for user_id in protected_users}
-            protection_broken = is_protected and force_mode in {"normal", "super"}
-            if is_protected and not protection_broken:
-                return RoastReservationPrepareResult("protected")
-            if target_pig_id:
+            is_protected = protected
+            protection_broken = is_protected and force_mode == "super"
+            if target_pig_id and not is_protected:
                 return RoastReservationPrepareResult(
                     "target_ready",
                     target_pig_id=str(target_pig_id),
@@ -1412,7 +1476,11 @@ class PigDataManager:
                 "created_at": now_iso,
                 "outcome_snapshot": None,
                 "daily_feed_results": None,
+                "protection_required": self._protection_required_locked(target_date, str(group_id), target_id) if is_protected else 0,
             }
+            raw["participants"][0]["contribution"] = 2 if is_protected and force_mode == "normal" else 1
+            if target_pig_id:
+                self._activate_reservation_locked(raw, str(target_pig_id))
             self.data.setdefault("roast_reservations", {})[reservation_id] = raw
             self._mark_group_active_users_locked(target_date, str(group_id), [attacker_id])
             await self._atomic_save()
@@ -1520,7 +1588,8 @@ class PigDataManager:
                 # 结果随预约固化，之后的释放、重领和重新渲染只会复用这份列表。
                 if (
                     settle_daily_feed
-                    and raw.get("force_mode") is None
+                    and (raw.get("force_feed_user_ids") or raw.get("force_mode") is None
+                         or (raw.get("protection_required") and raw.get("force_mode") != "super"))
                     and str(outcome_snapshot.get("event_type") or "") == "success"
                 ):
                     raw["daily_feed_results"] = [
@@ -1534,6 +1603,8 @@ class PigDataManager:
                         )
                         for item in raw.get("participants", [])
                         if isinstance(item, dict) and item.get("user_id")
+                        and ((raw.get("force_mode") == "super" and str(item["user_id"]) in raw.get("force_feed_user_ids", []))
+                             or (raw.get("force_mode") != "super" and (not raw.get("protection_required") or int(item.get("contribution") or 1) == 1)))
                     ]
                 else:
                     raw["daily_feed_results"] = []
@@ -1980,15 +2051,16 @@ class PigDataManager:
             for request_id in refill_ids_to_del:
                 del refill_requests[request_id]
 
-            # completed 已由事件记录承接，其他预约跨日后也不再有效；每日清理直接
-            # 移除这些终态/过期记录，避免结果快照让 JSON 与滚动备份无限增长。
+            # 当日聚众烤猪的结果快照用于计算保护等级，跨日后才能清理。
+            # 普通预约完成后由事件记录承接，仍可直接移除。
             reservations = self.data.get("roast_reservations", {})
             reservation_ids_to_del = [
                 reservation_id
                 for reservation_id, raw in reservations.items()
                 if isinstance(raw, dict)
                 and (
-                    raw.get("status") == "completed"
+                    (raw.get("status") == "completed"
+                     and not (raw.get("protection_required") and raw.get("date_str") == today.isoformat()))
                     or (
                         _is_valid_date(str(raw.get("date_str") or ""))
                         and datetime.date.fromisoformat(str(raw["date_str"])) < today
@@ -2283,7 +2355,13 @@ class PigDataManager:
             "participant_count": max(0, int(event.participant_count or 0)),
             "backfire_victim_id": str(event.backfire_victim_id or ""),
             "backfire_victim_name": str(event.backfire_victim_name or ""),
+            "backfire_victim_ids": list(event.backfire_victim_ids),
+            "backfire_victim_names": list(event.backfire_victim_names),
             "special_reason": str(event.special_reason or ""),
+            "force_mode": event.force_mode,
+            "protection_level": event.protection_level,
+            "reservation_owner_id": event.reservation_owner_id,
+            "reservation_owner_name": event.reservation_owner_name,
         })
         if event.group_id:
             active_user_ids = [event.attacker_id, *event.participant_ids]
@@ -2302,7 +2380,11 @@ class PigDataManager:
                                reservation_id: str = "", participant_ids: Optional[list[str]] = None,
                                participant_names: Optional[list[str]] = None, participant_count: int = 0,
                                backfire_victim_id: str = "", backfire_victim_name: str = "",
+                               backfire_victim_ids: Optional[list[str]] = None,
+                               backfire_victim_names: Optional[list[str]] = None,
                                special_reason: str = "", event_id: str = "", created_at: str = "",
+                               force_mode: str = "", protection_level: int = 0,
+                               reservation_owner_id: str = "", reservation_owner_name: str = "",
                                settle_daily_feed: bool = False) -> Optional[DailyFeedResult]:
         """
         记录一次烤群友事件。
@@ -2325,9 +2407,15 @@ class PigDataManager:
                     participant_count=participant_count,
                     backfire_victim_id=backfire_victim_id,
                     backfire_victim_name=backfire_victim_name,
+                    backfire_victim_ids=tuple(backfire_victim_ids or ()),
+                    backfire_victim_names=tuple(backfire_victim_names or ()),
                     special_reason=special_reason,
                     event_id=str(event_id or uuid.uuid4().hex),
                     created_at=created_at,
+                    force_mode=force_mode,
+                    protection_level=protection_level,
+                    reservation_owner_id=reservation_owner_id,
+                    reservation_owner_name=reservation_owner_name,
                 )
             changed = self._append_roast_event_locked(
                 event,
@@ -2377,6 +2465,7 @@ class PigDataManager:
                     or str(event.get("target") or "") == normalized_user_id
                     or normalized_user_id in {str(item) for item in participant_ids}
                     or str(event.get("backfire_victim_id") or "") == normalized_user_id
+                    or normalized_user_id in {str(item) for item in event.get("backfire_victim_ids", [])}
                 ):
                     filtered.append(event)
             result = filtered
@@ -2399,25 +2488,19 @@ class PigDataManager:
         return dict(sorted(result.items(), reverse=True))
 
     def count_success_roasted(self, user_id: str, days: int = 7) -> int:
-        """统计用户近 N 天成功被烤次数；逃脱/反噬不算“被烤成功”。"""
+        """统计近 N 天被烤次数，包含反噬并限制特殊惩罚的每日计数。"""
         today = rollpig_today()
         safe_days = max(1, min(60, int(days or 7)))
         start_date = today - datetime.timedelta(days=safe_days - 1)
-        total = 0
+        rows = []
         for date_str, events in self.data.get("daily_events", {}).items():
             if not _is_valid_date(date_str) or not isinstance(events, list):
                 continue
             date_obj = datetime.date.fromisoformat(date_str)
             if not (start_date <= date_obj <= today):
                 continue
-            total += sum(
-                1
-                for event in events
-                if isinstance(event, dict)
-                and event.get("type") == "success"
-                and str(event.get("target") or "") == str(user_id)
-            )
-        return total
+            rows.extend({**event, "date_str": date_str} for event in events if isinstance(event, dict))
+        return count_roasted_users(rows)[str(user_id)]
 
     def get_catalog_snapshot(self, user_id: str, days: int = 14) -> CatalogSnapshot:
         """聚合图片版图鉴需要的本地只读数据，避免命令层多处手算。"""
@@ -2924,6 +3007,14 @@ class PigDataManager:
         legacy_users = protected_map.get("__all__", [])
         return user_id in group_users or user_id in legacy_users
 
+    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str) -> int:
+        """返回指定群和日期的保护起始等级，未保护为零，旧记录为一级。"""
+        async with self._lock:
+            if not self.is_protected(group_id, user_id, date_str):
+                return 0
+            details = self.data.get("protection_details", {}).get(date_str, {}).get(group_id, {}).get(user_id, {})
+            return min(5, max(1, int(details.get("base_level") or 1)))
+
     async def replace_group_protected_users(
         self,
         group_id: str,
@@ -2935,7 +3026,19 @@ class PigDataManager:
         async with self._lock:
             protected = self.data.setdefault("protected", {})
             day_map = protected.setdefault(target_date, {})
-            day_map[group_id] = sorted({str(user_id) for user_id in user_ids if user_id})
+            normalized_ids = sorted({str(user_id) for user_id in user_ids if user_id})
+            previous_date = (datetime.date.fromisoformat(target_date) - datetime.timedelta(days=1)).isoformat()
+            previous_users = protected.get(previous_date, {}).get(group_id, [])
+            detail_map = self.data.setdefault("protection_details", {})
+            previous_details = detail_map.get(previous_date, {}).get(group_id, {})
+            current_details = detail_map.setdefault(target_date, {}).setdefault(group_id, {})
+            # 同一天重复发券保留起始等级，不能把已经生效的券重置。
+            for user_id in normalized_ids:
+                if user_id not in current_details:
+                    days = int(previous_details.get(user_id, {}).get("consecutive_days") or 1) + 1 if user_id in previous_users else 1
+                    current_details[user_id] = {"base_level": min(5, 2 + days), "consecutive_days": days}
+            detail_map[target_date][group_id] = {key: value for key, value in current_details.items() if key in normalized_ids}
+            day_map[group_id] = normalized_ids
             await self._atomic_save()
 
     async def set_protected_users(self, user_ids: list):
@@ -2968,6 +3071,7 @@ class PigDataManager:
             ]
             for d in protection_dates_to_del:
                 del protected[d]
+                self.data.get("protection_details", {}).pop(d, None)
 
             if dates_to_del or protection_dates_to_del:
                 await self._atomic_save()

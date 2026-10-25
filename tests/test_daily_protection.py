@@ -309,6 +309,7 @@ class ProtectionRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await cloud_store.close()
         self.assertEqual(requests, [("/v1/protections/replace-group", {
             "group_id": "100", "user_ids": ["victim"], "protect_date": "2026-10-08",
+            "initial_level": 3,
         })])
         self.assertEqual(self.records(), [])
 

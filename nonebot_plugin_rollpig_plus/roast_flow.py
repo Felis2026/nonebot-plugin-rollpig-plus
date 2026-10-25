@@ -36,6 +36,21 @@ from .texts import (
     ROAST_RESERVATION_DUPLICATE_TEXTS,
     ROAST_RESERVATION_FULL_TEXTS,
     ROAST_RESERVATION_JOINED_TEXTS,
+    PROTECTION_BLOCK_TEXTS,
+    PROTECTED_ROAST_BOOST_CREATED_TEXTS,
+    PROTECTED_ROAST_BOOST_JOINED_TEXTS,
+    PROTECTED_ROAST_BOOST_TEXTS,
+    PROTECTED_ROAST_BUSY_TEXTS,
+    PROTECTED_ROAST_CREATED_TEXTS,
+    PROTECTED_ROAST_DUPLICATE_TEXTS,
+    PROTECTED_ROAST_FULL_TEXTS,
+    PROTECTED_ROAST_JOINED_TEXTS,
+    PROTECTED_ROAST_READY_WAITING_PIG_TEXTS,
+    PROTECTED_ROAST_UNROLLED_CREATED_TEXTS,
+    SUPER_FORCE_RESERVATION_CLOSED_TEXT,
+    SUPER_FORCE_RESERVATION_CREATED_TEXT,
+    SUPER_FORCE_RESERVATION_DUPLICATE_TEXT,
+    SUPER_FORCE_RESERVATION_TAKEOVER_TEXT,
 )
 from .store.models import RoastReservationPrepareResult
 
@@ -51,6 +66,8 @@ class RoastOutcome:
     food_name: str = ""
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    backfire_victim_ids: tuple[str, ...] = ()
+    backfire_victim_names: tuple[str, ...] = ()
     special_reason: str = ""
 
 
@@ -67,6 +84,65 @@ def pick_reservation_prepare_text(
     """把预约准备状态转换为用户可见文案，handler 不直接拼业务文本。"""
 
     reservation = result.reservation
+    protection_required = getattr(reservation, "protection_required", 0) if reservation is not None else 0
+    force_mode = getattr(reservation, "force_mode", None) if reservation is not None else None
+    if result.status == "reservation_busy":
+        return random.choice(PROTECTED_ROAST_BUSY_TEXTS)
+    if result.status == "reservation_full" and reservation is not None and protection_required:
+        return random.choice(PROTECTED_ROAST_FULL_TEXTS).format(
+            target=target_name,
+            count=reservation.participant_count,
+        )
+    if reservation is not None and force_mode == "super":
+        if result.status == "reservation_closed":
+            operator = (
+                getattr(reservation, "force_operator_name", "")
+                or getattr(reservation, "owner_name", "")
+                or attacker_name
+            )
+            return SUPER_FORCE_RESERVATION_CLOSED_TEXT.format(operator=operator, target=target_name)
+        if getattr(reservation, "status", "pending") != "pending":
+            return ""
+        if result.status == "already_joined":
+            return SUPER_FORCE_RESERVATION_DUPLICATE_TEXT.format(target=target_name)
+        if result.status == "reservation_created":
+            return SUPER_FORCE_RESERVATION_CREATED_TEXT.format(operator=attacker_name, target=target_name)
+        if result.status == "reservation_joined":
+            return SUPER_FORCE_RESERVATION_TAKEOVER_TEXT.format(operator=attacker_name, target=target_name)
+    if (
+        reservation is not None
+        and protection_required
+        and force_mode != "super"
+        and result.status in {"reservation_created", "reservation_joined", "reservation_upgraded", "already_joined"}
+    ):
+        if reservation.status != "pending":
+            return ""
+        if result.status == "already_joined":
+            return random.choice(PROTECTED_ROAST_DUPLICATE_TEXTS).format(target=target_name)
+        is_boosted = bool(reservation.participants and reservation.participants[-1].contribution == 2)
+        if result.status == "reservation_created":
+            opening = random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+            create_pool = PROTECTED_ROAST_BOOST_CREATED_TEXTS if is_boosted else PROTECTED_ROAST_CREATED_TEXTS
+            action = random.choice(create_pool).format(owner=attacker_name, target=target_name)
+            lines = [opening, action]
+            if not reservation.target_pig_id:
+                lines.append(random.choice(PROTECTED_ROAST_UNROLLED_CREATED_TEXTS).format(target=target_name))
+            return "\n".join(lines)
+        if result.status == "reservation_upgraded":
+            action = random.choice(PROTECTED_ROAST_BOOST_TEXTS).format(
+                participant=attacker_name,
+                target=target_name,
+            )
+        else:
+            join_pool = PROTECTED_ROAST_BOOST_JOINED_TEXTS if is_boosted else PROTECTED_ROAST_JOINED_TEXTS
+            action = random.choice(join_pool).format(
+                participant=attacker_name,
+                target=target_name,
+            )
+        lines = [action]
+        if not reservation.target_pig_id and reservation.contribution_count >= reservation.protection_required:
+            lines.append(random.choice(PROTECTED_ROAST_READY_WAITING_PIG_TEXTS).format(target=target_name))
+        return "\n".join(lines)
     if result.status == "reservation_closed":
         return "这场预约已经结束或过期，不能再加入了。"
     if result.status == "attacker_unrolled":

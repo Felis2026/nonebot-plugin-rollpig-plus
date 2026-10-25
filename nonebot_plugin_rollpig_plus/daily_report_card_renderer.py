@@ -23,6 +23,7 @@ from .card_renderer import (
     get_noto_emoji_source,
 )
 from .config import plugin_config
+from .roast_statistics import count_roasted_users
 from .daily_report import (
     DailyReport,
     HeadlineKind,
@@ -2199,6 +2200,15 @@ def _observation_card(report: DailyReport) -> Observation | None:
     if selection is None:
         return None
     overview = report.overview
+    template_kind = selection.kind
+    reservations = [event for event in report.events if event.is_reservation]
+    protected_count = sum(event.protection_level > 0 and event.force_mode != "super" for event in reservations)
+    backfires = [event for event in report.events if event.result_kind == "backfire"]
+    victim_count = sum(max(1, len(set(event.backfire_victim_ids))) for event in backfires)
+    if selection.kind == "reservation" and protected_count:
+        template_kind = "protected_reservation"
+    elif selection.kind == "backfire" and any(len(set(event.backfire_victim_ids)) > 1 for event in backfires):
+        template_kind = "multi_backfire"
     result_text = {
         "success": "烤成了",
         "escape": "跑了",
@@ -2219,14 +2229,20 @@ def _observation_card(report: DailyReport) -> Observation | None:
     template = _stable_template(
         report,
         "observation",
-        selection.kind,
+        template_kind,
         identity,
-        DAILY_REPORT_OBSERVATION_TEXTS[selection.kind],
+        DAILY_REPORT_OBSERVATION_TEXTS[template_kind],
     )
     spans = _rich_template(
         template,
         {
-            "total": RichSpan(str(selection.total), INK, True),
+            "total": RichSpan(str(len(reservations) if template_kind == "protected_reservation" else selection.total), INK, True),
+            "protected": RichSpan(str(protected_count), RED, True),
+            "success": RichSpan(str(selection.success_count), RED, True),
+            "escape": RichSpan(str(selection.escape_count), RED, True),
+            "backfire": RichSpan(str(selection.backfire_count), RED, True),
+            "rounds": RichSpan(str(len(backfires)), INK, True),
+            "victims": RichSpan(str(victim_count), RED, True),
             "matched": RichSpan(str(selection.matched), RED, True),
             "result": RichSpan(result_text, RED, True),
             "breakdown": RichSpan(_observation_breakdown(selection), RED),
@@ -2246,6 +2262,34 @@ def _reservation_size(event: NormalizedDailyEvent) -> tuple[int, int]:
     return max(0, total_count - 1), total_count
 
 
+def _is_force_takeover(event: NormalizedDailyEvent) -> bool:
+    """按原发起人与队伍快照识别强行点火接管，独立开炉只有执行者一人。"""
+    return bool(event.force_mode == "super" and event.is_reservation and (
+        (event.reservation_owner_id and event.reservation_owner_id != event.attacker_id)
+        or reservation_party_size(event) > 1
+    ))
+
+
+def _event_people_label(report: DailyReport, event: NormalizedDailyEvent, *, victims: bool = False) -> str:
+    """生成队伍或受害者摘要，多人时展示前两人并保留总人数。"""
+    ids = event.backfire_victim_ids if victims else event.participant_ids
+    names = event.backfire_victim_names if victims else event.participant_names
+    labels = {
+        user_id: _report_name(report, user_id, names[index] if index < len(names) else "")
+        for index, user_id in enumerate(ids)
+    }
+    if not victims:
+        owner_id = event.reservation_owner_id or event.attacker_id
+        owner_name = event.reservation_owner_name or event.attacker_name
+        if owner_id and owner_id not in labels:
+            labels = {owner_id: _report_name(report, owner_id, owner_name), **labels}
+    if not labels:
+        return _report_name(report, event.attacker_id, event.attacker_name)
+    total = len(labels) if victims else max(len(labels), reservation_party_size(event))
+    shown = "、".join(list(labels.values())[:2])
+    return f"{shown}等 {total} 人" if total > min(2, len(labels)) else shown
+
+
 def _headline_card(report: DailyReport) -> Headline | None:
     """生成今日头条卡片渲染数据。"""
 
@@ -2261,6 +2305,9 @@ def _headline_card(report: DailyReport) -> Headline | None:
         event.backfire_victim_name or event.attacker_name,
     )
     kind = selection.kind
+    template_kind = kind
+    if len(event.backfire_victim_ids) > 1:
+        victim = f"{victim}等 {len(event.backfire_victim_ids)} 人"
     food = re.sub(r"\s+", " ", event.food or "今日出餐").strip()
     food = food if len(food) <= 10 else f"{food[:9]}…"
     joined_count, total_count = _reservation_size(event)
@@ -2274,7 +2321,7 @@ def _headline_card(report: DailyReport) -> Headline | None:
         team = f"{attacker}的单人预约"
 
     if kind == "normal_success":
-        tags = ("普通烤猪", "成功出餐")
+        tags = ("强行点火" if event.force_mode == "super" else "普通烤猪", "成功出餐")
     elif kind == "normal_escape":
         tags = ("普通烤猪", "目标逃脱")
     elif kind == "normal_backfire":
@@ -2300,12 +2347,30 @@ def _headline_card(report: DailyReport) -> Headline | None:
             count_tag = f"{total_count} 人围观"
         tags = (size_tag, count_tag, result_tag)
 
+    participants = _event_people_label(report, event)
+    victims = _event_people_label(report, event, victims=True)
+    if event.force_mode == "super" and event.event_type == "success":
+        if _is_force_takeover(event):
+            template_kind = "super_takeover"
+            tags = ("强行点火", "半路接管", "强制出餐")
+        elif event.protection_level:
+            template_kind = "super_protected"
+            tags = ("强行点火", "无视保护", "强制出餐")
+        else:
+            tags = ("强行点火", "强制出餐")
+    elif event.is_reservation and event.event_type == "success" and event.protection_level:
+        template_kind = "protection_break"
+        tags = ("聚众烤猪", f"{total_count} 人围攻", f"突破 Lv.{event.protection_level}")
+    elif event.is_reservation and event.event_type == "backfire" and len(set(event.backfire_victim_ids)) > 1:
+        template_kind = "multi_backfire"
+        tags = ("预约烤猪", f"{total_count} 人参与", "连环走火")
+
     template = _stable_template(
         report,
         "headline",
-        kind,
+        template_kind,
         f"{event.event_id}:{total_count}:{food}:{victim}",
-        DAILY_REPORT_HEADLINE_TEXTS[kind],
+        DAILY_REPORT_HEADLINE_TEXTS[template_kind],
     )
     spans = _rich_template(
         template,
@@ -2326,6 +2391,11 @@ def _headline_card(report: DailyReport) -> Headline | None:
             "team_subject": RichSpan(team_subject, INK),
             "team": RichSpan(team, INK),
             "forks": RichSpan(f"{total_count} 把烤叉", INK, True),
+            "participants": RichSpan(participants, INK, True),
+            "victims": RichSpan(victims, INK, True),
+            "operator": RichSpan(attacker, INK, True),
+            "before": RichSpan(str(event.protection_level), RED, True),
+            "pig": RichSpan(_resource_pig_name(report.group_rolls.get(event.target_id, "")), INK, True),
         },
     )
     return Headline(spans=spans, tags=tags, asset=_HEADLINE_ASSETS[kind])
@@ -2341,6 +2411,30 @@ def _timeline_event_detail(report: DailyReport, event: NormalizedDailyEvent) -> 
         event.backfire_victim_id or event.attacker_id,
         event.backfire_victim_name or event.attacker_name,
     )
+    details = []
+    if event.event_type == "success" and event.protection_level:
+        if _is_force_takeover(event):
+            details.append(DAILY_REPORT_TIMELINE_DETAIL_TEXTS["super_takeover"][0].format(operator=attacker))
+        elif event.force_mode != "super":
+            details.append(DAILY_REPORT_TIMELINE_DETAIL_TEXTS["protection_break"][0].format(
+                target=target, before=event.protection_level,
+            ))
+        if event.protection_level < 5:
+            details.append(DAILY_REPORT_TIMELINE_DETAIL_TEXTS["protection_upgrade"][0].format(
+                target=target, after=event.protection_level + 1,
+            ))
+    elif event.event_type == "escape" and event.protection_level:
+        details.append(DAILY_REPORT_TIMELINE_DETAIL_TEXTS["protected_escape"][0].format(
+            target=target, level=event.protection_level,
+        ))
+    elif event.event_type == "success" and _is_force_takeover(event):
+        details.append(DAILY_REPORT_TIMELINE_DETAIL_TEXTS["super_takeover"][0].format(operator=attacker))
+    elif event.event_type == "backfire" and len(set(event.backfire_victim_ids)) > 1:
+        details.append(DAILY_REPORT_TIMELINE_DETAIL_TEXTS["multi_backfire"][0].format(count=len(set(event.backfire_victim_ids))))
+    if details:
+        return "\n".join(details)
+    if len(event.backfire_victim_ids) > 1:
+        victim = f"{victim}等 {len(event.backfire_victim_ids)} 人"
     if event.event_type == "self_roast":
         kind = "self_roast"
     elif event.event_type == "success":
@@ -2483,22 +2577,14 @@ def _coupon_card(report: DailyReport) -> Coupon | None:
         return None
     protection = report.protections[0]
     name = protection.display_name or report.display_names.get(protection.user_id, "") or protection.user_id
-    benefit = protection.scope or "本群免烤"
-    if "一天" not in benefit:
-        benefit = f"{benefit}一天"
+    benefit = f"保护 Lv.{protection.base_level}"
     expires = protection.expires_at
     try:
         parsed = dt.datetime.fromisoformat(expires.replace("Z", "+00:00"))
         expires = f"有效至 {parsed:%m.%d %H:%M}"
     except ValueError:
         expires = f"有效至 {expires}" if expires else "次日有效"
-    roast_count = sum(
-        1
-        for event in report.events
-        if event.event_type == "success"
-        and event.target_id == protection.user_id
-        and event.target_id != event.attacker_id
-    )
+    roast_count = count_roasted_users(asdict(event) for event in report.events)[protection.user_id]
     return Coupon(name=name, benefit=benefit, expires=expires, roast_count=roast_count)
 
 
@@ -2526,7 +2612,7 @@ def build_daily_report_card_data(
         events=events,
         rankings=_ranking_cards(report),
         coupon=_coupon_card(report),
-        footer=f"数据截止 {cutoff_time} · 仅统计本群当日记录",
+        footer=f"数据截止 {cutoff_time}，仅统计本群当日记录",
     )
 
 
