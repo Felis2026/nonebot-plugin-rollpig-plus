@@ -269,31 +269,77 @@ class ProtectionCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             created,
             "【小蓝】今天受到猪圈保护协议庇护——昨天被烤太惨了，本该歇上一天。\n"
-            "但【小红】不打算放过，已经在门口架起炉子摇人了——或许再多凑几个人一起添柴，就能硬生生打破保护！",
+            "但【小红】不打算放过，已经在门口架起炉子摇人了——或许再多凑几个人一起添柴，就能硬生生打破保护！\n"
+            "Lv.3 的保护令还稳稳挂着，炉底这把火才凑到 1/4，还得再加把劲！",
         )
         joined = self.text(self.preparation("reservation_joined", contribution_count=2, participant_count=2))
         self.assertIn("【小红】", joined)
         self.assertIn("【小蓝】", joined)
-        self.assertNotIn("Lv.", joined)
+        self.assertIn("Lv.3 的保护令还稳稳挂着，炉底这把火才凑到 2/4，还得再加把劲！", joined)
         self.assertNotIn("回复", joined)
 
     def test_accelerated_join_upgrade_and_duplicate(self):
-        created_boost = self.text(self.preparation("reservation_created", participants=[fixtures.SimpleNamespace(contribution=2)]))
+        created_boost = self.text(self.preparation("reservation_created", contribution_count=2,
+                                                participants=[fixtures.SimpleNamespace(contribution=2)]))
         self.assertIn("双倍干柴", created_boost)
-        joined = self.text(self.preparation("reservation_joined", participants=[fixtures.SimpleNamespace(contribution=2)]))
+        self.assertTrue(created_boost.endswith("Lv.3 的保护令还稳稳挂着，炉底这把火才凑到 2/4，还得再加把劲！"))
+        joined = self.text(self.preparation("reservation_joined", contribution_count=3,
+                                         participants=[fixtures.SimpleNamespace(contribution=2)]))
         self.assertIn("双倍猛火", joined)
-        upgraded = self.text(self.preparation("reservation_upgraded"))
+        self.assertTrue(joined.endswith("Lv.3 的保护令还稳稳挂着，炉底这把火才凑到 3/4，还得再加把劲！"))
+        upgraded = self.text(self.preparation("reservation_upgraded", contribution_count=3))
         self.assertIn("掏出今日加急", upgraded)
         self.assertNotIn("2 点", upgraded)
-        self.assertIn("小板凳", self.text(self.preparation("already_joined")))
+        self.assertTrue(upgraded.endswith("Lv.3 的保护令还稳稳挂着，炉底这把火才凑到 3/4，还得再加把劲！"))
+        duplicate = self.text(self.preparation("already_joined", contribution_count=3))
+        self.assertIn("小板凳", duplicate)
+        self.assertTrue(duplicate.endswith("Lv.3 的保护令还稳稳挂着，炉底这把火才凑到 3/4，还得再加把劲！"))
+
+    def test_progress_covers_each_protection_level_and_uses_points(self):
+        for required in range(2, 7):
+            for status in ("reservation_created", "reservation_joined", "reservation_upgraded", "already_joined"):
+                with self.subTest(required=required, status=status):
+                    text = self.text(self.preparation(
+                        status, protection_required=required, target_pig_id="", contribution_count=2,
+                        participant_count=1, participants=[fixtures.SimpleNamespace(contribution=2)],
+                    ))
+                    expected = (
+                        f"2/{required} 满额烈火已经彻底烧穿了 Lv.{required - 1} 的防线，万事俱备，就等正主抽猪现身！"
+                        if required == 2 else
+                        f"Lv.{required - 1} 的保护令还稳稳挂着，炉底这把火才凑到 2/{required}，还得再加把劲！"
+                    )
+                    self.assertTrue(text.endswith(expected))
+                    self.assertEqual(text.count(f"2/{required}"), 1)
+                    self.assertNotIn("\n\n", text)
+
+    def test_normal_and_super_reservations_do_not_show_fire_progress(self):
+        for changes in ({"protection_required": 0}, {"force_mode": "super"}):
+            for status in ("reservation_created", "reservation_joined", "already_joined"):
+                with self.subTest(status=status, changes=changes):
+                    text = self.text(self.preparation(status, **changes))
+                    self.assertNotIn("炉底这把火", text)
+                    self.assertNotIn("满额烈火", text)
 
     def test_points_ready_without_pig_explains_only_remaining_wait(self):
         text = self.text(self.preparation("reservation_joined", target_pig_id="", contribution_count=4, participant_count=4))
-        self.assertIn("就差【小蓝】今天露面抽猪", text)
+        self.assertTrue(text.endswith("4/4 满额烈火已经彻底烧穿了 Lv.3 的防线，万事俱备，就等正主抽猪现身！"))
+        self.assertEqual(text.count("抽猪"), 1)
         self.assertNotIn("判定", text)
         self.assertEqual(self.text(self.preparation(status="reservation_busy")), "后厨已经关门点火了，别在门口挤了，等着端盘子看结果吧！")
         self.assertIn("已经结束", self.text(self.preparation(status="reservation_closed")))
         self.assertNotIn("还没抽猪", self.text(self.preparation(status="reservation_full", participant_count=20)))
+
+    def test_ready_progress_replaces_duplicate_waiting_text_for_each_notice(self):
+        for status in ("reservation_created", "reservation_joined", "reservation_upgraded", "already_joined"):
+            for points in (4, 5):
+                with self.subTest(status=status, points=points):
+                    text = self.text(self.preparation(status, target_pig_id="", contribution_count=points))
+                    self.assertTrue(text.endswith(
+                        f"{points}/4 满额烈火已经彻底烧穿了 Lv.3 的防线，万事俱备，就等正主抽猪现身！"
+                    ))
+                    self.assertEqual(text.count("抽猪"), 1)
+                    self.assertNotIn("\n\n", text)
+                    self.assertNotIn("\n\n", text)
 
     async def test_ready_round_delivers_without_sending_or_binding_notice(self):
         preparation = self.preparation()
@@ -343,19 +389,23 @@ class ProtectionOutcomeTests(unittest.IsolatedAsyncioTestCase):
               patch.object(flow.random, "choice", side_effect=lambda pool: pool[0]),
               patch.object(flow, "build_success_roast_outcome", new=AsyncMock(return_value=fixtures.RoastOutcome("success"))) as success):
             await flow.build_reservation_outcome(self.reservation())
-            self.assertIn("保护令也没拦住这群饿狼", success.await_args.kwargs["extra_text"])
+            self.assertIn("硬是把火添到了头", success.await_args.kwargs["extra_text"])
+            self.assertIn("🔥 保护令也没拦住这群饿狼\n", success.await_args.kwargs["extra_text"])
+            self.assertFalse(success.await_args.kwargs["extra_text"].endswith("\n"))
             self.assertNotIn("刚抽", success.await_args.kwargs["extra_text"])
             await flow.build_reservation_outcome(self.reservation("super"))
             self.assertIn("直接亮出最高权限，把【目标】（猪）连猪带盘推进了烤箱！",
                           success.await_args.kwargs["extra_text"])
             await flow.build_reservation_outcome(self.reservation(required=0))
-            self.assertIn("等候结束", success.await_args.kwargs["extra_text"])
+            self.assertIn("守候多时", success.await_args.kwargs["extra_text"])
+            self.assertIn("🔥 等候结束，后厨开炉\n", success.await_args.kwargs["extra_text"])
         with (patch.object(flow, "get_pig_by_id", return_value={"id": "pig", "name": "猪"}),
               patch.object(flow, "_special_target_outcome", return_value=None),
               patch.object(flow.random, "randint", return_value=80),
               patch.object(flow.random, "choice", side_effect=lambda pool: pool[0])):
             outcome = await flow.build_reservation_outcome(self.reservation())
-        self.assertIn("柴添够了，猪溜了", outcome.plain_text)
+        self.assertIn("好不容易凑齐火力冲进后厨", outcome.plain_text)
+        self.assertIn("🔥 柴添够了，猪溜了\n", outcome.plain_text)
         self.assertNotIn("刚抽", outcome.plain_text)
 
     async def test_multiple_victims_survive_snapshot_and_send_exactly_one_image(self):
@@ -377,8 +427,8 @@ class ProtectionOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(outcome.backfire_victim_ids), 6)
         self.assertIn("6 位帮厨被一锅端了", outcome.extra_text)
         self.assertNotIn("反噬", outcome.extra_text)
-        self.assertEqual(outcome.extra_text.count("\n"), 2)
-        self.assertTrue(outcome.extra_text.endswith("倒霉蛋：" + "、".join(outcome.backfire_victim_names) + "\n"))
+        self.assertEqual(outcome.extra_text.count("\n"), 1)
+        self.assertTrue(outcome.extra_text.endswith("倒霉蛋：" + "、".join(outcome.backfire_victim_names)))
         self.assertEqual(outcome.render_data["description"], "说好一起添柴，怎么一起熟了")
         self.assertEqual(
             outcome.render_data["analysis"],
@@ -390,6 +440,7 @@ class ProtectionOutcomeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(flow, "render_pig_card_image", new=AsyncMock(return_value=fixtures.SimpleNamespace(data=b"image"))):
             message = await flow._prepare_reservation_message(restored)
         self.assertEqual(sum(segment.type == "image" for segment in message), 1)
+        self.assertEqual(message[0].data["text"], outcome.extra_text)
         event = flow._build_reservation_event(reservation, outcome)
         self.assertEqual(event.backfire_victim_ids, outcome.backfire_victim_ids)
 

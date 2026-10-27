@@ -1487,6 +1487,81 @@ class ReservationDeliveryRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_result_text_has_no_extra_newline_before_image(self):
+        body = "烧烤结果。\n倒霉蛋：主厨、帮厨"
+        for trailing_newlines in (0, 1, 2):
+            with self.subTest(trailing_newlines=trailing_newlines):
+                outcome = RoastOutcome(
+                    event_type="success",
+                    render_data={"id": "food"},
+                    extra_text=body + "\n" * trailing_newlines,
+                )
+                with (
+                    patch.object(reservation_flow.pig_resource_manager, "find_image_file", return_value=None),
+                    patch.object(reservation_flow, "render_pig_card_image", new=AsyncMock(return_value=SimpleNamespace(data=b"image"))),
+                ):
+                    message = await reservation_flow._prepare_reservation_message(outcome)
+                self.assertEqual([segment.type for segment in message], ["text", "image"])
+                self.assertEqual(message[0].data["text"], body)
+
+    def test_result_templates_keep_standalone_heading(self):
+        pools = (
+            texts_module.PROTECTED_ROAST_SUCCESS_TEXTS,
+            texts_module.PROTECTED_ROAST_ESCAPE_TEXTS,
+            texts_module.PROTECTED_ROAST_BACKFIRE_TEXTS,
+            texts_module.ROAST_RESERVATION_SUCCESS_TEXTS,
+            texts_module.ROAST_RESERVATION_ESCAPE_TEXTS,
+            texts_module.ROAST_RESERVATION_BACKFIRE_TEXTS,
+            texts_module.RESERVED_TARGET_HUMAN_TEXTS,
+            texts_module.RESERVED_TARGET_FOOD_TEXTS,
+            texts_module.RESERVED_TARGET_EATEN_TEXTS,
+            texts_module.RESERVED_TARGET_SOLD_TEXTS,
+        )
+        for pool in pools:
+            for template in pool:
+                with self.subTest(template=template):
+                    self.assertTrue(template.startswith("🔥 "))
+                    heading, body = template.split("\n", 1)
+                    self.assertNotIn("{", heading)
+                    self.assertIn("{target}", body)
+
+    async def test_super_takeover_excludes_operator_from_waiting_party_only(self):
+        cases = (
+            ("owner", "felis住院中", ("felis住院中", "🍬果猫"), "【🍬果猫】还在炉边添柴围堵"),
+            ("helper", "felis住院中", ("🍬果猫", "felis住院中"), "【🍬果猫】还在炉边添柴围堵"),
+            ("admin", "felis住院中", ("🍬果猫", "阿白"), "【🍬果猫】和【阿白】还在炉边添柴围堵"),
+            ("owner", "felis住院中", ("felis住院中",), "【felis住院中】直接亮出最高权限，把"),
+            ("owner", "同名", ("同名", "同名"), "【同名】还在炉边添柴围堵"),
+            ("owner", "felis住院中", ("felis住院中", "果猫", "阿白", "团团", "咕咕"), "【果猫】等 4 人还在炉边添柴围堵"),
+        )
+        for operator_id, operator_name, names, expected_start in cases:
+            with self.subTest(operator_id=operator_id, names=names):
+                participants = tuple(RoastReservationParticipant(
+                    "owner" if index == 0 else ("helper" if index == 1 else f"helper-{index}"),
+                    name, "pig",
+                ) for index, name in enumerate(names))
+                reservation = self._reservation(force_mode="super", participants=participants)
+                reservation = RoastReservation(**{
+                    **reservation.__dict__, "owner_name": names[0],
+                    "force_operator_id": operator_id, "force_operator_name": operator_name,
+                })
+                success = AsyncMock(return_value=RoastOutcome(event_type="success"))
+                with (
+                    patch.object(reservation_flow, "get_pig_by_id", return_value={"id": "pig", "name": "猪饿了"}),
+                    patch.object(reservation_flow, "_special_target_outcome", return_value=None),
+                    patch.object(reservation_flow, "build_success_roast_outcome", success),
+                ):
+                    await reservation_flow.build_reservation_outcome(reservation)
+                text = success.await_args.kwargs["extra_text"]
+                self.assertTrue(text.startswith(expected_start), text)
+                self.assertIn(f"【{operator_name}】直接亮出最高权限", text)
+                if operator_name != "同名":
+                    self.assertEqual(text.count(f"【{operator_name}】"), 1)
+                self.assertEqual(reservation.participants, participants)
+                event = reservation_flow._build_reservation_event(reservation, RoastOutcome(event_type="success"))
+                self.assertEqual(event.participant_ids, tuple(item.user_id for item in participants))
+                self.assertEqual(event.attacker_id, operator_id)
+
     async def test_feed_text_does_not_add_newline_after_image(self):
         for has_image in (True, False):
             with self.subTest(has_image=has_image):

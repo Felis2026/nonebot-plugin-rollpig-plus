@@ -380,13 +380,25 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
     if roll <= 60:
         if reservation.force_mode == "super":
             if reservation.force_operator_id:
-                text = SUPER_FORCE_RESERVATION_TAKEOVER_SUCCESS_TEXT
+                # 接管者单独作为执行者展示，等待队友的名单按账号排除本人。
+                others = replace(
+                    reservation,
+                    participants=tuple(item for item in reservation.participants
+                                       if item.user_id != reservation.force_operator_id),
+                    owner_id=reservation.owner_id if reservation.owner_id != reservation.force_operator_id else "",
+                    owner_name=reservation.owner_name if reservation.owner_id != reservation.force_operator_id else "",
+                )
+                if others.participants or others.owner_id:
+                    values["participants"] = _participants_label(others)
+                    text = SUPER_FORCE_RESERVATION_TAKEOVER_SUCCESS_TEXT
+                else:
+                    text = SUPER_FORCE_RESERVATION_SUCCESS_TEXT
             else:
                 text = SUPER_FORCE_RESERVATION_SUCCESS_TEXT
         else:
             pool = PROTECTED_ROAST_SUCCESS_TEXTS if reservation.protection_required else ROAST_RESERVATION_SUCCESS_TEXTS
             text = random.choice(pool)
-        prefix = text.format(**values, operator=_operator_label(reservation)) + "\n\n"
+        prefix = text.format(**values, operator=_operator_label(reservation))
         return await build_success_roast_outcome(
             target_pig,
             attacker_name=_operator_label(reservation),
@@ -452,7 +464,7 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
             outcome = RoastOutcome(
                 event_type="backfire",
                 render_data=render_data,
-                extra_text=summary + "\n",
+                extra_text=summary,
                 food_name=food_name,
             )
         else:
@@ -469,7 +481,7 @@ async def build_reservation_outcome(reservation: RoastReservation) -> RoastOutco
         prefix = random.choice(backfire_pool).format(
             **values,
             victim=victim.display_name or victim.user_id,
-        ) + "\n\n"
+        )
         outcome = await build_backfire_roast_outcome(
             victim_pig,
             attacker_name=victim.display_name or victim.user_id,
@@ -562,7 +574,8 @@ async def _prepare_reservation_message(outcome: RoastOutcome):
             image_file,
             cache_final_card=False,
         )
-        return MessageSegment.text(outcome.extra_text) + MessageSegment.image(render_result.data)
+        # QQ 会自行分隔文字和图片；旧结果快照可能仍带有尾部换行。
+        return MessageSegment.text(outcome.extra_text.rstrip("\n")) + MessageSegment.image(render_result.data)
     return MessageSegment.text(outcome.plain_text)
 
 

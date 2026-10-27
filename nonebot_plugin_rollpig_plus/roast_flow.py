@@ -45,7 +45,8 @@ from .texts import (
     PROTECTED_ROAST_DUPLICATE_TEXTS,
     PROTECTED_ROAST_FULL_TEXTS,
     PROTECTED_ROAST_JOINED_TEXTS,
-    PROTECTED_ROAST_READY_WAITING_PIG_TEXTS,
+    PROTECTED_ROAST_PROGRESS_TEXTS,
+    PROTECTED_ROAST_READY_PROGRESS_TEXTS,
     PROTECTED_ROAST_UNROLLED_CREATED_TEXTS,
     SUPER_FORCE_RESERVATION_CLOSED_TEXT,
     SUPER_FORCE_RESERVATION_CREATED_TEXT,
@@ -117,17 +118,22 @@ def pick_reservation_prepare_text(
     ):
         if reservation.status != "pending":
             return ""
+        waiting_for_pig = not reservation.target_pig_id and reservation.contribution_count >= protection_required
+        progress_pool = PROTECTED_ROAST_READY_PROGRESS_TEXTS if waiting_for_pig else PROTECTED_ROAST_PROGRESS_TEXTS
+        progress = random.choice(progress_pool).format(
+            level=max(1, protection_required - 1),
+            current=reservation.contribution_count,
+            required=protection_required,
+        )
         if result.status == "already_joined":
-            return random.choice(PROTECTED_ROAST_DUPLICATE_TEXTS).format(target=target_name)
+            action = random.choice(PROTECTED_ROAST_DUPLICATE_TEXTS).format(target=target_name)
+            return action + "\n" + progress
         is_boosted = bool(reservation.participants and reservation.participants[-1].contribution == 2)
         if result.status == "reservation_created":
             opening = random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
             create_pool = PROTECTED_ROAST_BOOST_CREATED_TEXTS if is_boosted else PROTECTED_ROAST_CREATED_TEXTS
             action = random.choice(create_pool).format(owner=attacker_name, target=target_name)
-            lines = [opening, action]
-            if not reservation.target_pig_id:
-                lines.append(random.choice(PROTECTED_ROAST_UNROLLED_CREATED_TEXTS).format(target=target_name))
-            return "\n".join(lines)
+            return "\n".join([opening, action, progress])
         if result.status == "reservation_upgraded":
             action = random.choice(PROTECTED_ROAST_BOOST_TEXTS).format(
                 participant=attacker_name,
@@ -140,8 +146,7 @@ def pick_reservation_prepare_text(
                 target=target_name,
             )
         lines = [action]
-        if not reservation.target_pig_id and reservation.contribution_count >= reservation.protection_required:
-            lines.append(random.choice(PROTECTED_ROAST_READY_WAITING_PIG_TEXTS).format(target=target_name))
+        lines.append(progress)
         return "\n".join(lines)
     if result.status == "reservation_closed":
         return "这场预约已经结束或过期，不能再加入了。"
