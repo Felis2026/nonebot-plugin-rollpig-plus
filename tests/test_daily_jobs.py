@@ -147,7 +147,7 @@ class DailyReportQueryTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(result, (b"card", not protected))
                 self.assertEqual(len(render.await_args.args[0].protections), int(protected))
-                report_store.get_protection_base_level.assert_awaited_once_with("100", "user", "2026-09-23")
+                report_store.get_protection_base_level.assert_awaited_once_with("100", "user", "2026-09-23", daily_only=True)
                 if protected:
                     self.assertEqual(render.await_args.args[0].protections[0].base_level, 4)
                 self.assertEqual(load.await_args.kwargs["cutoff_at"], "2026-09-22T23:45:00+08:00")
@@ -882,7 +882,7 @@ class DailyReportDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.protections[0].user_id, "b")
         self.assertEqual(report.protections[0].display_name, "乙")
         self.assertEqual(report.protections[0].base_level, 4)
-        summary_store.get_protection_base_level.assert_awaited_once_with("100", "b", "2026-08-27")
+        summary_store.get_protection_base_level.assert_awaited_once_with("100", "b", "2026-08-27", daily_only=True)
         summary_store.get_group_rolls.assert_awaited_once_with(
             "100",
             "2026-08-26",

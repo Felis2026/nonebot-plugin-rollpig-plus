@@ -19,6 +19,7 @@ from .models import (
     GroupRoastRefillPrepareResult,
     GroupRoastRefillRequest,
     RoastEvent,
+    ProtectionGrantResult,
     RoastReservation,
     RoastReservationClaimResult,
     RoastReservationPrepareResult,
@@ -187,9 +188,12 @@ class LocalJsonStore(RollpigStore):
     async def is_protected(self, group_id: str, user_id: str, date_str: Optional[str] = None) -> bool:
         return self.manager.is_protected(group_id, user_id, date_str=date_str)
 
-    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str) -> int:
+    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str, *, daily_only: bool = False) -> int:
         """读取本地保护起始等级，旧保护记录按 Lv.1 展示。"""
-        return await self.manager.get_protection_base_level(group_id, user_id, date_str)
+        return await self.manager.get_protection_base_level(group_id, user_id, date_str, daily_only=daily_only)
+
+    async def grant_protection(self, group_id: str, user_id: str, level: int, date_str: Optional[str] = None) -> ProtectionGrantResult:
+        return await self.manager.grant_protection(group_id, user_id, level, date_str)
 
     # ================================ 猪圈日报投递 ================================ #
 

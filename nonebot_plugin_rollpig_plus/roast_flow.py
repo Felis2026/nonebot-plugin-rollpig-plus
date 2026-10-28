@@ -37,6 +37,7 @@ from .texts import (
     ROAST_RESERVATION_FULL_TEXTS,
     ROAST_RESERVATION_JOINED_TEXTS,
     PROTECTION_BLOCK_TEXTS,
+    GENERAL_PROTECTION_BLOCK_TEXTS,
     PROTECTED_ROAST_BOOST_CREATED_TEXTS,
     PROTECTED_ROAST_BOOST_JOINED_TEXTS,
     PROTECTED_ROAST_BOOST_TEXTS,
@@ -47,7 +48,6 @@ from .texts import (
     PROTECTED_ROAST_JOINED_TEXTS,
     PROTECTED_ROAST_PROGRESS_TEXTS,
     PROTECTED_ROAST_READY_PROGRESS_TEXTS,
-    PROTECTED_ROAST_UNROLLED_CREATED_TEXTS,
     SUPER_FORCE_RESERVATION_CLOSED_TEXT,
     SUPER_FORCE_RESERVATION_CREATED_TEXT,
     SUPER_FORCE_RESERVATION_DUPLICATE_TEXT,
@@ -130,7 +130,8 @@ def pick_reservation_prepare_text(
             return action + "\n" + progress
         is_boosted = bool(reservation.participants and reservation.participants[-1].contribution == 2)
         if result.status == "reservation_created":
-            opening = random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+            protection_pool = PROTECTION_BLOCK_TEXTS if getattr(reservation, "protection_source", "legacy") == "daily" else GENERAL_PROTECTION_BLOCK_TEXTS
+            opening = random.choice(protection_pool).format(target=target_name)
             create_pool = PROTECTED_ROAST_BOOST_CREATED_TEXTS if is_boosted else PROTECTED_ROAST_CREATED_TEXTS
             action = random.choice(create_pool).format(owner=attacker_name, target=target_name)
             return "\n".join([opening, action, progress])

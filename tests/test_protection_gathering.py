@@ -109,7 +109,7 @@ class LocalProtectionGatheringTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.replace_group_protected_users("100", ["target"], date)
             await self.manager.replace_group_protected_users("100", ["target"], date)
             detail = self.manager.data["protection_details"][date]["100"]["target"]
-            self.assertEqual(detail, {"base_level": level, "consecutive_days": offset + 1})
+            self.assertEqual(detail, {"base_level": level, "consecutive_days": offset + 1, "source_levels": {"daily": level}})
             self.assertEqual(self.manager._protection_required_locked(date, "100", "target"), level + 1)
         await self.manager.replace_group_protected_users("100", ["target"], "2026-08-12")
         await self.manager.replace_group_protected_users("200", ["target"], "2026-08-10")
@@ -255,7 +255,8 @@ class ProtectionCopyTests(unittest.IsolatedAsyncioTestCase):
     def preparation(self, status="reservation_created", **changes):
         """构造保护添柴通知所需的场次状态。"""
         values = dict(protection_required=4, force_mode=None, contribution_count=1, participant_count=1,
-                      status="pending", target_pig_id="pig", participants=[fixtures.SimpleNamespace(contribution=1)])
+                      status="pending", target_pig_id="pig", participants=[fixtures.SimpleNamespace(contribution=1)],
+                      protection_source="daily")
         values.update(changes)
         return fixtures.SimpleNamespace(status=status, reservation=fixtures.SimpleNamespace(**values))
 

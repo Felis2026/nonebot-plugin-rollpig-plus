@@ -19,6 +19,7 @@ from .models import (
     GroupRoastRefillPrepareResult,
     GroupRoastRefillRequest,
     RoastEvent,
+    ProtectionGrantResult,
     RoastReservation,
     RoastReservationClaimResult,
     RoastReservationPrepareResult,
@@ -170,8 +171,13 @@ class RollpigStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str) -> int:
-        """读取已生效保护的起始等级；未受保护时返回零，不含当日临时升级。"""
+    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str, *, daily_only: bool = False) -> int:
+        """读取保护起始等级，daily_only 仅取日报来源；未保护时返回零。"""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def grant_protection(self, group_id: str, user_id: str, level: int, date_str: Optional[str] = None) -> ProtectionGrantResult:
+        """发放指定群当日保护，只提升权益并返回实际等级。"""
         raise NotImplementedError
 
     # ================================ 猪圈日报投递 ================================ #
