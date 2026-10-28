@@ -643,7 +643,7 @@ async def _with_daily_protections(
     ).isoformat()
     protections = []
     for user_id in user_ids:
-        base_level = await report_store.get_protection_base_level(report.group_id, user_id, protect_date)
+        base_level = await report_store.get_protection_base_level(report.group_id, user_id, protect_date, daily_only=True)
         if base_level:
             protections.append(ProtectionReportItem(
                 user_id=user_id,

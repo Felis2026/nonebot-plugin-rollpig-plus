@@ -5,6 +5,36 @@ from typing import Any, Optional
 
 
 MAX_EXPERT_LEVEL = 5
+
+
+@dataclass(frozen=True)
+class ProtectionGrantResult:
+    """返回发放后的实际保护等级及是否提高当前等级。"""
+
+    level: int
+    changed: bool
+
+
+def protection_sources(details: dict) -> dict[str, int]:
+    """读取分来源等级，来源缺失的历史保护归入 legacy。"""
+    sources = details.get("source_levels")
+    return dict(sources) if isinstance(sources, dict) else {"legacy": max(1, min(5, int(details.get("base_level") or 1)))}
+
+
+def protection_levels(details: dict, successes: int = 0) -> dict[str, int]:
+    """按各来源获得保护时的破防基准计算当前等级，旧来源基准为零。"""
+    baselines = details.get("source_baselines") or {}
+    return {source: min(5, level + max(0, successes - int(baselines.get(source, 0))))
+            for source, level in protection_sources(details).items()}
+
+
+def protection_source(details: dict, successes: int = 0) -> str:
+    """按最高来源等级选择文案，同级优先使用日报池。"""
+    levels = protection_levels(details, successes)
+    highest = max(levels.values(), default=0)
+    return next((source for source in ("daily", "manual", "pig", "legacy") if levels.get(source) == highest), "legacy")
+
+
 ROAST_REFILL_THRESHOLD_POLICY = "capped-v1"
 ROAST_REFILL_VOTE_WEIGHT_POLICY = "group-manager-double-v1"
 ROAST_REFILL_THRESHOLD_STEPS = ((25, 8), (35, 12), (45, 16), (55, 20))
@@ -309,6 +339,7 @@ class RoastReservation:
     force_operator_id: str = ""
     force_operator_name: str = ""
     force_feed_user_ids: tuple[str, ...] = ()
+    protection_source: str = "legacy"
 
     @property
     def contribution_count(self) -> int:

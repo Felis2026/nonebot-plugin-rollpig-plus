@@ -51,6 +51,14 @@ class DailyPigResolution:
 # 集中处理“今日小猪”与图鉴成长相关的纯业务规则。
 
 
+def resolve_pig_protection_level(pig_data: dict, expert_level: int) -> int:
+    """返回猪自身提供的保护等级；当前规则未启用，固定返回零。
+
+    后续启用时须与正式抽取一起落库，再激活预约；补签不触发当日保护。
+    """
+    return 0
+
+
 def resolve_variant_unlocks(
     pig_id: str,
     previous_level: int,

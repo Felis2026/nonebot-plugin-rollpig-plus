@@ -41,7 +41,7 @@ from ..data_manager import LocalStoreUnavailableError
 from ..store.models import RoastEvent
 from ..texts import (
     AUTO_ROLL_ROAST_TEXTS,
-    PROTECTION_BLOCK_TEXTS,
+    GENERAL_PROTECTION_BLOCK_TEXTS,
     PROTECTION_BREAK_TEXTS,
     RANDOM_ROAST_INTRO_TEXTS,
     ROAST_BOT_TEXTS,
@@ -416,7 +416,7 @@ async def _handle_member_roast(matcher: Matcher, bot: Bot, event: GroupMessageEv
             if preparation.status == "protected":
                 await matcher.finish(
                     MessageSegment.reply(event.message_id)
-                    + random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+                    + random.choice(GENERAL_PROTECTION_BLOCK_TEXTS).format(target=target_name)
                 )
                 return
             if preparation.status == "cooldown_denied" and preparation.cooldown:

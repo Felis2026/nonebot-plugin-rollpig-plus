@@ -158,4 +158,4 @@ class ProtectionCouponStoreTests(unittest.IsolatedAsyncioTestCase):
             await flow.build_reservation_outcome(reservation)
         self.assertEqual(success.await_args.kwargs["extra_text"],
                          fixtures.texts_module.SUPER_FORCE_RESERVATION_SUCCESS_TEXT.format(
-                             target="目标", pig="小猪", operator="甲") + "\n\n")
+                             target="目标", pig="小猪", operator="甲"))

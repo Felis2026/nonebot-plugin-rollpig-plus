@@ -687,6 +687,14 @@ PROTECTION_BLOCK_TEXTS = [
     "后厨贴心提醒：【{target}】今天是休养日，单枪匹马可动不了它。",
 ]
 
+# 手动与来源不明的保护复用通用文案，日报保护继续使用休养文案池。
+GENERAL_PROTECTION_BLOCK_TEXTS = [
+    "【{target}】今天享有特殊庇护，寻常火候根本动不了它分毫。",
+    "后厨保安把烤架拦得死死的：'【{target}】今天动不得，单打独斗可破不开这层防线！'",
+    "后厨掌勺的连连摆手：【{target}】今天来头不小，单凭一把小火苗趁早断了念头。",
+    "【{target}】今天这身成色非同寻常，单开一炉的小火，连它的油皮都燎不着。",
+]
+
 # -------- 保护被后门突破文案 --------
 # 占位符：{target} = 受保护的用户昵称
 
@@ -805,6 +813,17 @@ ROAST_RESERVATION_FULL_TEXTS = [
     "蹲【{target}】的队伍满了，一共 {count} 人。\n你晚了一步，下炉赶早。",
 ]
 
+PROTECTED_ROAST_PROGRESS_TEXTS = [
+    "Lv.{level} 的保护令还稳稳挂着，炉底这把火才凑到 {current}/{required}，还得再加把劲！",
+    "Lv.{level} 的后厨防线还结实得很，大伙才拢起 {current}/{required} 点柴火，看守保安连眼皮都没眨。",
+    "才烧到 {current}/{required} 的火势，连 Lv.{level} 门前的铁锁都没燎热，烟大火小，继续添！",
+]
+
+PROTECTED_ROAST_READY_PROGRESS_TEXTS = [
+    "{current}/{required} 满额烈火已经彻底烧穿了 Lv.{level} 的防线，万事俱备，就等正主抽猪现身！",
+    "大伙硬是用 {current}/{required} 堆柴火冲垮了 Lv.{level} 的后厨防线，夹子都拿稳了，专等正主露面抽猪！",
+]
+
 PROTECTED_ROAST_CREATED_TEXTS = [
     "但【{owner}】不打算放过，已经在门口架起炉子摇人了——或许再多凑几个人一起添柴，就能硬生生打破保护！",
     "但【{owner}】偏不死心，已经搬来烤架开始招呼帮厨了——单干虽被拦下，多摇几个人一起添柴说不定就能破防！",
@@ -834,12 +853,6 @@ PROTECTED_ROAST_UNROLLED_CREATED_TEXTS = [
     "虽然【{target}】今天还没抽猪，但炉子可以先热着，等正主现身就开席。",
 ]
 
-PROTECTED_ROAST_READY_WAITING_PIG_TEXTS = [
-    "打破保护的柴火已经凑齐了，现在万事俱备，就差【{target}】今天露面抽猪！",
-    "炉火已经烧到足以破防的程度，只要【{target}】一抽今日小猪，后厨立刻关门点火！",
-    "柴火彻底添够了！保安已经让开道路，就等【{target}】抽出今日小猪自己走进来了。",
-    "围堵【{target}】的火候已经到位，只等这位正主今天抽猪现身，当场开炉！",
-]
 
 PROTECTED_ROAST_JOINED_TEXTS = [
     "【{participant}】拎着刷油刷子赶来添了一把柴，看守【{target}】的后厨保安快拦不住了！",

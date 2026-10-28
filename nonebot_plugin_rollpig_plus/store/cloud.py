@@ -25,6 +25,7 @@ from .models import (
     GroupRoastRefillPrepareResult,
     GroupRoastRefillRequest,
     PigProgress,
+    ProtectionGrantResult,
     RoastEvent,
     RoastReservation,
     RoastReservationClaimResult,
@@ -43,6 +44,10 @@ class CloudStoreError(RuntimeError):
 
 class CloudMakeupUnsupportedError(CloudStoreError):
     pass
+
+
+class CloudManualProtectionUnsupportedError(CloudStoreError):
+    """Cloud 缺少单人保护发放接口，调用方应提示升级。"""
 
 
 class CloudProtectionUnsupportedError(CloudStoreError):
@@ -209,6 +214,7 @@ class CloudStore(RollpigStore):
             ),
             claim_token=str(payload.get("claim_token") or ""),
             protection_required=int(payload.get("protection_required") or 0),
+            protection_source=str(payload.get("protection_source") or "legacy"),
             force_operator_id=str(payload.get("force_operator_id") or ""),
             force_operator_name=str(payload.get("force_operator_name") or ""),
             force_feed_user_ids=tuple(payload.get("force_feed_user_ids") or ()),
@@ -750,15 +756,33 @@ class CloudStore(RollpigStore):
         )
         return bool(payload.get("protected")) if payload else False
 
-    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str) -> int:
-        """读取 Cloud 已落库的保护起始等级，旧响应缺少等级时按一级展示。"""
+    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str, *, daily_only: bool = False) -> int:
+        """读取保护起始等级，daily_only 仅取日报来源，旧响应保留原展示。"""
         payload = await self._request(
             "GET", "/v1/protections/check",
             params={"group_id": group_id, "user_id": user_id, "protect_date": date_str},
         )
         if not payload.get("protected"):
             return 0
+        if daily_only and "daily_base_level" in payload:
+            return min(5, max(0, int(payload["daily_base_level"])))
         return min(5, max(1, int(payload.get("base_level") or 1)))
+
+    async def grant_protection(self, group_id: str, user_id: str, level: int, date_str: Optional[str] = None) -> ProtectionGrantResult:
+        """单独发放手动保护；只有接口缺失才提示升级，其他失败保留账本错误。"""
+        try:
+            payload = await self._request("POST", "/v1/protections/grant", json_body={
+                "group_id": group_id, "user_id": user_id, "level": level,
+                "protect_date": date_str or rollpig_date_str(),
+            })
+        except CloudStoreError as error:
+            cause = error.__cause__
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in {404, 405}:
+                raise CloudManualProtectionUnsupportedError(str(error)) from error
+            raise
+        if not isinstance(payload, dict) or type(payload.get("changed")) is not bool or type(payload.get("level")) is not int or not 1 <= payload["level"] <= 5:
+            raise CloudStoreError("Cloud 保护发放响应无效")
+        return ProtectionGrantResult(level=payload["level"], changed=payload["changed"])
 
     # ================================ 猪圈日报投递 ================================ #
 

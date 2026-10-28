@@ -28,6 +28,10 @@ from .store.models import (
     GroupRoastRefillPrepareResult,
     GroupRoastRefillRequest,
     PigProgress,
+    ProtectionGrantResult,
+    protection_sources,
+    protection_levels,
+    protection_source,
     RoastEvent,
     RoastReservation,
     RoastReservationClaimResult,
@@ -603,6 +607,7 @@ class PigDataManager:
             daily_feed_results=feed_results,
             claim_token=str(raw.get("claim_token") or ""),
             protection_required=int(raw.get("protection_required") or 0),
+            protection_source=str(raw.get("protection_source") or "legacy"),
             force_operator_id=str(raw.get("force_operator_id") or ""),
             force_operator_name=str(raw.get("force_operator_name") or ""),
             force_feed_user_ids=tuple(raw.get("force_feed_user_ids") or ()),
@@ -1343,15 +1348,20 @@ class PigDataManager:
     def _protection_required_locked(self, date_str: str, group_id: str, target_id: str) -> int:
         """按起始保护等级与当日已固化成功场次计算二至六点门槛。"""
 
-        successes = sum(
+        successes = self._protection_successes_locked(date_str, group_id, target_id)
+        details = self.data.get("protection_details", {}).get(date_str, {}).get(group_id, {}).get(target_id, {})
+        return 1 + max(protection_levels(details, successes).values(), default=0)
+
+    def _protection_successes_locked(self, date_str: str, group_id: str, target_id: str) -> int:
+        """按固化结果统计当前群当日保护破防次数。"""
+        total = sum(
             1 for previous in self.data.setdefault("roast_reservations", {}).values()
             if previous.get("date_str") == date_str and previous.get("group_id") == group_id
             and previous.get("target_id") == target_id and previous.get("protection_required")
             and (previous.get("outcome_snapshot") or {}).get("event_type") == "success"
         )
         details = self.data.get("protection_details", {}).get(date_str, {}).get(group_id, {}).get(target_id, {})
-        base_level = max(1, min(5, int(details.get("base_level") or 1)))
-        return 1 + min(5, base_level + successes)
+        return max(0, total - int(details.get("success_offset") or 0))
 
     def _join_reservation_locked(self, raw: dict, user_id: str, name: str, pig_id: str, force_mode: str | None = None) -> RoastReservationPrepareResult:
         """加入或升级本场贡献，加急会消费每日额度，调用方持锁并负责保存。"""
@@ -1477,6 +1487,10 @@ class PigDataManager:
                 "outcome_snapshot": None,
                 "daily_feed_results": None,
                 "protection_required": self._protection_required_locked(target_date, str(group_id), target_id) if is_protected else 0,
+                "protection_source": protection_source(
+                    self.data.get("protection_details", {}).get(target_date, {}).get(str(group_id), {}).get(target_id, {}),
+                    self._protection_successes_locked(target_date, str(group_id), target_id),
+                ),
             }
             raw["participants"][0]["contribution"] = 2 if is_protected and force_mode == "normal" else 1
             if target_pig_id:
@@ -3007,13 +3021,69 @@ class PigDataManager:
         legacy_users = protected_map.get("__all__", [])
         return user_id in group_users or user_id in legacy_users
 
-    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str) -> int:
-        """返回指定群和日期的保护起始等级，未保护为零，旧记录为一级。"""
+    async def get_protection_base_level(self, group_id: str, user_id: str, date_str: str, *, daily_only: bool = False) -> int:
+        """返回保护起始等级；daily_only 仅取日报来源，未保护为零。"""
         async with self._lock:
             if not self.is_protected(group_id, user_id, date_str):
                 return 0
             details = self.data.get("protection_details", {}).get(date_str, {}).get(group_id, {}).get(user_id, {})
+            if daily_only and isinstance(details.get("source_levels"), dict):
+                return int(details["source_levels"].get("daily", 0))
             return min(5, max(1, int(details.get("base_level") or 1)))
+
+    def _sync_pending_protection_locked(self, date_str: str, group_id: str, user_id: str) -> None:
+        """更新等待中的保护条件，保留参与者、已消费额度与已开炉场次。"""
+        details = self.data.get("protection_details", {}).get(date_str, {}).get(group_id, {}).get(user_id, {})
+        protected = self.is_protected(group_id, user_id, date_str)
+        required = self._protection_required_locked(date_str, group_id, user_id) if protected else 0
+        for raw in self.data.get("roast_reservations", {}).values():
+            if (raw.get("date_str"), raw.get("group_id"), raw.get("target_id"), raw.get("status")) != (date_str, group_id, user_id, "pending"):
+                continue
+            if raw.get("force_mode") == "super":
+                continue
+            if not raw.get("protection_required") and raw.get("force_mode") == "normal":
+                # 已消费的普通加急预约转为合围时，原主厨折算为双倍火力。
+                for participant in raw.get("participants", []):
+                    if participant["user_id"] == raw["owner_id"]:
+                        participant["contribution"] = 2
+            raw["protection_required"] = required
+            raw["protection_source"] = protection_source(details, self._protection_successes_locked(date_str, group_id, user_id)) if protected else "legacy"
+            if raw.get("target_pig_id"):
+                self._activate_reservation_locked(raw, raw["target_pig_id"])
+
+    async def grant_protection(self, group_id: str, user_id: str, level: int, date_str: Optional[str] = None) -> ProtectionGrantResult:
+        """原子发放单人当日保护，重复或低等级请求保留已有等级。"""
+        if type(level) is not int or not 1 <= level <= 5:
+            raise ValueError("level must be 1..5")
+        if any(not value or value[0] == "0" or not value.isascii() or not value.isdecimal() or len(value) > 20 for value in (group_id, user_id)):
+            raise ValueError("group_id and user_id must be positive numeric IDs")
+        async with self._lock:
+            today = rollpig_date_str()
+            if date_str is not None and date_str != today:
+                raise ValueError("protect_date must be today")
+            protected = self.data.setdefault("protected", {}).setdefault(today, {})
+            details = self.data.setdefault("protection_details", {}).setdefault(today, {}).setdefault(group_id, {})
+            existing = self.is_protected(group_id, user_id, today)
+            successes = self._protection_successes_locked(today, group_id, user_id)
+            current = self._protection_required_locked(today, group_id, user_id) - 1 if existing else 0
+            changed = level > current
+            if not existing:
+                details[user_id] = {"base_level": 1, "consecutive_days": 0, "source_levels": {}, "success_offset": successes}
+                successes = 0
+            entry = details.setdefault(user_id, {})
+            sources = protection_sources(entry)
+            baselines = dict(entry.get("source_baselines") or {})
+            manual_level = protection_levels(entry, successes).get("manual", 0)
+            if level > manual_level:
+                sources["manual"] = level
+                baselines["manual"] = successes
+            entry["source_levels"] = sources
+            entry["source_baselines"] = baselines
+            entry["base_level"] = max(sources.values())
+            protected[group_id] = sorted(set(protected.get(group_id, [])) | {user_id})
+            self._sync_pending_protection_locked(today, group_id, user_id)
+            await self._atomic_save()
+            return ProtectionGrantResult(level=self._protection_required_locked(today, group_id, user_id) - 1, changed=changed)
 
     async def replace_group_protected_users(
         self,
@@ -3021,7 +3091,7 @@ class PigDataManager:
         user_ids: list[str],
         protect_date: Optional[str] = None,
     ):
-        """按群设置某日受保护的用户列表。"""
+        """替换指定群日的日报保护名单，保留手动来源与已有破防升级。"""
         target_date = protect_date or rollpig_date_str(1)
         async with self._lock:
             protected = self.data.setdefault("protected", {})
@@ -3032,13 +3102,40 @@ class PigDataManager:
             detail_map = self.data.setdefault("protection_details", {})
             previous_details = detail_map.get(previous_date, {}).get(group_id, {})
             current_details = detail_map.setdefault(target_date, {}).setdefault(group_id, {})
-            # 同一天重复发券保留起始等级，不能把已经生效的券重置。
+            current_users = set(day_map.get(group_id, []))
+            # 日报只替换自己的来源，手动保护仍保留在本群有效名单中。
+            for user_id in current_users - set(normalized_ids):
+                entry = current_details.get(user_id, {})
+                sources = protection_sources(entry)
+                sources.pop("daily", None)
+                sources.pop("legacy", None)
+                if sources:
+                    baselines = {source: value for source, value in (entry.get("source_baselines") or {}).items() if source in sources}
+                    current_details[user_id] = {**entry, "source_levels": sources, "source_baselines": baselines,
+                                                "base_level": max(sources.values()), "consecutive_days": 0}
+                else:
+                    current_details.pop(user_id, None)
             for user_id in normalized_ids:
-                if user_id not in current_details:
-                    days = int(previous_details.get(user_id, {}).get("consecutive_days") or 1) + 1 if user_id in previous_users else 1
-                    current_details[user_id] = {"base_level": min(5, 2 + days), "consecutive_days": days}
-            detail_map[target_date][group_id] = {key: value for key, value in current_details.items() if key in normalized_ids}
-            day_map[group_id] = normalized_ids
+                entry = current_details.get(user_id)
+                sources = protection_sources(entry) if entry is not None else {}
+                if "daily" in sources:
+                    continue
+                prior = previous_details.get(user_id, {})
+                previous_days = int(prior.get("consecutive_days", 1)) if user_id in previous_users else 0
+                days = previous_days + 1 if previous_days else 1
+                legacy_level = sources.pop("legacy", 0)
+                baselines = dict((entry or {}).get("source_baselines") or {})
+                if legacy_level:
+                    days = int(entry.get("consecutive_days") or 1)
+                    baselines["daily"] = baselines.pop("legacy", 0)
+                else:
+                    baselines["daily"] = self._protection_successes_locked(target_date, group_id, user_id)
+                sources["daily"] = legacy_level or min(5, 2 + days)
+                current_details[user_id] = {**(entry or {}), "source_levels": sources, "source_baselines": baselines,
+                                            "base_level": max(sources.values()), "consecutive_days": days}
+            day_map[group_id] = sorted(current_details)
+            for user_id in current_users | set(day_map[group_id]):
+                self._sync_pending_protection_locked(target_date, group_id, user_id)
             await self._atomic_save()
 
     async def set_protected_users(self, user_ids: list):
