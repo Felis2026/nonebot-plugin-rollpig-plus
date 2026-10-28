@@ -21,9 +21,16 @@ def protection_sources(details: dict) -> dict[str, int]:
     return dict(sources) if isinstance(sources, dict) else {"legacy": max(1, min(5, int(details.get("base_level") or 1)))}
 
 
+def protection_levels(details: dict, successes: int = 0) -> dict[str, int]:
+    """按各来源获得保护时的破防基准计算当前等级，旧来源基准为零。"""
+    baselines = details.get("source_baselines") or {}
+    return {source: min(5, level + max(0, successes - int(baselines.get(source, 0))))
+            for source, level in protection_sources(details).items()}
+
+
 def protection_source(details: dict, successes: int = 0) -> str:
     """按最高来源等级选择文案，同级优先使用日报池。"""
-    levels = {source: min(5, level + successes) for source, level in protection_sources(details).items()}
+    levels = protection_levels(details, successes)
     highest = max(levels.values(), default=0)
     return next((source for source in ("daily", "manual", "pig", "legacy") if levels.get(source) == highest), "legacy")
 

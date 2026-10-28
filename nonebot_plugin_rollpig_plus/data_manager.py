@@ -30,6 +30,7 @@ from .store.models import (
     PigProgress,
     ProtectionGrantResult,
     protection_sources,
+    protection_levels,
     protection_source,
     RoastEvent,
     RoastReservation,
@@ -1349,8 +1350,7 @@ class PigDataManager:
 
         successes = self._protection_successes_locked(date_str, group_id, target_id)
         details = self.data.get("protection_details", {}).get(date_str, {}).get(group_id, {}).get(target_id, {})
-        base_level = max(1, min(5, int(details.get("base_level") or 1)))
-        return 1 + min(5, base_level + successes)
+        return 1 + max(protection_levels(details, successes).values(), default=0)
 
     def _protection_successes_locked(self, date_str: str, group_id: str, target_id: str) -> int:
         """按固化结果统计当前群当日保护破防次数。"""
@@ -3034,7 +3034,8 @@ class PigDataManager:
     def _sync_pending_protection_locked(self, date_str: str, group_id: str, user_id: str) -> None:
         """更新等待中的保护条件，保留参与者、已消费额度与已开炉场次。"""
         details = self.data.get("protection_details", {}).get(date_str, {}).get(group_id, {}).get(user_id, {})
-        required = self._protection_required_locked(date_str, group_id, user_id)
+        protected = self.is_protected(group_id, user_id, date_str)
+        required = self._protection_required_locked(date_str, group_id, user_id) if protected else 0
         for raw in self.data.get("roast_reservations", {}).values():
             if (raw.get("date_str"), raw.get("group_id"), raw.get("target_id"), raw.get("status")) != (date_str, group_id, user_id, "pending"):
                 continue
@@ -3046,7 +3047,7 @@ class PigDataManager:
                     if participant["user_id"] == raw["owner_id"]:
                         participant["contribution"] = 2
             raw["protection_required"] = required
-            raw["protection_source"] = protection_source(details, self._protection_successes_locked(date_str, group_id, user_id))
+            raw["protection_source"] = protection_source(details, self._protection_successes_locked(date_str, group_id, user_id)) if protected else "legacy"
             if raw.get("target_pig_id"):
                 self._activate_reservation_locked(raw, raw["target_pig_id"])
 
@@ -3071,8 +3072,13 @@ class PigDataManager:
                 successes = 0
             entry = details.setdefault(user_id, {})
             sources = protection_sources(entry)
-            sources["manual"] = max(sources.get("manual", 0), max(1, level - successes))
+            baselines = dict(entry.get("source_baselines") or {})
+            manual_level = protection_levels(entry, successes).get("manual", 0)
+            if level > manual_level:
+                sources["manual"] = level
+                baselines["manual"] = successes
             entry["source_levels"] = sources
+            entry["source_baselines"] = baselines
             entry["base_level"] = max(sources.values())
             protected[group_id] = sorted(set(protected.get(group_id, [])) | {user_id})
             self._sync_pending_protection_locked(today, group_id, user_id)
@@ -3096,14 +3102,17 @@ class PigDataManager:
             detail_map = self.data.setdefault("protection_details", {})
             previous_details = detail_map.get(previous_date, {}).get(group_id, {})
             current_details = detail_map.setdefault(target_date, {}).setdefault(group_id, {})
+            current_users = set(day_map.get(group_id, []))
             # 日报只替换自己的来源，手动保护仍保留在本群有效名单中。
-            for user_id in set(day_map.get(group_id, [])) - set(normalized_ids):
+            for user_id in current_users - set(normalized_ids):
                 entry = current_details.get(user_id, {})
                 sources = protection_sources(entry)
                 sources.pop("daily", None)
                 sources.pop("legacy", None)
                 if sources:
-                    current_details[user_id] = {**entry, "source_levels": sources, "base_level": max(sources.values()), "consecutive_days": 0}
+                    baselines = {source: value for source, value in (entry.get("source_baselines") or {}).items() if source in sources}
+                    current_details[user_id] = {**entry, "source_levels": sources, "source_baselines": baselines,
+                                                "base_level": max(sources.values()), "consecutive_days": 0}
                 else:
                     current_details.pop(user_id, None)
             for user_id in normalized_ids:
@@ -3115,12 +3124,17 @@ class PigDataManager:
                 previous_days = int(prior.get("consecutive_days", 1)) if user_id in previous_users else 0
                 days = previous_days + 1 if previous_days else 1
                 legacy_level = sources.pop("legacy", 0)
+                baselines = dict((entry or {}).get("source_baselines") or {})
                 if legacy_level:
                     days = int(entry.get("consecutive_days") or 1)
+                    baselines["daily"] = baselines.pop("legacy", 0)
+                else:
+                    baselines["daily"] = self._protection_successes_locked(target_date, group_id, user_id)
                 sources["daily"] = legacy_level or min(5, 2 + days)
-                current_details[user_id] = {**(entry or {}), "source_levels": sources, "base_level": max(sources.values()), "consecutive_days": days}
+                current_details[user_id] = {**(entry or {}), "source_levels": sources, "source_baselines": baselines,
+                                            "base_level": max(sources.values()), "consecutive_days": days}
             day_map[group_id] = sorted(current_details)
-            for user_id in day_map[group_id]:
+            for user_id in current_users | set(day_map[group_id]):
                 self._sync_pending_protection_locked(target_date, group_id, user_id)
             await self._atomic_save()
 

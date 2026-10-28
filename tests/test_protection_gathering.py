@@ -109,7 +109,8 @@ class LocalProtectionGatheringTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.replace_group_protected_users("100", ["target"], date)
             await self.manager.replace_group_protected_users("100", ["target"], date)
             detail = self.manager.data["protection_details"][date]["100"]["target"]
-            self.assertEqual(detail, {"base_level": level, "consecutive_days": offset + 1, "source_levels": {"daily": level}})
+            self.assertEqual(detail, {"base_level": level, "consecutive_days": offset + 1,
+                                      "source_levels": {"daily": level}, "source_baselines": {"daily": 0}})
             self.assertEqual(self.manager._protection_required_locked(date, "100", "target"), level + 1)
         await self.manager.replace_group_protected_users("100", ["target"], "2026-08-12")
         await self.manager.replace_group_protected_users("200", ["target"], "2026-08-10")

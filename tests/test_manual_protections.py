@@ -86,7 +86,8 @@ class LocalManualProtectionTests(unittest.IsolatedAsyncioTestCase):
             "status": "completed", "outcome_snapshot": {"event_type": "success"},
         }
         self.assertEqual(await self.grant(), ProtectionGrantResult(5, True))
-        self.assertEqual(self.details()["base_level"], 4)
+        self.assertEqual(self.details()["base_level"], 5)
+        self.assertEqual(self.details()["source_baselines"]["manual"], 1)
         self.assertEqual(await self.grant(), ProtectionGrantResult(5, False))
 
     async def test_removing_daily_source_uses_remaining_manual_level_for_pending_round(self):
@@ -157,6 +158,71 @@ class LocalManualProtectionTests(unittest.IsolatedAsyncioTestCase):
         reservation = (await self.prepare()).reservation
         self.assertEqual((reservation.protection_required, reservation.protection_source), (5, "legacy"))
         self.assertEqual(self.details(), {"base_level": 4, "consecutive_days": 2})
+
+    async def test_new_manual_source_ignores_old_breakthroughs_and_keeps_later_upgrades(self):
+        for count in (2, 6):
+            with self.subTest(count=count):
+                self.manager.data["protected"] = {}
+                self.manager.data["protection_details"] = {}
+                self.manager.data["roast_reservations"] = {}
+                await self.manager.replace_group_protected_users("100", ["2"], DATE)
+                for index in range(count):
+                    self.manager.data["roast_reservations"][str(index)] = {
+                        "date_str": DATE, "group_id": "100", "target_id": "2", "protection_required": 4,
+                        "status": "completed", "outcome_snapshot": {"event_type": "success"},
+                    }
+                await self.grant(1)
+                await self.manager.replace_group_protected_users("100", [], DATE)
+                self.assertEqual(self.manager._protection_required_locked(DATE, "100", "2"), 2)
+                self.manager.data["roast_reservations"]["later"] = {
+                    "date_str": DATE, "group_id": "100", "target_id": "2", "protection_required": 2,
+                    "status": "completed", "outcome_snapshot": {"event_type": "success"},
+                }
+                self.assertEqual(await self.grant(1), ProtectionGrantResult(2, False))
+                self.assertEqual(self.details()["source_baselines"]["manual"], count)
+                self.assertEqual(await self.grant(3), ProtectionGrantResult(3, True))
+                self.assertEqual(self.details()["source_baselines"]["manual"], count + 1)
+
+    async def test_new_daily_source_does_not_inherit_manual_breakthroughs(self):
+        await self.grant(1)
+        for index in range(2):
+            self.manager.data["roast_reservations"][str(index)] = {
+                "date_str": DATE, "group_id": "100", "target_id": "2", "protection_required": 2,
+                "status": "completed", "outcome_snapshot": {"event_type": "success"},
+            }
+        await self.manager.replace_group_protected_users("100", ["2"], DATE)
+        self.assertEqual(self.details()["source_baselines"]["daily"], 2)
+        self.assertEqual(self.manager._protection_required_locked(DATE, "100", "2"), 4)
+
+    async def test_removing_last_source_restores_ordinary_reservation_before_or_after_arrival(self):
+        for index, arrived in enumerate((False, True)):
+            with self.subTest(arrived=arrived):
+                self.manager.data["history"] = {}
+                self.manager.data["roast_reservations"] = {}
+                created = await self.prepare(user=str(30 + index))
+                await self.manager.replace_group_protected_users("100", ["2"], DATE)
+                if arrived:
+                    await self.manager.get_or_create_today_pig("2", "pig", DATE, group_id="100")
+                raw = self.manager.data["roast_reservations"][created.reservation.reservation_id]
+                self.assertEqual(raw["status"], "pending")
+                await self.manager.replace_group_protected_users("100", [], DATE)
+                self.assertFalse(self.manager.is_protected("100", "2", DATE))
+                self.assertEqual(raw["protection_required"], 0)
+                self.assertEqual(raw["status"], "ready" if arrived else "pending")
+                await self.manager.get_or_create_today_pig("2", "pig", DATE, group_id="100")
+                self.assertEqual(raw["status"], "ready")
+
+    async def test_removing_last_source_does_not_rewrite_fixed_or_sending_results(self):
+        for index, status in enumerate(("processing", "prepared", "sending")):
+            with self.subTest(status=status):
+                self.manager.data["roast_reservations"] = {}
+                created = await self.prepare(user=str(50 + index))
+                await self.manager.replace_group_protected_users("100", ["2"], DATE)
+                raw = self.manager.data["roast_reservations"][created.reservation.reservation_id]
+                raw.update(status=status, outcome_snapshot={"event_type": "success"}, claim_token="token")
+                await self.manager.replace_group_protected_users("100", [], DATE)
+                self.assertEqual((raw["status"], raw["protection_required"], raw["claim_token"]), (status, 4, "token"))
+                self.assertEqual(raw["outcome_snapshot"], {"event_type": "success"})
 
     async def test_reserved_pig_source_survives_daily_replacement_without_affecting_streak(self):
         await self.manager.replace_group_protected_users("100", ["2"], DATE)
@@ -231,3 +297,18 @@ class ProtectionEntryBoundaryTests(unittest.TestCase):
         for level in range(6):
             self.assertEqual(resolve_pig_protection_level({"id": "pig"}, level), 0)
         self.assertEqual(protection_source({"source_levels": {"daily": 3, "pig": 4}}), "pig")
+
+
+class ReassignedReservationNoticeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reassigned_ready_round_delivers_without_sending_another_join_notice(self):
+        preparation = SimpleNamespace(status="reservation_busy", reservation=SimpleNamespace(
+            status="ready", delivery_bot_id="new", reservation_id="round",
+        ))
+        matcher = SimpleNamespace(send=AsyncMock(), finish=AsyncMock())
+        event = SimpleNamespace(self_id="new", message_id=1, group_id=100)
+        with patch.object(fixtures.roast_handler, "deliver_newly_ready_reservations", new=AsyncMock()) as deliver:
+            await fixtures.roast_handler._send_reservation_notice(matcher, event, preparation,
+                                                                attacker_name="主厨", target_name="目标")
+        deliver.assert_awaited_once_with("new")
+        matcher.send.assert_not_awaited()
+        matcher.finish.assert_awaited_once_with()
