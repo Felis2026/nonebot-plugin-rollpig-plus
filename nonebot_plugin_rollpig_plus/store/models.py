@@ -372,6 +372,7 @@ class RoastReservationPrepareResult:
 class RoastReservationClaimResult:
     reservations: tuple[RoastReservation, ...] = ()
     has_owned: bool = False
+    waiting_notices: tuple[RoastReservation, ...] = ()
 
 
 @dataclass(frozen=True)

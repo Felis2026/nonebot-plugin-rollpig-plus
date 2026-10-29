@@ -277,6 +277,10 @@ class RollpigStore(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    async def transition_roast_waiting_notice(self, reservation: RoastReservation, action: str) -> bool:
+        """更新等待提示的发送状态，与预约开炉结果分开保存。"""
+        raise NotImplementedError
+
     @abstractmethod
     async def save_roast_reservation_outcome(
         self,

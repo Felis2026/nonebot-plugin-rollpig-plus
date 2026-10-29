@@ -53,7 +53,7 @@ from .texts import (
     SUPER_FORCE_RESERVATION_DUPLICATE_TEXT,
     SUPER_FORCE_RESERVATION_TAKEOVER_TEXT,
 )
-from .store.models import RoastReservationPrepareResult
+from .store.models import RoastReservation, RoastReservationPrepareResult
 
 
 @dataclass(frozen=True)
@@ -74,6 +74,18 @@ class RoastOutcome:
 
 class RoastFoodMissingError(RuntimeError):
     """熟食资源缺失时抛出；由命令层转换成用户可读提示。"""
+
+
+def pick_protected_waiting_text(reservation: RoastReservation) -> str:
+    """复用保护拦截与火力进度，说明目标到场后仍需添柴的原因。"""
+    pool = PROTECTION_BLOCK_TEXTS if reservation.protection_source == "daily" else GENERAL_PROTECTION_BLOCK_TEXTS
+    opening = random.choice(pool).format(target=reservation.target_name)
+    progress = random.choice(PROTECTED_ROAST_PROGRESS_TEXTS).format(
+        level=max(1, reservation.protection_required - 1),
+        current=reservation.contribution_count,
+        required=reservation.protection_required,
+    )
+    return opening + "\n" + progress
 
 
 def pick_reservation_prepare_text(

@@ -41,6 +41,7 @@ from nonebot_plugin_rollpig_plus.store.cloud import CloudReservationUnsupportedE
 from nonebot_plugin_rollpig_plus.store.models import (
     RoastEvent,
     RoastReservation,
+    RoastReservationClaimResult,
     RoastReservationParticipant,
     UnrolledRoastAttemptResult,
 )
@@ -1577,7 +1578,7 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 })
                 bot = SimpleNamespace(send_group_msg=AsyncMock())
                 mocked_store = SimpleNamespace(
-                    claim_roast_reservations=AsyncMock(return_value=SimpleNamespace(reservations=(prepared,), has_owned=True)),
+                    claim_roast_reservations=AsyncMock(return_value=RoastReservationClaimResult(reservations=(prepared,), has_owned=True)),
                     mark_roast_reservation_sending=AsyncMock(return_value=prepared),
                     complete_roast_reservation=AsyncMock(return_value=True),
                 )
@@ -1828,8 +1829,8 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         mocked_store = SimpleNamespace(
             claim_roast_reservations=AsyncMock(
                 side_effect=[
-                    SimpleNamespace(reservations=(reservation,), has_owned=True),
-                    SimpleNamespace(reservations=(), has_owned=True),
+                    RoastReservationClaimResult(reservations=(reservation,), has_owned=True),
+                    RoastReservationClaimResult(reservations=(), has_owned=True),
                 ]
             ),
             release_roast_reservation=AsyncMock(return_value=True),
@@ -1862,7 +1863,7 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_group_msg=AsyncMock())
         mocked_store = SimpleNamespace(
             claim_roast_reservations=AsyncMock(
-                return_value=SimpleNamespace(reservations=(reservation,), has_owned=True)
+                return_value=RoastReservationClaimResult(reservations=(reservation,), has_owned=True)
             ),
             save_roast_reservation_outcome=AsyncMock(return_value=updated),
             release_roast_reservation=AsyncMock(return_value=True),
@@ -1916,7 +1917,7 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_group_msg=AsyncMock(side_effect=send_group_msg))
         mocked_store = SimpleNamespace(
             claim_roast_reservations=AsyncMock(
-                return_value=SimpleNamespace(reservations=(reservation,), has_owned=True)
+                return_value=RoastReservationClaimResult(reservations=(reservation,), has_owned=True)
             ),
             save_roast_reservation_outcome=AsyncMock(return_value=prepared),
             mark_roast_reservation_sending=AsyncMock(side_effect=mark_sending),
@@ -1957,7 +1958,7 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_group_msg=AsyncMock())
         mocked_store = SimpleNamespace(
             claim_roast_reservations=AsyncMock(
-                return_value=SimpleNamespace(reservations=(reservation,), has_owned=True)
+                return_value=RoastReservationClaimResult(reservations=(reservation,), has_owned=True)
             ),
             save_roast_reservation_outcome=AsyncMock(return_value=prepared),
             mark_roast_reservation_sending=AsyncMock(),
@@ -1991,11 +1992,11 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_target_resource_releases_without_finalizing(self):
         reservation = self._reservation()
         bot = SimpleNamespace(send_group_msg=AsyncMock())
-        empty_claim = SimpleNamespace(reservations=(), has_owned=True)
+        empty_claim = RoastReservationClaimResult(reservations=(), has_owned=True)
         mocked_store = SimpleNamespace(
             claim_roast_reservations=AsyncMock(
                 side_effect=[
-                    SimpleNamespace(reservations=(reservation,), has_owned=True),
+                    RoastReservationClaimResult(reservations=(reservation,), has_owned=True),
                     empty_claim,
                 ]
             ),
@@ -2044,7 +2045,7 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_group_msg=AsyncMock(side_effect=RuntimeError("unknown result")))
         mocked_store = SimpleNamespace(
             claim_roast_reservations=AsyncMock(
-                return_value=SimpleNamespace(reservations=(prepared,), has_owned=True)
+                return_value=RoastReservationClaimResult(reservations=(prepared,), has_owned=True)
             ),
             mark_roast_reservation_sending=AsyncMock(return_value=sending),
             release_roast_reservation=AsyncMock(return_value=True),
@@ -2077,10 +2078,7 @@ class RoastReservationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(send_group_msg=AsyncMock())
         mocked_store = SimpleNamespace(
             claim_roast_reservations=AsyncMock(
-                return_value=SimpleNamespace(
-                    reservations=(reservation,),
-                    has_owned=True,
-                )
+                return_value=RoastReservationClaimResult(reservations=(reservation,), has_owned=True)
             ),
             save_roast_reservation_outcome=AsyncMock(
                 side_effect=[CloudStoreError("prepare response lost"), prepared]
@@ -2239,6 +2237,7 @@ class CloudReservationCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 "delivery_bot_id": "bot-1",
                 "date_str": "2026-08-07",
                 "supports_prepared": True,
+                "supports_waiting_notice": True,
                 "supports_protection_gathering": True,
                 "protection_gathering_version": 2,
                 "excluded_reservation_ids": ["reservation-a", "reservation-b"],
