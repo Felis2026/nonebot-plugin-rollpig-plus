@@ -24,6 +24,7 @@ from .roast_flow import (
     is_human_pig,
     is_sold_pig,
     pick_food_pig,
+    pick_protected_waiting_text,
 )
 from .store import store
 from .store.models import RoastEvent, RoastReservation
@@ -585,6 +586,52 @@ async def _send_reservation_message(bot, reservation: RoastReservation, message)
     await bot.send_group_msg(group_id=int(reservation.group_id), message=message)
 
 
+async def _transition_waiting_notice(reservation: RoastReservation, action: str) -> bool:
+    """使用同一 token 幂等重试提示状态，响应丢失时不重复发送群消息。"""
+    for delay in (0.0, 0.25, 0.75):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await store.transition_roast_waiting_notice(reservation, action)
+        except Exception as error:
+            logger.warning(
+                f"rollpig 等待提示状态更新失败: reservation={reservation.reservation_id} action={action} error={error}"
+            )
+    return False
+
+
+async def _deliver_waiting_notices(bot, notices: tuple[RoastReservation, ...]) -> None:
+    """发送目标到场后未达标的保护提示，不生成烧烤结果或消费额度。"""
+    for reservation in notices:
+        try:
+            if not is_group_rollpig_enabled(reservation.group_id):
+                _defer_for_disabled_group(reservation)
+                await _transition_waiting_notice(reservation, "release")
+                continue
+            message = MessageSegment.text(pick_protected_waiting_text(reservation))
+        except Exception as error:
+            await _transition_waiting_notice(reservation, "release")
+            logger.warning(f"rollpig 等待提示准备失败: reservation={reservation.reservation_id} error={error}")
+            continue
+        if not await _transition_waiting_notice(reservation, "sending"):
+            continue
+        try:
+            result = await bot.send_group_msg(group_id=int(reservation.group_id), message=message)
+        except Exception as error:
+            # 与烧烤结果一样，外部发送报错可能发生在消息送达后，保留 sending 防止刷屏。
+            logger.error(f"rollpig 等待提示发送结果不确定: reservation={reservation.reservation_id} error={error}")
+            continue
+        await _transition_waiting_notice(reservation, "sent")
+        try:
+            if isinstance(result, dict) and result.get("message_id"):
+                await store.bind_roast_reservation_message(
+                    reservation_id=reservation.reservation_id, bot_id=reservation.delivery_bot_id,
+                    group_id=reservation.group_id, message_id=str(result["message_id"]), date_str=reservation.date_str,
+                )
+        except Exception as error:
+            logger.warning(f"rollpig 等待提示关联未保存，仍可通过烤群友加入: reservation={reservation.reservation_id} error={error}")
+
+
 async def deliver_ready_reservations(delivery_bot_id: str) -> ReservationDeliveryResult:
     """机会式领取并投递当前 Bot 的 ready 预约；失败只 release，不重新随机。"""
 
@@ -595,6 +642,7 @@ async def deliver_ready_reservations(delivery_bot_id: str) -> ReservationDeliver
         str(delivery_bot_id),
         excluded_reservation_ids=_active_backoff_reservation_ids(),
     )
+    await _deliver_waiting_notices(bot, claimed.waiting_notices)
     completed = 0
     for reservation in claimed.reservations:
         if not is_group_rollpig_enabled(reservation.group_id):

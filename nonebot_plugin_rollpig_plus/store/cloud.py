@@ -1059,6 +1059,7 @@ class CloudStore(RollpigStore):
                 "delivery_bot_id": delivery_bot_id,
                 "date_str": date_str or rollpig_date_str(),
                 "supports_prepared": True,
+                "supports_waiting_notice": True,
                 "supports_protection_gathering": True,
                 "protection_gathering_version": 2,
                 "excluded_reservation_ids": sorted(excluded_reservation_ids or ()),
@@ -1073,7 +1074,20 @@ class CloudStore(RollpigStore):
             # 旧 Cloud 没有 has_owned；若已经返回项目，至少保留本轮 Owner 状态，
             # 避免安全降级期间过早停止后续恢复。
             has_owned=bool(payload.get("has_owned", payload.get("items"))),
+            waiting_notices=tuple(
+                reservation
+                for item in payload.get("waiting_notices", [])
+                if (reservation := self._parse_reservation(item)) is not None
+            ),
         )
+
+    async def transition_roast_waiting_notice(self, reservation: RoastReservation, action: str) -> bool:
+        """通过独立接口推进等待提示，旧 Cloud 未返回提示时不会调用此接口。"""
+        payload = await self._reservation_request(
+            "POST", "/v1/roast-reservations/waiting-notice",
+            json_body={"reservation_id": reservation.reservation_id, "claim_token": reservation.claim_token, "action": action},
+        )
+        return bool(payload.get("ok"))
 
     async def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
         payload = await self._reservation_request(

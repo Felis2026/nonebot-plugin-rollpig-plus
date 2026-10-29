@@ -1329,19 +1329,24 @@ class PigDataManager:
             pig_id = history.get(attacker_id)
             if not pig_id:
                 return RoastReservationPrepareResult("attacker_unrolled")
+            had_notice = bool(raw.get("waiting_notice"))
             result = self._join_reservation_locked(raw, attacker_id, attacker_name, str(pig_id))
-            if result.status == "reservation_joined":
+            if result.status == "reservation_joined" or (had_notice and result.status == "already_joined"):
                 await self._atomic_save()
             return result
 
-    def _activate_reservation_locked(self, raw: dict, pig_id: str) -> None:
-        """目标有今日小猪且集结达标时冻结本场参与者并等待投递。"""
+    def _activate_reservation_locked(self, raw: dict, pig_id: str, *, notify_waiting: bool = True) -> None:
+        """目标到场后激活场次；未达标时登记提示，直接回复进度的入口传入 notify_waiting=False。"""
 
+        first_arrival = not raw.get("target_pig_id")
         raw["target_pig_id"] = pig_id
         participants = raw.get("participants", [])
         if raw.get("protection_required") and raw.get("force_mode") != "super":
             if sum(int(item.get("contribution") or 1) for item in participants) < raw["protection_required"]:
+                if first_arrival and notify_waiting:
+                    raw["waiting_notice"] = {"status": "pending"}
                 return
+        raw.pop("waiting_notice", None)
         raw["status"] = "ready"
         raw["ready_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -1386,6 +1391,7 @@ class PigDataManager:
         participant = next((item for item in participants if isinstance(item, dict) and str(item.get("user_id")) == user_id), None)
         boosted = bool(raw.get("protection_required") and force_mode == "normal")
         if participant is not None and not (boosted and int(participant.get("contribution") or 1) < 2) and force_mode != "super":
+            raw.pop("waiting_notice", None)
             return RoastReservationPrepareResult("already_joined", self._reservation_from_raw(raw))
         if participant is None and len(participants) >= ROAST_RESERVATION_MAX_PARTICIPANTS:
             return RoastReservationPrepareResult("reservation_full", self._reservation_from_raw(raw))
@@ -1400,8 +1406,10 @@ class PigDataManager:
             raw["force_mode"] = "super"
         # 回复加入也代表今日小猪在本群出现，必须与参与者名单一起落盘。
         self._record_group_roll(raw["date_str"], raw["group_id"], user_id, pig_id)
+        # 加入指令会直接回复最新进度，取消尚未发送的后台等待提示。
+        raw.pop("waiting_notice", None)
         if raw.get("target_pig_id"):
-            self._activate_reservation_locked(raw, raw["target_pig_id"])
+            self._activate_reservation_locked(raw, raw["target_pig_id"], notify_waiting=False)
         return RoastReservationPrepareResult("reservation_upgraded" if upgraded else "reservation_joined", self._reservation_from_raw(raw))
 
     async def prepare_roast_reservation(
@@ -1435,8 +1443,9 @@ class PigDataManager:
             if existing is not None:
                 if existing.get("status") != "pending":
                     return RoastReservationPrepareResult("reservation_busy", self._reservation_from_raw(existing))
+                had_notice = bool(existing.get("waiting_notice"))
                 result = self._join_reservation_locked(existing, attacker_id, str(attacker_name), str(attacker_pig_id), force_mode)
-                if result.status in {"reservation_joined", "reservation_upgraded"}:
+                if result.status in {"reservation_joined", "reservation_upgraded"} or (had_notice and result.status == "already_joined"):
                     await self._atomic_save()
                 return result
 
@@ -1494,7 +1503,7 @@ class PigDataManager:
             }
             raw["participants"][0]["contribution"] = 2 if is_protected and force_mode == "normal" else 1
             if target_pig_id:
-                self._activate_reservation_locked(raw, str(target_pig_id))
+                self._activate_reservation_locked(raw, str(target_pig_id), notify_waiting=False)
             self.data.setdefault("roast_reservations", {})[reservation_id] = raw
             self._mark_group_active_users_locked(target_date, str(group_id), [attacker_id])
             await self._atomic_save()
@@ -1516,12 +1525,26 @@ class PigDataManager:
         target_date = date_str or rollpig_date_str()
         excluded_ids = set(excluded_reservation_ids or ())
         claimed: list[RoastReservation] = []
+        waiting_notices: list[RoastReservation] = []
         async with self._lock:
             now = datetime.datetime.now(datetime.timezone.utc)
             reservations = self.data.setdefault("roast_reservations", {})
             for reservation_id, raw in reservations.items():
                 if not isinstance(raw, dict):
                     continue
+                notice = raw.get("waiting_notice") or {}
+                notice_time = _parse_utc_datetime(notice.get("claimed_at"))
+                notice_available = notice.get("status") == "pending" or (
+                    notice.get("status") == "processing" and notice_time is not None
+                    and (now - notice_time).total_seconds() >= ROAST_RESERVATION_CLAIM_TIMEOUT_SECONDS
+                )
+                if (raw.get("date_str") == target_date and raw.get("delivery_bot_id") == str(delivery_bot_id)
+                        and raw.get("status") == "pending" and raw.get("target_pig_id")
+                        and raw.get("protection_required") and raw.get("force_mode") != "super"
+                        and reservation_id not in excluded_ids and notice_available and len(waiting_notices) < 12):
+                    token = uuid.uuid4().hex
+                    raw["waiting_notice"] = {"status": "processing", "claim_token": token, "claimed_at": now.isoformat()}
+                    waiting_notices.append(replace(self._reservation_from_raw(raw), claim_token=token))
                 claimed_at = raw.get("claimed_at")
                 stale_presend = False
                 # processing 负责生成结果，prepared 表示结果已固化但还在渲染消息；两者
@@ -1553,7 +1576,7 @@ class PigDataManager:
                     raw["claim_token"] = uuid.uuid4().hex
                     raw["claimed_at"] = now.isoformat()
                     claimed.append(self._reservation_from_raw(raw))
-            if claimed:
+            if claimed or waiting_notices:
                 await self._atomic_save()
             has_owned = any(
                 isinstance(raw, dict)
@@ -1562,7 +1585,28 @@ class PigDataManager:
                 and raw.get("status") in {"pending", "ready", "processing", "prepared"}
                 for raw in reservations.values()
             )
-        return RoastReservationClaimResult(tuple(claimed), has_owned=has_owned)
+        return RoastReservationClaimResult(tuple(claimed), has_owned=has_owned, waiting_notices=tuple(waiting_notices))
+
+    async def transition_roast_waiting_notice(self, reservation_id: str, claim_token: str, action: str) -> bool:
+        """独立保存等待提示发送状态，已开炉或换 token 的提示不能继续发送。"""
+        async with self._lock:
+            raw = self._find_reservation_locked(reservation_id)
+            notice = dict(raw.get("waiting_notice") or {}) if raw is not None else {}
+            if (raw is None or raw.get("status") != "pending" or raw.get("date_str") != rollpig_date_str()
+                    or not claim_token or notice.get("claim_token") != claim_token):
+                return False
+            state = notice.get("status")
+            if action == "sending" and state in {"processing", "sending"}:
+                notice["status"] = "sending"
+            elif action == "sent" and state in {"sending", "sent"}:
+                notice["status"] = "sent"
+            elif action == "release" and state == "processing":
+                notice = {"status": "pending"}
+            else:
+                return False
+            raw["waiting_notice"] = notice
+            await self._atomic_save()
+            return True
 
     def has_owned_roast_reservations(self, delivery_bot_id: str, date_str: Optional[str] = None) -> bool:
         target_date = date_str or rollpig_date_str()
@@ -3046,10 +3090,13 @@ class PigDataManager:
                 for participant in raw.get("participants", []):
                     if participant["user_id"] == raw["owner_id"]:
                         participant["contribution"] = 2
+            previous_required = raw.get("protection_required") or 0
             raw["protection_required"] = required
             raw["protection_source"] = protection_source(details, self._protection_successes_locked(date_str, group_id, user_id)) if protected else "legacy"
             if raw.get("target_pig_id"):
                 self._activate_reservation_locked(raw, raw["target_pig_id"])
+                if raw.get("status") == "pending" and previous_required != required:
+                    raw["waiting_notice"] = {"status": "pending"}
 
     async def grant_protection(self, group_id: str, user_id: str, level: int, date_str: Optional[str] = None) -> ProtectionGrantResult:
         """原子发放单人当日保护，重复或低等级请求保留已有等级。"""

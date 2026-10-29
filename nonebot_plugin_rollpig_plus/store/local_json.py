@@ -320,6 +320,9 @@ class LocalJsonStore(RollpigStore):
             reservation.claim_token,
         )
 
+    async def transition_roast_waiting_notice(self, reservation: RoastReservation, action: str) -> bool:
+        return await self.manager.transition_roast_waiting_notice(reservation.reservation_id, reservation.claim_token, action)
+
     # ================================ 烤箱补货 ================================ #
 
     async def mark_group_active_users(

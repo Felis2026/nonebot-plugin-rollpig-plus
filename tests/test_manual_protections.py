@@ -12,7 +12,7 @@ import httpx
 import test_roast_reservations as fixtures
 from nonebot_plugin_rollpig_plus import texts
 from nonebot_plugin_rollpig_plus.handlers import control
-from nonebot_plugin_rollpig_plus.roast_flow import pick_reservation_prepare_text
+from nonebot_plugin_rollpig_plus.roast_flow import pick_reservation_prepare_text, pick_protected_waiting_text
 from nonebot_plugin_rollpig_plus.roll_flow import resolve_pig_protection_level
 from nonebot_plugin_rollpig_plus.store.cloud import CloudManualProtectionUnsupportedError, CloudStore, CloudStoreError
 from nonebot_plugin_rollpig_plus.store.models import ProtectionGrantResult, protection_source
@@ -56,6 +56,78 @@ class LocalManualProtectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(reloaded.is_protected("100", "2", "2026-10-28"))
         self.assertEqual(self.details()["source_levels"], {"manual": 5})
         self.assertEqual(self.details()["consecutive_days"], 0)
+
+    async def arrive_for_notice(self):
+        """使用正式抽猪事务使目标到场，覆盖 JSON 保存与重新加载。"""
+        await self.manager.get_or_create_today_pig("2", "pig", DATE, group_id="100")
+
+    async def test_waiting_notice_arrival_persistence_and_no_duplicate_after_send(self):
+        await self.prepare()
+        await self.grant(1)
+        await self.arrive_for_notice()
+        reloaded = fixtures.PigDataManager()
+        claimed = await reloaded.claim_roast_reservations("bot", DATE)
+        item, = claimed.waiting_notices
+        self.assertFalse(claimed.reservations)
+        self.assertEqual((item.status, item.contribution_count, item.protection_required), ("pending", 1, 2))
+        message = pick_protected_waiting_text(item)
+        self.assertIn("1/2", message)
+        self.assertIn("Lv.1", message)
+        self.assertIn("【目标】", message)
+        self.assertFalse((await reloaded.claim_roast_reservations("bot", DATE)).waiting_notices)
+        for action in ("sending", "sending", "sent", "sent"):
+            self.assertTrue(await reloaded.transition_roast_waiting_notice(item.reservation_id, item.claim_token, action))
+        await reloaded.get_or_create_today_pig("2", "pig", DATE, group_id="100")
+        self.assertFalse((await reloaded.claim_roast_reservations("bot", DATE)).waiting_notices)
+        self.assertEqual(reloaded.data["roast_reservations"][item.reservation_id]["status"], "pending")
+
+    async def test_waiting_notice_lease_release_and_uncertain_send(self):
+        await self.grant()
+        await self.prepare()
+        await self.arrive_for_notice()
+        first, = (await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices
+        self.assertTrue(await self.manager.transition_roast_waiting_notice(first.reservation_id, first.claim_token, "release"))
+        second, = (await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices
+        self.assertNotEqual(first.claim_token, second.claim_token)
+        self.assertFalse(await self.manager.transition_roast_waiting_notice(first.reservation_id, first.claim_token, "sending"))
+        raw = self.manager.data["roast_reservations"][first.reservation_id]
+        raw["waiting_notice"]["claimed_at"] = "2000-01-01T00:00:00+00:00"
+        third, = (await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices
+        self.assertNotEqual(second.claim_token, third.claim_token)
+        self.assertTrue(await self.manager.transition_roast_waiting_notice(third.reservation_id, third.claim_token, "sending"))
+        raw["waiting_notice"]["claimed_at"] = "2000-01-01T00:00:00+00:00"
+        self.assertFalse((await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices)
+        self.assertFalse(await self.manager.transition_roast_waiting_notice(third.reservation_id, third.claim_token, "release"))
+
+    async def test_direct_prepare_and_later_join_do_not_duplicate_background_progress(self):
+        await self.grant(2)
+        await self.arrive_for_notice()
+        await self.prepare()
+        self.assertFalse((await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices)
+        await self.grant(3)
+        item, = (await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices
+        await self.prepare("4")
+        self.assertFalse(await self.manager.transition_roast_waiting_notice(item.reservation_id, item.claim_token, "sending"))
+        self.assertFalse((await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices)
+
+    async def test_waiting_notice_owner_exclusion_and_new_threshold(self):
+        await self.grant(1)
+        prepared = await self.prepare()
+        await self.arrive_for_notice()
+        self.assertFalse((await self.manager.claim_roast_reservations("other", DATE)).waiting_notices)
+        self.assertFalse((await self.manager.claim_roast_reservations("bot", DATE, {prepared.reservation.reservation_id})).waiting_notices)
+        first, = (await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices
+        for action in ("sending", "sent"):
+            await self.manager.transition_roast_waiting_notice(first.reservation_id, first.claim_token, action)
+        await self.grant(1)
+        self.assertFalse((await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices)
+        await self.grant(3)
+        second, = (await self.manager.claim_roast_reservations("bot", DATE)).waiting_notices
+        self.assertEqual(second.protection_required, 4)
+        await self.prepare("3", force_mode="super")
+        claimed = await self.manager.claim_roast_reservations("bot", DATE)
+        self.assertFalse(claimed.waiting_notices)
+        self.assertEqual(len(claimed.reservations), 1)
 
     async def test_daily_replacement_and_manual_streak_are_independent(self):
         await self.grant()
